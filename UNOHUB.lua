@@ -1,5 +1,5 @@
 --[[
-    UNO HUB · Performance + Config restored on clean base
+    UNO HUB · Responsive UIScale
     Grow a Chicken Fighter
     SOURCE A: createAutoSellChickens + AutoSellFeature + Chickens UI
     SOURCE B: resolveEggDisplayName / rarity / ability + TextLabel Size
@@ -4850,12 +4850,17 @@ do
             return {
                 showFloatingButton = State.toggles.showFloatingButton ~= false,
                 reducedMotion = State.toggles.reducedMotion == true,
+                responsiveUI = RESPONSIVE.enabled ~= false,
+                uiScaleMode = RESPONSIVE.mode or "Auto",
             }
         end, function(data)
             if type(data) ~= "table" then return end
             if data.showFloatingButton ~= nil then State.toggles.showFloatingButton = data.showFloatingButton == true end
             if data.reducedMotion ~= nil then State.toggles.reducedMotion = data.reducedMotion == true end
-        end, { defaults = { showFloatingButton = true, reducedMotion = false } })
+            if data.responsiveUI ~= nil then RESPONSIVE.enabled = data.responsiveUI == true end
+            if type(data.uiScaleMode) == "string" then RESPONSIVE.mode = data.uiScaleMode end
+            if type(updateResponsiveScale) == "function" then pcall(updateResponsiveScale) end
+        end, { defaults = { showFloatingButton = true, reducedMotion = false, responsiveUI = true, uiScaleMode = "Auto" } })
     end
 end
 
@@ -4873,9 +4878,102 @@ Gui.Name = "UNO_HUB"; Gui.ResetOnSpawn = false; Gui.IgnoreGuiInset = true; Gui.D
 Gui:SetAttribute("UNO_HUB_Shutdown", false); Gui.Parent = PlayerGui
 
 local Main = Instance.new("Frame")
+Main.Name = "Main"
 Main.Size = UDim2.fromOffset(900, 560); Main.Position = UDim2.fromScale(0.5, 0.5); Main.AnchorPoint = Vector2.new(0.5, 0.5)
 Main.BackgroundColor3 = Theme.Background; Main.BorderSizePixel = 0; Main.ClipsDescendants = true; Main.Parent = Gui
 corner(Main, 12); stroke(Main)
+
+-- Responsive UIScale (UI only — does not affect VisualCover ScreenGui)
+local MainUIScale = Instance.new("UIScale")
+MainUIScale.Name = "ResponsiveScale"
+MainUIScale.Scale = 1
+MainUIScale.Parent = Main
+
+local RESPONSIVE = {
+    enabled = true,
+    mode = "Auto", -- Auto | 1.0 | 0.9 | 0.8 | 0.7
+    refW = 1920,
+    refH = 1080,
+    baseW = 900,
+    baseH = 560,
+    sidebarNormal = 200,
+    sidebarSmall = 155,
+    sidebarTiny = 140,
+    minScale = 0.55,
+    maxScale = 1.00,
+    maxViewportW = 0.88,
+    maxViewportH = 0.84,
+}
+
+local function getViewportSize()
+    local cam = Workspace.CurrentCamera
+    if cam and typeof(cam.ViewportSize) == "Vector2" then
+        return cam.ViewportSize
+    end
+    return Vector2.new(1280, 720)
+end
+
+local function clampFloatInViewport()
+    if not Float or not Float.Parent then return end
+    local vp = getViewportSize()
+    local size = Float.AbsoluteSize
+    local pos = Float.AbsolutePosition
+    local x = math.clamp(pos.X, 8, math.max(8, vp.X - size.X - 8))
+    local y = math.clamp(pos.Y, 8, math.max(8, vp.Y - size.Y - 8))
+    Float.Position = UDim2.fromOffset(x, y)
+end
+
+local function applySidebarWidth(width)
+    width = math.floor(width)
+    if Sidebar then
+        Sidebar.Size = UDim2.fromOffset(width, RESPONSIVE.baseH)
+    end
+    if ContentRoot then
+        ContentRoot.Position = UDim2.fromOffset(width, 0)
+        ContentRoot.Size = UDim2.new(1, -width, 1, 0)
+    end
+end
+
+local function updateResponsiveScale()
+    if not Main or not MainUIScale then return end
+    if RESPONSIVE.enabled == false then
+        MainUIScale.Scale = 1
+        applySidebarWidth(RESPONSIVE.sidebarNormal)
+        return
+    end
+    local vp = getViewportSize()
+    local scale
+    if RESPONSIVE.mode ~= "Auto" then
+        scale = tonumber(RESPONSIVE.mode) or 1
+    else
+        -- Fit base design into a fraction of the viewport
+        local fitW = (vp.X * RESPONSIVE.maxViewportW) / RESPONSIVE.baseW
+        local fitH = (vp.Y * RESPONSIVE.maxViewportH) / RESPONSIVE.baseH
+        -- Also damp by reference desktop resolution
+        local refScale = math.min(vp.X / RESPONSIVE.refW, vp.Y / RESPONSIVE.refH)
+        scale = math.min(fitW, fitH, math.max(refScale, 0.55))
+        scale = math.clamp(scale, RESPONSIVE.minScale, RESPONSIVE.maxScale)
+        -- Extra shrink for very small floating windows
+        if vp.X < 650 or vp.Y < 450 then
+            scale = math.min(scale, 0.62)
+        elseif vp.X < 900 or vp.Y < 600 then
+            scale = math.min(scale, 0.78)
+        end
+    end
+    MainUIScale.Scale = scale
+
+    -- Sidebar breakpoint (base pixel widths; UIScale shrinks the whole Main)
+    if vp.X < 650 or vp.Y < 450 then
+        applySidebarWidth(RESPONSIVE.sidebarTiny)
+    elseif vp.X < 900 or vp.Y < 600 then
+        applySidebarWidth(RESPONSIVE.sidebarSmall)
+    else
+        applySidebarWidth(RESPONSIVE.sidebarNormal)
+    end
+
+    -- Keep floating reopen button on-screen
+    pcall(clampFloatInViewport)
+end
 
 do
     local dragging, start, startPos
@@ -4885,6 +4983,7 @@ do
     maid:Connect(UserInputService.InputChanged, function(input)
         if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
             local d = input.Position - start
+            -- Pixel deltas are independent of UIScale on the Main frame
             Main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
         end
     end)
@@ -4966,6 +5065,26 @@ local Float = Instance.new("TextButton")
 Float.Size = UDim2.fromOffset(52, 32); Float.Position = UDim2.new(0, 24, 0.5, -16)
 Float.BackgroundColor3 = Theme.Primary; Float.Text = "UNO"; Float.Font = Enum.Font.GothamBold
 Float.TextSize = 13; Float.TextColor3 = Color3.new(1, 1, 1); Float.Visible = false; Float.AutoButtonColor = false; Float.Parent = Gui; corner(Float, 8)
+
+-- Bind responsive scale to camera viewport changes
+do
+    local function bindViewport(cam)
+        if not cam then return end
+        maid:Connect(cam:GetPropertyChangedSignal("ViewportSize"), function()
+            updateResponsiveScale()
+        end)
+    end
+    if Workspace.CurrentCamera then
+        bindViewport(Workspace.CurrentCamera)
+    end
+    maid:Connect(Workspace:GetPropertyChangedSignal("CurrentCamera"), function()
+        if Workspace.CurrentCamera then
+            bindViewport(Workspace.CurrentCamera)
+            updateResponsiveScale()
+        end
+    end)
+    task.defer(updateResponsiveScale)
+end
 
 local function setVisible(vis)
     if State.closed then return end
@@ -5779,7 +5898,54 @@ safeBuild("Settings", function()
         Views._cfgUpdate = function() end
     end
 
-    local _, actions = card(sc, 3, "ACTIONS")
+    local _, uiCard = card(sc, 3, "UI SCALE")
+    do
+        local f = Instance.new("Frame"); f.LayoutOrder = 1; f.Size = UDim2.new(1, 0, 0, 28)
+        f.BackgroundTransparency = 1; f.Parent = uiCard
+        text(f, "Responsive UI (Auto)", 13, Theme.TextPrimary, Enum.Font.GothamMedium).Size = UDim2.new(1, -50, 1, 0)
+        local sw = select(1, makeSwitch(f, RESPONSIVE.enabled ~= false, function(v)
+            RESPONSIVE.enabled = v == true
+            if v then RESPONSIVE.mode = "Auto" end
+            updateResponsiveScale()
+            markConfigDirty()
+        end))
+        sw.Position = UDim2.new(1, -40, 0.5, -11)
+    end
+    local function scaleBtn(parent, order, label, modeVal)
+        local f = Instance.new("Frame"); f.LayoutOrder = order; f.Size = UDim2.new(1, 0, 0, 28)
+        f.BackgroundTransparency = 1; f.Parent = parent
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(1, 0, 1, 0)
+        b.BackgroundColor3 = Theme.SurfaceElevated
+        b.Text = label
+        b.Font = Enum.Font.Gotham
+        b.TextSize = 12
+        b.TextColor3 = Theme.TextPrimary
+        b.AutoButtonColor = false
+        b.Parent = f
+        corner(b, 6)
+        b.MouseButton1Click:Connect(function()
+            RESPONSIVE.enabled = true
+            RESPONSIVE.mode = modeVal
+            updateResponsiveScale()
+            markConfigDirty()
+        end)
+    end
+    scaleBtn(uiCard, 2, "Auto (viewport)", "Auto")
+    scaleBtn(uiCard, 3, "100%", "1")
+    scaleBtn(uiCard, 4, "90%", "0.9")
+    scaleBtn(uiCard, 5, "80%", "0.8")
+    scaleBtn(uiCard, 6, "70%", "0.7")
+    local scaleStatus = row(uiCard, 7, "Current Scale")
+    local prevUpdate = Views._cfgUpdate
+    Views._cfgUpdate = function()
+        if type(prevUpdate) == "function" then pcall(prevUpdate) end
+        if MainUIScale then
+            setText(scaleStatus, string.format("%.0f%%", MainUIScale.Scale * 100))
+        end
+    end
+
+    local _, actions = card(sc, 4, "ACTIONS")
     local function actionBtn(parent, order, label, color, fn)
         local f = Instance.new("Frame"); f.LayoutOrder = order; f.Size = UDim2.new(1, 0, 0, 34)
         f.BackgroundTransparency = 1; f.Parent = parent
@@ -5847,7 +6013,7 @@ refreshData()
 refreshEconomyStatus()
 showPage("Home")
 
-log("INFO", "UNO HUB — Performance + Config restored (SOURCE A base)")
+log("INFO", "UNO HUB — Responsive UIScale enabled")
 print("[UNO HUB] AutoSellFeature =", AutoSellFeature and "READY" or State.diagnostics["AutoSell.Feature"])
 print("[UNO HUB] AutoFuseFeature =", AutoFuseFeature and "READY" or State.diagnostics["AutoFuse.Feature"])
 print("[UNO HUB] HatchFeature =", HatchFeature and "READY" or "MISSING")

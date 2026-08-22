@@ -118,6 +118,18 @@ local ConfigManager = nil
 local PerformanceManager = nil
 local visualCoverGui = nil
 local isApplyingConfig = false
+-- Safe regression mode: records behavior but does not bypass or intercept anti-cheat.
+local BYPASS_STARTUP = false
+local ISOLATION_MODE = false
+State.regression = { events = {}, lastFeature = nil, lastAction = nil, lastRemote = nil }
+local function recordRegression(kind, feature, detail)
+    local event = { kind = kind, feature = tostring(feature), detail = detail, t = os.clock() }
+    table.insert(State.regression.events, 1, event)
+    while #State.regression.events > 160 do table.remove(State.regression.events) end
+    if kind == "remote" or kind == "remote_attempt" then State.regression.lastRemote = event end
+    if kind == "action" or kind == "enabled" then State.regression.lastAction = event end
+    State.regression.lastFeature = tostring(feature)
+end
 local function markConfigDirty()
     if isApplyingConfig or State.applyingConfig then return end
     if ConfigManager and type(ConfigManager.markDirty) == "function" then
@@ -478,7 +490,6 @@ local function createPerformanceManager(deps)
     if services.Workspace and services.Workspace.DescendantAdded then
         table.insert(connections, perfSafeConnect(services.Workspace.DescendantAdded, function(instance)
             if isProtected(instance) then return end
-            processVisual(instance)
             processChicken(instance)
         end))
     end
@@ -589,6 +600,7 @@ local function createConfigManager(deps)
     end
     local function applyDocument(document)
         document = type(document) == "table" and document or {}
+        if type(deps.onLoaded) == "function" then pcall(deps.onLoaded, cfgClone(document)) end
         local restoreDestructive = document.restoreDestructiveAutomation == true
         config.restoreDestructiveAutomation = restoreDestructive
         if type(document.autoSave) == "boolean" then config.autoSave = document.autoSave end
@@ -795,6 +807,8 @@ State.diagnostics["FusionRules"] = Integration.modules.FusionRules and "FOUND" o
 State.diagnostics["IncubatorView"] = Integration.modules.IncubatorView and "FOUND" or "MISSING"
 State.diagnostics["AutoSell.Factory"] = "PRESENT"
 State.diagnostics["AutoFuse.Factory"] = "PRESENT"
+State.diagnostics["AntiCheat Bypass"] = "NOT IMPLEMENTED — diagnostic audit only"
+State.diagnostics["Performance Scope"] = "APPROVED ROOTS ONLY; detection roots protected"
 
 local remotesFolder = ReplicatedStorage:FindFirstChild("Remotes")
 for _, name in ipairs({
@@ -879,6 +893,7 @@ local function isContinueOpen()
     return State.tower.continue ~= nil and State.tower.continue.open == true
 end
 local function tryInvoke(name, ...)
+    recordRegression("remote_attempt", name, "tryInvoke")
     local core = Integration.modules.Remotes
     local args = table.pack(...)
     if core and core.defs and core.defs[name] then
@@ -886,10 +901,12 @@ local function tryInvoke(name, ...)
         local kind = def.kind or def.type
         if kind == "Function" and type(core.invoke) == "function" then
             local ok, res = pcall(function() return core.invoke(def, table.unpack(args, 1, args.n)) end)
+            recordRegression("remote", name, ok and "ok" or tostring(res))
             return ok, res
         end
         if kind == "Event" and type(core.fire) == "function" then
             local ok, err = pcall(function() core.fire(def, table.unpack(args, 1, args.n)) end)
+            recordRegression("remote", name, ok and "ok" or tostring(err))
             return ok, err
         end
     end
@@ -897,10 +914,12 @@ local function tryInvoke(name, ...)
     if not remote then return false, "missing" end
     if remote:IsA("RemoteFunction") then
         local ok, res = pcall(function() return remote:InvokeServer(table.unpack(args, 1, args.n)) end)
+        recordRegression("remote", name, ok and "ok" or tostring(res))
         if not ok then return false, res end
         return true, res
     elseif remote:IsA("RemoteEvent") or remote:IsA("UnreliableRemoteEvent") then
         local ok, err = pcall(function() remote:FireServer(table.unpack(args, 1, args.n)) end)
+        recordRegression("remote", name, ok and "ok" or tostring(err))
         return ok, err
     end
     return false, "bad class"
@@ -3043,6 +3062,9 @@ local function createAutoHatch(deps)
         if not feature.enabled then feature.status = "DISABLED" end
     end
     function feature.setAutoHatch(on)
+        on = on == true
+        if feature.enabled == on then return true end
+        recordRegression("enabled", "AutoHatch", on)
         feature.enabled = on == true
         State.toggles.autoHatch = feature.enabled
         feature.generation += 1
@@ -3118,6 +3140,9 @@ local function createAutoIncubatorClaim(deps)
         if not feature.enabled then feature.status = "DISABLED" end
     end
     function feature.setAutoIncubatorClaim(on)
+        on = on == true
+        if feature.enabled == on then return true end
+        recordRegression("enabled", "AutoIncubatorClaim", on)
         feature.enabled = on == true
         State.toggles.autoIncubatorClaim = feature.enabled
         feature.generation += 1
@@ -3331,6 +3356,9 @@ do
     end
 
     function feature.setAutoUpgradeIncubator(on)
+        on = on == true
+        if feature.enabled == on then return true end
+        recordRegression("enabled", "AutoUpgradeIncubator", on)
         feature.enabled = on == true
         State.toggles.autoUpgradeIncubator = feature.enabled
         feature.generation += 1
@@ -3432,7 +3460,7 @@ do
     end
     local function getCosmeticRoots()
         local roots = {}
-        if Lighting then table.insert(roots, Lighting) end
+        -- Lighting is intentionally excluded: the full tree is not proven cosmetic.
         for _, name in ipairs({"Effects", "VFX", "Visuals", "Fx", "FX", "Particles"}) do
             local a = Workspace:FindFirstChild(name); if a then table.insert(roots, a) end
             local b = ReplicatedStorage:FindFirstChild(name); if b then table.insert(roots, b) end
@@ -3456,6 +3484,13 @@ do
 
     ConfigManager = createConfigManager({
         HttpService = HttpService,
+        onLoaded = function(document)
+            State.diagnostics["Saved Config"] = "LOADED (workers gated)"
+            State.diagnostics["Saved Automation"] = document.automation and "PRESENT" or "MISSING"
+            State.diagnostics["Saved Sell"] = document.sell and "PRESENT" or "MISSING"
+            State.diagnostics["Saved Fuse"] = document.fuse and "PRESENT" or "MISSING"
+            State.diagnostics["Saved Performance"] = document.performance and "PRESENT" or "MISSING"
+        end,
         log = function(msg, payload)
             log("CFG", tostring(msg) .. (payload and (" " .. tostring(payload)) or ""))
         end,
@@ -3480,6 +3515,7 @@ do
             }
         end, function(data)
             if type(data) ~= "table" then return end
+            if BYPASS_STARTUP or ISOLATION_MODE then return end
             local function applyToggle(key, setter)
                 if data[key] == nil then return end
                 State.toggles[key] = data[key] == true
@@ -3503,6 +3539,7 @@ do
             return { meteorAvoidance = HE.meteorAvoidance == true, movementMode = HE.movementMode or "Tween", exitPitAfter = HE.exitPitAfter == true }
         end, function(data)
             if type(data) ~= "table" then return end
+            if BYPASS_STARTUP or ISOLATION_MODE then return end
             if data.meteorAvoidance ~= nil then HE.meteorAvoidance = data.meteorAvoidance == true end
             if type(data.movementMode) == "string" then HE.movementMode = data.movementMode end
             if data.exitPitAfter ~= nil then HE.exitPitAfter = data.exitPitAfter == true end
@@ -3519,6 +3556,7 @@ do
             }
         end, function(data)
             if type(data) ~= "table" or not AutoSellFeature then return end
+            if BYPASS_STARTUP or ISOLATION_MODE then return end
             if type(data.rarities) == "table" then
                 if AutoSellFeature.clearRaritySelection then pcall(AutoSellFeature.clearRaritySelection) end
                 for _, r in ipairs(data.rarities) do pcall(AutoSellFeature.setRaritySelected, r, true) end
@@ -3542,6 +3580,7 @@ do
             }
         end, function(data)
             if type(data) ~= "table" or not AutoFuseFeature then return end
+            if BYPASS_STARTUP or ISOLATION_MODE then return end
             if type(data.matchMode) == "string" then pcall(AutoFuseFeature.setMatchMode, data.matchMode) end
             if data.keepCopies ~= nil then pcall(AutoFuseFeature.setKeepCopies, data.keepCopies) end
             if type(data.rarities) == "table" then
@@ -3567,6 +3606,7 @@ do
             }
         end, function(data)
             if type(data) ~= "table" or not PerformanceManager then return end
+            if BYPASS_STARTUP or ISOLATION_MODE then return end
             if data.disableVFX ~= nil then PerformanceManager.setDisableVFX(data.disableVFX == true) end
             if data.disableShadows ~= nil then PerformanceManager.setDisableShadows(data.disableShadows == true) end
             if data.hideOtherPlayers ~= nil then PerformanceManager.setHideOtherPlayers(data.hideOtherPlayers == true) end
@@ -3649,6 +3689,9 @@ local function economyWorker(name, enabled, body)
     end)
 end
 local function setAutoBuyGenerator(on)
+    on = on == true
+    if State.toggles.autoBuyGenerator == on then return end
+    recordRegression("enabled", "setAutoBuyGenerator", on)
     State.toggles.autoBuyGenerator = on
     if not on then State.economy.buyStatus = "IDLE" end
     economyWorker("autoBuyGenerator", on, function()
@@ -3672,6 +3715,9 @@ local function setAutoBuyGenerator(on)
     end)
 end
 local function setAutoUpgradeGenerator(on)
+    on = on == true
+    if State.toggles.autoUpgradeGenerator == on then return end
+    recordRegression("enabled", "setAutoUpgradeGenerator", on)
     State.toggles.autoUpgradeGenerator = on
     if not on then State.economy.upgradeStatus = "IDLE" end
     economyWorker("autoUpgradeGenerator", on, function()
@@ -3700,6 +3746,9 @@ local function setAutoUpgradeGenerator(on)
     end)
 end
 local function setAutoExpandCoop(on)
+    on = on == true
+    if State.toggles.autoExpandCoop == on then return end
+    recordRegression("enabled", "setAutoExpandCoop", on)
     State.toggles.autoExpandCoop = on
     if not on then State.economy.expandStatus = "IDLE" end
     economyWorker("autoExpandCoop", on, function()
@@ -3718,6 +3767,9 @@ local function setAutoExpandCoop(on)
     end)
 end
 local function setAutoUpgradeRecycler(on)
+    on = on == true
+    if State.toggles.autoUpgradeRecycler == on then return end
+    recordRegression("enabled", "setAutoUpgradeRecycler", on)
     State.toggles.autoUpgradeRecycler = on
     if not on then State.economy.recyclerStatus = "IDLE" end
     economyWorker("autoUpgradeRecycler", on, function()
@@ -4245,6 +4297,9 @@ local function heTick(token)
     if not HE.enabled then heSetPhase("DISABLED", "—") end
 end
 local function setAutoHotEgg(on)
+    on = on == true
+    if State.toggles.autoHotEgg == on then return end
+    recordRegression("enabled", "setAutoHotEgg", on)
     State.toggles.autoHotEgg = on
     HE.enabled = on
     heCancel()
@@ -4396,6 +4451,9 @@ local function afrTick(token)
     if not AFR.enabled then afrSetPhase("DISABLED") end
 end
 local function setAutoFarmRebirth(on)
+    on = on == true
+    if State.toggles.autoFarmRebirth == on then return end
+    recordRegression("enabled", "setAutoFarmRebirth", on)
     State.toggles.autoFarmRebirth = on
     AFR.enabled = on
     afrCancel()
@@ -5497,8 +5555,14 @@ end
 
 refreshData()
 refreshEconomyStatus()
--- Config load after all feature functions exist
+-- Config load after all feature functions exist.
+-- In bypass/isolation mode the file is read for diagnostics, but no worker or
+-- performance setter is allowed to activate from saved state.
 if ConfigManager then
+    if BYPASS_STARTUP or ISOLATION_MODE then
+        State.diagnostics["Startup Mode"] = ISOLATION_MODE and "ISOLATION — ALL OFF" or "BYPASS — ALL OFF"
+        recordRegression("action", "Startup", "saved config loaded without activation")
+    end
     isApplyingConfig = true
     State.applyingConfig = true
     pcall(function() ConfigManager.load() end)

@@ -1,5 +1,5 @@
 --[[
-    UNO HUB · UI page visibility fix
+    UNO HUB · Feature regression restored (clean base)
     Grow a Chicken Fighter
     SOURCE A: createAutoSellChickens + AutoSellFeature + Chickens UI
     SOURCE B: resolveEggDisplayName / rarity / ability + TextLabel Size
@@ -12,8 +12,6 @@ local TweenService      = game:GetService("TweenService")
 local VirtualUser       = game:GetService("VirtualUser")
 local Workspace         = game:GetService("Workspace")
 local CollectionService = game:GetService("CollectionService")
-local Lighting          = game:GetService("Lighting")
-local HttpService       = game:GetService("HttpService")
 
 local LocalPlayer = Players.LocalPlayer
 if not LocalPlayer then return end
@@ -26,10 +24,6 @@ do
         old:SetAttribute("UNO_HUB_Shutdown", true)
         old:Destroy()
         task.wait(0.05)
-    end
-    local cover = PlayerGui:FindFirstChild("UNO_HUB_VisualCover")
-    if cover then
-        pcall(function() cover:Destroy() end)
     end
 end
 
@@ -89,7 +83,6 @@ local State = {
         generatorsOwned = 0, generatorsSlots = 0, nextBuySlot = nil, nextBuyCost = nil, recyclerLevel = 0,
     },
     movementOwner = "NONE",
-    applyingConfig = false,
     toggles = {
         autoFarmRebirth = false, autoKoDismiss = true, autoHatch = false, autoCollectEgg = false,
         autoIncubatorClaim = false, autoSell = false, autoFuse = false,
@@ -112,647 +105,6 @@ local function setText(label, value)
         label.Text = display(value)
     end
 end
-
--- Config / Performance placeholders (filled after feature construction)
-local ConfigManager = nil
-local PerformanceManager = nil
-local visualCoverGui = nil
-local isApplyingConfig = false
--- Safe regression mode: records behavior but does not bypass or intercept anti-cheat.
-local BYPASS_STARTUP = false
-local ISOLATION_MODE = false
-State.regression = { events = {}, lastFeature = nil, lastAction = nil, lastRemote = nil }
-local function recordRegression(kind, feature, detail)
-    local event = { kind = kind, feature = tostring(feature), detail = detail, t = os.clock() }
-    table.insert(State.regression.events, 1, event)
-    while #State.regression.events > 160 do table.remove(State.regression.events) end
-    if kind == "remote" or kind == "remote_attempt" then State.regression.lastRemote = event end
-    if kind == "action" or kind == "enabled" then State.regression.lastAction = event end
-    State.regression.lastFeature = tostring(feature)
-end
-local function markConfigDirty()
-    if isApplyingConfig or State.applyingConfig then return end
-    if ConfigManager and type(ConfigManager.markDirty) == "function" then
-        pcall(function() ConfigManager.markDirty() end)
-    end
-end
-
-
---------------------------------------------------------------------
--- createPerformanceManager (supplied authoritative backend)
---------------------------------------------------------------------
-local VISUAL_ENABLED_CLASSES = {
-    ParticleEmitter = true, Trail = true, Beam = true, Smoke = true, Fire = true,
-    Sparkles = true, Highlight = true, PointLight = true, SpotLight = true, SurfaceLight = true,
-    BloomEffect = true, BlurEffect = true, ColorCorrectionEffect = true, DepthOfFieldEffect = true,
-    SunRaysEffect = true, Atmosphere = true, Clouds = true,
-}
-local DEFAULT_PROTECTED_NAME = {
-    HotEgg = true, NestEgg = true, PitZone = true, Meteor = true, Hazard = true, Carrier = true,
-}
-local function perfSpawnThread(fn)
-    if task and type(task.spawn) == "function" then return task.spawn(fn) end
-    local co = coroutine.create(fn); coroutine.resume(co); return co
-end
-local function perfSafeConnect(signal, callback)
-    if signal and type(signal.Connect) == "function" then
-        local ok, connection = pcall(function() return signal:Connect(callback) end)
-        if ok then return connection end
-    end
-    return nil
-end
-local function perfSafeGetDescendants(instance)
-    if not instance or type(instance.GetDescendants) ~= "function" then return {} end
-    local ok, descendants = pcall(function() return instance:GetDescendants() end)
-    return ok and descendants or {}
-end
-local function perfSafeClass(instance)
-    local ok, className = pcall(function() return instance.ClassName end)
-    return ok and className or nil
-end
-local function perfSafeName(instance)
-    local ok, name = pcall(function() return instance.Name end)
-    return ok and name or ""
-end
-local function createPerformanceManager(deps)
-    deps = deps or {}
-    local services = deps.services or deps
-    local Players = services.Players
-    local Lighting = services.Lighting
-    local localPlayer = deps.localPlayer
-    if not localPlayer and Players then
-        local ok, value = pcall(function() return Players.LocalPlayer end)
-        if ok then localPlayer = value end
-    end
-    local config = {
-        boostFPS = false, disableVFX = false, disableShadows = false,
-        hideOtherPlayers = false, hideOtherChickens = false, whiteScreen = false, ultraPerformance = false,
-    }
-    local state = {
-        destroyed = false, status = "DISABLED", whiteScreenIsCover = false,
-        boostSnapshot = nil, ultraSnapshot = nil,
-    }
-    local stats = {
-        visualObjectsDisabled = 0, visualObjectsRestored = 0, playerPartsHidden = 0,
-        chickenPartsHidden = 0, protectedObjectsSkipped = 0, dynamicObjectsHandled = 0, currentMode = "DISABLED",
-    }
-    local originals = setmetatable({}, { __mode = "k" })
-    local hiddenParts = setmetatable({}, { __mode = "k" })
-    local connections = {}
-    local rootConnections = setmetatable({}, { __mode = "k" })
-    local function log(message, payload)
-        if type(deps.log) == "function" then pcall(deps.log, message, payload) end
-    end
-    local function setStatus(status, payload)
-        state.status = status; stats.currentMode = status; log(status, payload)
-    end
-    local function isProtected(instance)
-        if type(deps.isProtectedInstance) == "function" then
-            local ok, result = pcall(deps.isProtectedInstance, instance)
-            if ok and result == true then return true end
-        end
-        local name = perfSafeName(instance)
-        if DEFAULT_PROTECTED_NAME[name] then return true end
-        local lowered = string.lower(name)
-        for token in pairs(DEFAULT_PROTECTED_NAME) do
-            if string.find(lowered, string.lower(token), 1, true) then return true end
-        end
-        return false
-    end
-    local function remember(instance, property, value)
-        originals[instance] = originals[instance] or {}
-        if originals[instance][property] == nil then originals[instance][property] = value end
-    end
-    local function readProperty(instance, property)
-        local ok, value = pcall(function() return instance[property] end)
-        if ok then return true, value end
-        return false, nil
-    end
-    local function writeProperty(instance, property, value)
-        return pcall(function() instance[property] = value end)
-    end
-    local function disableVisual(instance)
-        if not instance or isProtected(instance) then
-            if instance and isProtected(instance) then stats.protectedObjectsSkipped = stats.protectedObjectsSkipped + 1 end
-            return
-        end
-        local className = perfSafeClass(instance)
-        if not VISUAL_ENABLED_CLASSES[className] then return end
-        local readable, enabled = readProperty(instance, "Enabled")
-        if not readable or enabled == nil then return end
-        remember(instance, "Enabled", enabled)
-        if enabled == true then
-            if writeProperty(instance, "Enabled", false) then stats.visualObjectsDisabled = stats.visualObjectsDisabled + 1 end
-        end
-    end
-    local function restoreVisual(instance)
-        local saved = originals[instance]
-        if not saved or saved.Enabled == nil then return end
-        if writeProperty(instance, "Enabled", saved.Enabled) then stats.visualObjectsRestored = stats.visualObjectsRestored + 1 end
-        saved.Enabled = nil
-    end
-    local function processVisual(instance)
-        if config.disableVFX or config.boostFPS then disableVisual(instance) else restoreVisual(instance) end
-    end
-    local function isLocalCharacter(model)
-        if type(deps.isLocalPlayerCharacter) == "function" then
-            local ok, result = pcall(deps.isLocalPlayerCharacter, model, localPlayer)
-            if ok then return result == true end
-        end
-        return localPlayer and localPlayer.Character == model
-    end
-    local function isOtherPlayerCharacter(model, player)
-        if isLocalCharacter(model) then return false end
-        if type(deps.isOtherPlayerCharacter) == "function" then
-            local ok, result = pcall(deps.isOtherPlayerCharacter, model, player)
-            return ok and result == true
-        end
-        return player ~= nil and player ~= localPlayer
-    end
-    local function isOtherChickenModel(model)
-        if type(deps.isOtherChickenModel) ~= "function" then return false end
-        local ok, result = pcall(deps.isOtherChickenModel, model, localPlayer)
-        return ok and result == true
-    end
-    local function setModelHidden(model, hidden, category)
-        if not model or isProtected(model) then return end
-        for _, instance in ipairs(perfSafeGetDescendants(model)) do
-            local className = perfSafeClass(instance)
-            if className == "BasePart" or className == "MeshPart" or className == "Part" or className == "UnionOperation" then
-                local readable, current = readProperty(instance, "LocalTransparencyModifier")
-                if readable then
-                    if hidden then
-                        remember(instance, "LocalTransparencyModifier", current)
-                        if writeProperty(instance, "LocalTransparencyModifier", 1) then
-                            hiddenParts[instance] = true
-                            if category == "player" then stats.playerPartsHidden = stats.playerPartsHidden + 1
-                            else stats.chickenPartsHidden = stats.chickenPartsHidden + 1 end
-                        end
-                    else
-                        local saved = originals[instance]
-                        local value = saved and saved.LocalTransparencyModifier
-                        if value ~= nil then
-                            writeProperty(instance, "LocalTransparencyModifier", value)
-                            saved.LocalTransparencyModifier = nil
-                            hiddenParts[instance] = nil
-                        end
-                    end
-                end
-            end
-        end
-    end
-    local function processCharacter(model, player)
-        if config.hideOtherPlayers or config.ultraPerformance then
-            if isOtherPlayerCharacter(model, player) then setModelHidden(model, true, "player"); return end
-        end
-        if not config.hideOtherPlayers and not config.ultraPerformance and player ~= localPlayer then
-            setModelHidden(model, false, "player")
-        end
-    end
-    local function processChicken(model)
-        local shouldHide = config.hideOtherChickens or config.ultraPerformance
-        if shouldHide and isOtherChickenModel(model) then setModelHidden(model, true, "chicken")
-        elseif not shouldHide and isOtherChickenModel(model) then setModelHidden(model, false, "chicken") end
-    end
-    local function processRoot(root)
-        if not root or isProtected(root) then return end
-        disableVisual(root)
-        for _, instance in ipairs(perfSafeGetDescendants(root)) do processVisual(instance) end
-        stats.dynamicObjectsHandled = stats.dynamicObjectsHandled + 1
-    end
-    local function connectRoot(root)
-        if rootConnections[root] then return end
-        if root and root.DescendantAdded then
-            rootConnections[root] = perfSafeConnect(root.DescendantAdded, function(instance)
-                if state.destroyed then return end
-                processVisual(instance)
-            end)
-        end
-    end
-    local function approvedRoots()
-        if type(deps.getCosmeticRoots) == "function" then
-            local ok, roots = pcall(deps.getCosmeticRoots)
-            if ok and type(roots) == "table" then return roots end
-        end
-        return deps.cosmeticRoots or {}
-    end
-    local function applyVisuals()
-        for _, root in ipairs(approvedRoots()) do
-            connectRoot(root); processRoot(root)
-        end
-        if Lighting and config.disableShadows then
-            local readable, shadows = readProperty(Lighting, "GlobalShadows")
-            if readable then
-                remember(Lighting, "GlobalShadows", shadows)
-                writeProperty(Lighting, "GlobalShadows", false)
-            end
-        elseif Lighting then
-            local saved = originals[Lighting]
-            if saved and saved.GlobalShadows ~= nil then
-                writeProperty(Lighting, "GlobalShadows", saved.GlobalShadows)
-                saved.GlobalShadows = nil
-            end
-        end
-    end
-    local function applyPlayers()
-        if not Players or type(Players.GetPlayers) ~= "function" then return end
-        local ok, players = pcall(function() return Players:GetPlayers() end)
-        if not ok then return end
-        for _, player in ipairs(players) do
-            if player.Character then processCharacter(player.Character, player) end
-        end
-    end
-    local function applyModels()
-        applyVisuals(); applyPlayers()
-        if type(deps.getChickenModels) == "function" then
-            local ok, models = pcall(deps.getChickenModels)
-            if ok and type(models) == "table" then
-                for _, model in ipairs(models) do processChicken(model) end
-            end
-        end
-    end
-    local function updateModeStatus()
-        if config.ultraPerformance then setStatus("ULTRA PERFORMANCE")
-        elseif config.boostFPS then setStatus("BOOST FPS + LOW GRAPHICS")
-        elseif config.disableVFX or config.disableShadows or config.hideOtherPlayers or config.hideOtherChickens then
-            setStatus("CUSTOM PERFORMANCE")
-        else setStatus("DISABLED") end
-    end
-    local function apply()
-        if state.destroyed then return end
-        applyModels()
-        if config.whiteScreen then
-            if type(deps.setVisualCover) == "function" then pcall(deps.setVisualCover, true) end
-            state.whiteScreenIsCover = true
-        else
-            if type(deps.setVisualCover) == "function" then pcall(deps.setVisualCover, false) end
-            state.whiteScreenIsCover = false
-        end
-        updateModeStatus()
-    end
-    local function setFlag(key, enabled)
-        if state.destroyed then return false end
-        config[key] = enabled == true; apply(); return true
-    end
-    local api = {}
-    function api.setBoostFPS(enabled)
-        enabled = enabled == true
-        if enabled and not state.boostSnapshot then
-            state.boostSnapshot = { disableVFX = config.disableVFX, disableShadows = config.disableShadows }
-        elseif not enabled and state.boostSnapshot then
-            config.disableVFX = state.boostSnapshot.disableVFX
-            config.disableShadows = state.boostSnapshot.disableShadows
-            state.boostSnapshot = nil
-        end
-        config.boostFPS = enabled
-        if enabled then config.disableVFX = true; config.disableShadows = true end
-        apply(); return true
-    end
-    function api.getBoostFPS() return config.boostFPS end
-    function api.setDisableVFX(v) return setFlag("disableVFX", v) end
-    function api.getDisableVFX() return config.disableVFX end
-    function api.setDisableShadows(v) return setFlag("disableShadows", v) end
-    function api.getDisableShadows() return config.disableShadows end
-    function api.setHideOtherPlayers(v) return setFlag("hideOtherPlayers", v) end
-    function api.getHideOtherPlayers() return config.hideOtherPlayers end
-    function api.setHideOtherChickens(v) return setFlag("hideOtherChickens", v) end
-    function api.getHideOtherChickens() return config.hideOtherChickens end
-    function api.setWhiteScreen(v) config.whiteScreen = v == true; apply(); return true end
-    function api.getWhiteScreen() return config.whiteScreen end
-    function api.setUltraPerformance(enabled)
-        enabled = enabled == true
-        if enabled and not state.ultraSnapshot then
-            state.ultraSnapshot = {
-                boostFPS = config.boostFPS, disableVFX = config.disableVFX, disableShadows = config.disableShadows,
-                hideOtherPlayers = config.hideOtherPlayers, hideOtherChickens = config.hideOtherChickens,
-            }
-        elseif not enabled and state.ultraSnapshot then
-            config.boostFPS = state.ultraSnapshot.boostFPS
-            config.disableVFX = state.ultraSnapshot.disableVFX
-            config.disableShadows = state.ultraSnapshot.disableShadows
-            config.hideOtherPlayers = state.ultraSnapshot.hideOtherPlayers
-            config.hideOtherChickens = state.ultraSnapshot.hideOtherChickens
-            state.ultraSnapshot = nil
-        end
-        config.ultraPerformance = enabled
-        if enabled then
-            config.boostFPS = true; config.disableVFX = true; config.disableShadows = true
-            config.hideOtherPlayers = true; config.hideOtherChickens = true
-        end
-        apply(); return true
-    end
-    function api.getUltraPerformance() return config.ultraPerformance end
-    function api.getStatus() return state.status end
-    function api.getStats()
-        local result = {}
-        for key, value in pairs(stats) do result[key] = value end
-        result.whiteScreenIsVisualCover = state.whiteScreenIsCover
-        result.actualRenderingDisable = false
-        return result
-    end
-    function api.refresh() apply() end
-    function api.destroy()
-        if state.destroyed then return end
-        state.destroyed = true
-        for _, connection in ipairs(connections) do
-            if connection and type(connection.Disconnect) == "function" then pcall(function() connection:Disconnect() end) end
-        end
-        for _, connection in pairs(rootConnections) do
-            if connection and type(connection.Disconnect) == "function" then pcall(function() connection:Disconnect() end) end
-        end
-        for instance, saved in pairs(originals) do
-            if saved.Enabled ~= nil then writeProperty(instance, "Enabled", saved.Enabled) end
-            if saved.GlobalShadows ~= nil then writeProperty(instance, "GlobalShadows", saved.GlobalShadows) end
-            if saved.LocalTransparencyModifier ~= nil then writeProperty(instance, "LocalTransparencyModifier", saved.LocalTransparencyModifier) end
-        end
-        if type(deps.setVisualCover) == "function" then pcall(deps.setVisualCover, false) end
-        setStatus("DISABLED")
-    end
-    if Players then
-        table.insert(connections, perfSafeConnect(Players.PlayerAdded, function(player)
-            if player.Character then processCharacter(player.Character, player) end
-            table.insert(connections, perfSafeConnect(player.CharacterAdded, function(character)
-                processCharacter(character, player)
-            end))
-        end))
-        table.insert(connections, perfSafeConnect(Players.PlayerRemoving, function(player)
-            if player.Character then processCharacter(player.Character, player) end
-        end))
-        local ok, players = pcall(function() return Players:GetPlayers() end)
-        if ok then
-            for _, player in ipairs(players) do
-                table.insert(connections, perfSafeConnect(player.CharacterAdded, function(character)
-                    processCharacter(character, player)
-                end))
-            end
-        end
-    end
-    if services.Workspace and services.Workspace.DescendantAdded then
-        table.insert(connections, perfSafeConnect(services.Workspace.DescendantAdded, function(instance)
-            if isProtected(instance) then return end
-            processChicken(instance)
-        end))
-    end
-    return api
-end
-
-
---------------------------------------------------------------------
--- createConfigManager (supplied authoritative backend)
---------------------------------------------------------------------
-local CONFIG_VERSION = 1
-local CONFIG_FOLDER = "UNO_HUB"
-local CONFIG_FILE = "UNO_HUB/GrowAChickenFighter_Config.json"
-local function cfgClone(value, seen)
-    if type(value) ~= "table" then return value end
-    seen = seen or {}
-    if seen[value] then return seen[value] end
-    local result = {}
-    seen[value] = result
-    for key, item in pairs(value) do
-        result[cfgClone(key, seen)] = cfgClone(item, seen)
-    end
-    return result
-end
-local function cfgDelay(seconds, callback, deps)
-    if type(deps.delay) == "function" then return deps.delay(seconds, callback) end
-    if task and type(task.delay) == "function" then return task.delay(seconds, callback) end
-    return nil
-end
-local function cfgGetGlobal(name)
-    if type(_G) == "table" and type(_G[name]) == "function" then return _G[name] end
-    return nil
-end
-local function cfgChooseFunction(container, name)
-    if type(container) == "table" and type(container[name]) == "function" then return container[name] end
-    return cfgGetGlobal(name)
-end
-local function createConfigManager(deps)
-    deps = deps or {}
-    local fs = deps.fs or {}
-    local httpService = deps.HttpService or deps.httpService
-    local encode = deps.jsonEncode
-    local decode = deps.jsonDecode
-    if type(encode) ~= "function" and httpService then
-        encode = function(value) return httpService:JSONEncode(value) end
-    end
-    if type(decode) ~= "function" and httpService then
-        decode = function(text) return httpService:JSONDecode(text) end
-    end
-    local writefile = cfgChooseFunction(fs, "writefile")
-    local readfile = cfgChooseFunction(fs, "readfile")
-    local isfile = cfgChooseFunction(fs, "isfile")
-    local makefolder = cfgChooseFunction(fs, "makefolder")
-    local persistenceAvailable = type(writefile) == "function"
-        and type(readfile) == "function"
-        and type(isfile) == "function"
-        and type(makefolder) == "function"
-        and type(encode) == "function"
-        and type(decode) == "function"
-    local config = { autoSave = true, restoreDestructiveAutomation = false }
-    for key, value in pairs(deps.defaults or {}) do config[key] = cfgClone(value) end
-    local startupDefaults = cfgClone(config)
-    local sections = {}
-    local state = {
-        destroyed = false, dirty = false, savePending = false, timerGeneration = 0,
-        status = persistenceAvailable and "READY" or "PERSISTENCE UNAVAILABLE",
-        lastError = nil, lastLoadedVersion = nil, lastSavedAt = nil,
-    }
-    local function log(message, payload)
-        if type(deps.log) == "function" then pcall(deps.log, message, payload) end
-    end
-    local function setStatus(status, errorValue)
-        state.status = status; state.lastError = errorValue; log(status, errorValue)
-    end
-    local function ensureFolder()
-        local ok = pcall(makefolder, CONFIG_FOLDER)
-        return ok
-    end
-    local function currentDefaults()
-        local result = cfgClone(startupDefaults)
-        result.version = CONFIG_VERSION
-        for name, section in pairs(sections) do
-            result[name] = cfgClone(section.defaults or {})
-        end
-        return result
-    end
-    local function sanitizeWithDefaults(value, defaults)
-        if type(defaults) == "boolean" then return type(value) == "boolean" and value or defaults end
-        if type(defaults) == "number" then return type(value) == "number" and value or defaults end
-        if type(defaults) == "string" then return type(value) == "string" and value or defaults end
-        if type(defaults) ~= "table" then return cfgClone(value) end
-        if type(value) ~= "table" then return cfgClone(defaults) end
-        local result = {}
-        for key, defaultValue in pairs(defaults) do
-            if value[key] ~= nil then result[key] = sanitizeWithDefaults(value[key], defaultValue)
-            else result[key] = cfgClone(defaultValue) end
-        end
-        return result
-    end
-    local function validateSection(name, value, section)
-        local normalized = sanitizeWithDefaults(value, section.defaults or {})
-        if type(section.validate) == "function" then
-            local ok, result = pcall(section.validate, normalized, name)
-            if not ok or result == false then return cfgClone(section.defaults or {}), false end
-            if type(result) == "table" then normalized = result end
-        end
-        return normalized, true
-    end
-    local function applyDocument(document)
-        document = type(document) == "table" and document or {}
-        if type(deps.onLoaded) == "function" then pcall(deps.onLoaded, cfgClone(document)) end
-        local restoreDestructive = document.restoreDestructiveAutomation == true
-        config.restoreDestructiveAutomation = restoreDestructive
-        if type(document.autoSave) == "boolean" then config.autoSave = document.autoSave end
-        for name, section in pairs(sections) do
-            local value = document[name]
-            local normalized = validateSection(name, value, section)
-            if name == "sell" or name == "fuse" or name == "autoSell" or name == "autoFuse" then
-                if type(normalized) == "table" and not restoreDestructive then
-                    if normalized.enabled ~= nil then normalized.enabled = false end
-                    if normalized.dryRun ~= nil then normalized.dryRun = true end
-                end
-            end
-            if type(section.loader) == "function" then
-                pcall(section.loader, cfgClone(normalized), {
-                    name = name,
-                    restoredDestructiveAutomation = restoreDestructive,
-                    fromConfig = true,
-                })
-            end
-        end
-    end
-    local function migrate(document)
-        local version = tonumber(document.version) or 0
-        if version > CONFIG_VERSION then return nil, "UNSUPPORTED CONFIG VERSION" end
-        if version < CONFIG_VERSION and type(deps.migrate) == "function" then
-            local ok, migrated = pcall(deps.migrate, cfgClone(document), version, CONFIG_VERSION)
-            if not ok or type(migrated) ~= "table" then return nil, "CONFIG MIGRATION FAILED" end
-            document = migrated
-        end
-        document.version = CONFIG_VERSION
-        return document, nil
-    end
-    local function snapshot()
-        local document = {
-            version = CONFIG_VERSION,
-            autoSave = config.autoSave == true,
-            restoreDestructiveAutomation = config.restoreDestructiveAutomation == true,
-        }
-        for name, section in pairs(sections) do
-            if type(section.serializer) == "function" then
-                local ok, value = pcall(section.serializer)
-                if ok and type(value) == "table" then document[name] = cfgClone(value)
-                else document[name] = cfgClone(section.defaults or {}) end
-            else
-                document[name] = cfgClone(section.defaults or {})
-            end
-        end
-        return document
-    end
-    local function saveNow()
-        if state.destroyed then return false, "DESTROYED" end
-        if not persistenceAvailable then
-            setStatus("PERSISTENCE UNAVAILABLE"); return false, "PERSISTENCE UNAVAILABLE"
-        end
-        local document = snapshot()
-        local okEncode, text = pcall(encode, document)
-        if not okEncode or type(text) ~= "string" then
-            setStatus("SAVE ERROR", "JSON ENCODE FAILED"); return false, "JSON ENCODE FAILED"
-        end
-        pcall(ensureFolder)
-        local okWrite, writeError = pcall(writefile, CONFIG_FILE, text)
-        if not okWrite then setStatus("SAVE ERROR", writeError); return false, writeError end
-        state.dirty = false; state.savePending = false; state.lastSavedAt = os.time()
-        setStatus("SAVED"); return true
-    end
-    local function scheduleSave()
-        if state.savePending or not config.autoSave or state.destroyed then return end
-        state.savePending = true
-        state.timerGeneration = state.timerGeneration + 1
-        local generation = state.timerGeneration
-        cfgDelay(0.75, function()
-            if state.destroyed or generation ~= state.timerGeneration then return end
-            state.savePending = false
-            if state.dirty then saveNow() end
-        end, deps)
-    end
-    local api = {}
-    function api.isPersistenceAvailable() return persistenceAvailable end
-    function api.registerSection(name, serializer, loader, options)
-        if state.destroyed or type(name) ~= "string" or name == "" then return false, "INVALID SECTION" end
-        options = options or {}
-        sections[name] = {
-            serializer = serializer, loader = loader, validate = options.validate,
-            defaults = cfgClone(options.defaults or {}),
-        }
-        return true
-    end
-    function api.load()
-        if state.destroyed then return false, "DESTROYED" end
-        if not persistenceAvailable then
-            applyDocument(currentDefaults()); setStatus("PERSISTENCE UNAVAILABLE")
-            return false, "PERSISTENCE UNAVAILABLE"
-        end
-        local existsOk, exists = pcall(isfile, CONFIG_FILE)
-        if not existsOk or exists ~= true then
-            applyDocument(currentDefaults()); setStatus("NO CONFIG"); return false, "NO CONFIG"
-        end
-        local okRead, text = pcall(readfile, CONFIG_FILE)
-        if not okRead or type(text) ~= "string" then
-            applyDocument(currentDefaults()); setStatus("LOAD ERROR", text); return false, "LOAD ERROR"
-        end
-        local okDecode, document = pcall(decode, text)
-        if not okDecode or type(document) ~= "table" then
-            applyDocument(currentDefaults()); setStatus("INVALID CONFIG", "JSON DECODE FAILED")
-            return false, "INVALID CONFIG"
-        end
-        local migrated, migrationError = migrate(document)
-        if not migrated then
-            applyDocument(currentDefaults()); setStatus("INVALID CONFIG", migrationError)
-            return false, migrationError
-        end
-        state.lastLoadedVersion = migrated.version
-        applyDocument(migrated)
-        state.dirty = false
-        setStatus("LOADED")
-        return true
-    end
-    function api.save()
-        if state.destroyed then return false, "DESTROYED" end
-        state.dirty = true; scheduleSave(); return true
-    end
-    function api.markDirty() return api.save() end
-    function api.saveNow() return saveNow() end
-    function api.setAutoSave(enabled)
-        config.autoSave = enabled == true
-        if config.autoSave and state.dirty then scheduleSave() end
-        return true
-    end
-    function api.getAutoSave() return config.autoSave end
-    function api.setRestoreDestructiveAutomation(enabled)
-        config.restoreDestructiveAutomation = enabled == true
-        api.markDirty(); return true
-    end
-    function api.getRestoreDestructiveAutomation() return config.restoreDestructiveAutomation end
-    function api.getStatus() return state.status end
-    function api.getLastError() return state.lastError end
-    function api.isDirty() return state.dirty end
-    function api.resetToDefaults(confirmed)
-        if not confirmed then return false, "CONFIRMATION REQUIRED" end
-        applyDocument(currentDefaults()); api.markDirty(); setStatus("RESET"); return true
-    end
-    function api.destroy()
-        if state.destroyed then return end
-        if state.dirty then saveNow() end
-        state.destroyed = true
-        state.timerGeneration = state.timerGeneration + 1
-        state.savePending = false
-        if type(deps.onDestroy) == "function" then pcall(deps.onDestroy) end
-    end
-    return api
-end
-
 
 --------------------------------------------------------------------
 -- INTEGRATION
@@ -807,8 +159,6 @@ State.diagnostics["FusionRules"] = Integration.modules.FusionRules and "FOUND" o
 State.diagnostics["IncubatorView"] = Integration.modules.IncubatorView and "FOUND" or "MISSING"
 State.diagnostics["AutoSell.Factory"] = "PRESENT"
 State.diagnostics["AutoFuse.Factory"] = "PRESENT"
-State.diagnostics["AntiCheat Bypass"] = "NOT IMPLEMENTED — diagnostic audit only"
-State.diagnostics["Performance Scope"] = "APPROVED ROOTS ONLY; detection roots protected"
 
 local remotesFolder = ReplicatedStorage:FindFirstChild("Remotes")
 for _, name in ipairs({
@@ -893,7 +243,6 @@ local function isContinueOpen()
     return State.tower.continue ~= nil and State.tower.continue.open == true
 end
 local function tryInvoke(name, ...)
-    recordRegression("remote_attempt", name, "tryInvoke")
     local core = Integration.modules.Remotes
     local args = table.pack(...)
     if core and core.defs and core.defs[name] then
@@ -901,12 +250,10 @@ local function tryInvoke(name, ...)
         local kind = def.kind or def.type
         if kind == "Function" and type(core.invoke) == "function" then
             local ok, res = pcall(function() return core.invoke(def, table.unpack(args, 1, args.n)) end)
-            recordRegression("remote", name, ok and "ok" or tostring(res))
             return ok, res
         end
         if kind == "Event" and type(core.fire) == "function" then
             local ok, err = pcall(function() core.fire(def, table.unpack(args, 1, args.n)) end)
-            recordRegression("remote", name, ok and "ok" or tostring(err))
             return ok, err
         end
     end
@@ -914,12 +261,10 @@ local function tryInvoke(name, ...)
     if not remote then return false, "missing" end
     if remote:IsA("RemoteFunction") then
         local ok, res = pcall(function() return remote:InvokeServer(table.unpack(args, 1, args.n)) end)
-        recordRegression("remote", name, ok and "ok" or tostring(res))
         if not ok then return false, res end
         return true, res
     elseif remote:IsA("RemoteEvent") or remote:IsA("UnreliableRemoteEvent") then
         local ok, err = pcall(function() remote:FireServer(table.unpack(args, 1, args.n)) end)
-        recordRegression("remote", name, ok and "ok" or tostring(err))
         return ok, err
     end
     return false, "bad class"
@@ -3062,9 +2407,6 @@ local function createAutoHatch(deps)
         if not feature.enabled then feature.status = "DISABLED" end
     end
     function feature.setAutoHatch(on)
-        on = on == true
-        if feature.enabled == on then return true end
-        recordRegression("enabled", "AutoHatch", on)
         feature.enabled = on == true
         State.toggles.autoHatch = feature.enabled
         feature.generation += 1
@@ -3140,9 +2482,6 @@ local function createAutoIncubatorClaim(deps)
         if not feature.enabled then feature.status = "DISABLED" end
     end
     function feature.setAutoIncubatorClaim(on)
-        on = on == true
-        if feature.enabled == on then return true end
-        recordRegression("enabled", "AutoIncubatorClaim", on)
         feature.enabled = on == true
         State.toggles.autoIncubatorClaim = feature.enabled
         feature.generation += 1
@@ -3356,9 +2695,6 @@ do
     end
 
     function feature.setAutoUpgradeIncubator(on)
-        on = on == true
-        if feature.enabled == on then return true end
-        recordRegression("enabled", "AutoUpgradeIncubator", on)
         feature.enabled = on == true
         State.toggles.autoUpgradeIncubator = feature.enabled
         feature.generation += 1
@@ -3391,235 +2727,6 @@ do
         or (Integration.modules.Remotes and Integration.modules.Remotes.defs and Integration.modules.Remotes.defs.IncubatorUpgrade and "DEF")
         or "MISSING"
 end
-
---------------------------------------------------------------------
--- Performance Manager + Config Manager
---------------------------------------------------------------------
-do
-    local function setVisualCover(enabled)
-        if enabled then
-            if visualCoverGui and visualCoverGui.Parent then visualCoverGui.Enabled = true; return end
-            local gui = Instance.new("ScreenGui")
-            gui.Name = "UNO_HUB_VisualCover"
-            gui.IgnoreGuiInset = true
-            gui.DisplayOrder = 100
-            gui.ResetOnSpawn = false
-            local frame = Instance.new("Frame")
-            frame.Size = UDim2.fromScale(1, 1)
-            frame.BackgroundColor3 = Color3.fromRGB(8, 8, 10)
-            frame.BorderSizePixel = 0
-            frame.Parent = gui
-            local openBtn = Instance.new("TextButton")
-            openBtn.Size = UDim2.fromOffset(120, 32)
-            openBtn.Position = UDim2.new(1, -132, 0, 12)
-            openBtn.BackgroundColor3 = Theme.Primary
-            openBtn.Text = "UNO HUB"
-            openBtn.Font = Enum.Font.GothamBold
-            openBtn.TextSize = 12
-            openBtn.TextColor3 = Color3.new(1, 1, 1)
-            openBtn.AutoButtonColor = false
-            openBtn.Parent = frame
-            corner(openBtn, 6)
-            openBtn.MouseButton1Click:Connect(function()
-                State.visible = true
-                if Main then Main.Visible = true end
-            end)
-            gui.Parent = PlayerGui
-            visualCoverGui = gui
-        else
-            if visualCoverGui then pcall(function() visualCoverGui:Destroy() end); visualCoverGui = nil end
-        end
-    end
-    local function isProtectedInstance(inst)
-        if not inst then return false end
-        -- Never touch UNO HUB UI or PlayerGui chrome
-        local ok, current = pcall(function() return inst end)
-        if ok and inst then
-            local node = inst
-            for _ = 1, 12 do
-                if not node then break end
-                local n = ""
-                pcall(function() n = node.Name end)
-                if n == "UNO_HUB" or n == "UNO_HUB_VisualCover" or n == "PlayerGui" then
-                    return true
-                end
-                local par = nil
-                pcall(function() par = node.Parent end)
-                node = par
-            end
-        end
-        local name = ""
-        pcall(function() name = inst.Name end)
-        local lower = string.lower(tostring(name))
-        for _, tok in ipairs({"hotegg", "nestegg", "meteor", "hazard", "pitzone", "carrier", "uno_hub"}) do
-            if string.find(lower, tok, 1, true) then return true end
-        end
-        local tagged = false
-        pcall(function() if CollectionService:HasTag(inst, "NestEgg") then tagged = true end end)
-        return tagged
-    end
-    local function getCosmeticRoots()
-        local roots = {}
-        -- Lighting is intentionally excluded: the full tree is not proven cosmetic.
-        for _, name in ipairs({"Effects", "VFX", "Visuals", "Fx", "FX", "Particles"}) do
-            local a = Workspace:FindFirstChild(name); if a then table.insert(roots, a) end
-            local b = ReplicatedStorage:FindFirstChild(name); if b then table.insert(roots, b) end
-        end
-        return roots
-    end
-    local function isOtherChickenModel() return false end
-
-    PerformanceManager = createPerformanceManager({
-        services = { Players = Players, Lighting = Lighting, Workspace = Workspace },
-        localPlayer = LocalPlayer,
-        getCosmeticRoots = getCosmeticRoots,
-        isProtectedInstance = isProtectedInstance,
-        isOtherChickenModel = isOtherChickenModel,
-        setVisualCover = setVisualCover,
-        log = function(msg, payload)
-            log("PERF", tostring(msg) .. (payload and (" " .. tostring(payload)) or ""))
-        end,
-    })
-    State.diagnostics["PerformanceManager"] = PerformanceManager and "READY" or "MISSING"
-
-    ConfigManager = createConfigManager({
-        HttpService = HttpService,
-        onLoaded = function(document)
-            State.diagnostics["Saved Config"] = "LOADED (workers gated)"
-            State.diagnostics["Saved Automation"] = document.automation and "PRESENT" or "MISSING"
-            State.diagnostics["Saved Sell"] = document.sell and "PRESENT" or "MISSING"
-            State.diagnostics["Saved Fuse"] = document.fuse and "PRESENT" or "MISSING"
-            State.diagnostics["Saved Performance"] = document.performance and "PRESENT" or "MISSING"
-        end,
-        log = function(msg, payload)
-            log("CFG", tostring(msg) .. (payload and (" " .. tostring(payload)) or ""))
-        end,
-    })
-    State.diagnostics["ConfigManager"] = ConfigManager and (ConfigManager.isPersistenceAvailable() and "READY" or "NO FS") or "MISSING"
-
-    if ConfigManager then
-        ConfigManager.registerSection("automation", function()
-            return {
-                autoFarmRebirth = State.toggles.autoFarmRebirth == true,
-                autoKoDismiss = State.toggles.autoKoDismiss == true,
-                autoCollectEgg = State.toggles.autoCollectEgg == true,
-                autoHotEgg = State.toggles.autoHotEgg == true,
-                antiAfk = State.toggles.antiAfk == true,
-                autoHatch = State.toggles.autoHatch == true,
-                autoIncubatorClaim = State.toggles.autoIncubatorClaim == true,
-                autoUpgradeIncubator = State.toggles.autoUpgradeIncubator == true,
-                autoBuyGenerator = State.toggles.autoBuyGenerator == true,
-                autoUpgradeGenerator = State.toggles.autoUpgradeGenerator == true,
-                autoExpandCoop = State.toggles.autoExpandCoop == true,
-                autoUpgradeRecycler = State.toggles.autoUpgradeRecycler == true,
-            }
-        end, function(data)
-            if type(data) ~= "table" then return end
-            if BYPASS_STARTUP or ISOLATION_MODE then return end
-            local function applyToggle(key, setter)
-                if data[key] == nil then return end
-                State.toggles[key] = data[key] == true
-                if setter then pcall(setter, data[key] == true) end
-            end
-            applyToggle("autoFarmRebirth", setAutoFarmRebirth)
-            applyToggle("autoKoDismiss")
-            if AutoCollectEggFeature then applyToggle("autoCollectEgg", function(v) AutoCollectEggFeature.setAutoCollectEggs(v) end) end
-            applyToggle("autoHotEgg", setAutoHotEgg)
-            applyToggle("antiAfk", setAntiAfk)
-            if HatchFeature then applyToggle("autoHatch", function(v) HatchFeature.setAutoHatch(v) end) end
-            if IncubatorClaimFeature then applyToggle("autoIncubatorClaim", function(v) IncubatorClaimFeature.setAutoIncubatorClaim(v) end) end
-            if AutoUpgradeIncubatorFeature then applyToggle("autoUpgradeIncubator", function(v) AutoUpgradeIncubatorFeature.setAutoUpgradeIncubator(v) end) end
-            applyToggle("autoBuyGenerator", setAutoBuyGenerator)
-            applyToggle("autoUpgradeGenerator", setAutoUpgradeGenerator)
-            applyToggle("autoExpandCoop", setAutoExpandCoop)
-            applyToggle("autoUpgradeRecycler", setAutoUpgradeRecycler)
-        end, { defaults = {} })
-
-        ConfigManager.registerSection("hotEgg", function()
-            return { meteorAvoidance = HE.meteorAvoidance == true, movementMode = HE.movementMode or "Tween", exitPitAfter = HE.exitPitAfter == true }
-        end, function(data)
-            if type(data) ~= "table" then return end
-            if BYPASS_STARTUP or ISOLATION_MODE then return end
-            if data.meteorAvoidance ~= nil then HE.meteorAvoidance = data.meteorAvoidance == true end
-            if type(data.movementMode) == "string" then HE.movementMode = data.movementMode end
-            if data.exitPitAfter ~= nil then HE.exitPitAfter = data.exitPitAfter == true end
-        end, { defaults = { meteorAvoidance = true, movementMode = "Tween", exitPitAfter = true } })
-
-        ConfigManager.registerSection("sell", function()
-            if not AutoSellFeature then return { enabled = false, dryRun = true } end
-            return {
-                enabled = (AutoSellFeature.isEnabled and AutoSellFeature.isEnabled()) or false,
-                dryRun = (AutoSellFeature.getDryRun and AutoSellFeature.getDryRun()) or true,
-                rarities = (AutoSellFeature.getSelectedRarities and AutoSellFeature.getSelectedRarities()) or {},
-                protectFavorites = (AutoSellFeature.getProtectFavorites and AutoSellFeature.getProtectFavorites()) or true,
-                protectMutated = (AutoSellFeature.getProtectMutated and AutoSellFeature.getProtectMutated()) or true,
-            }
-        end, function(data)
-            if type(data) ~= "table" or not AutoSellFeature then return end
-            if BYPASS_STARTUP or ISOLATION_MODE then return end
-            if type(data.rarities) == "table" then
-                if AutoSellFeature.clearRaritySelection then pcall(AutoSellFeature.clearRaritySelection) end
-                for _, r in ipairs(data.rarities) do pcall(AutoSellFeature.setRaritySelected, r, true) end
-            end
-            if data.protectFavorites ~= nil then pcall(AutoSellFeature.setProtectFavorites, data.protectFavorites == true) end
-            if data.protectMutated ~= nil then pcall(AutoSellFeature.setProtectMutated, data.protectMutated == true) end
-            if data.dryRun ~= nil then pcall(AutoSellFeature.setDryRun, data.dryRun == true) end
-            if data.enabled ~= nil then pcall(AutoSellFeature.setAutoSell, data.enabled == true) end
-        end, { defaults = { enabled = false, dryRun = true } })
-
-        ConfigManager.registerSection("fuse", function()
-            if not AutoFuseFeature then return { enabled = false, dryRun = true, matchMode = "Same Chicken", keepCopies = 1 } end
-            return {
-                enabled = (AutoFuseFeature.isEnabled and AutoFuseFeature.isEnabled()) or false,
-                dryRun = (AutoFuseFeature.getDryRun and AutoFuseFeature.getDryRun()) or true,
-                matchMode = (AutoFuseFeature.getMatchMode and AutoFuseFeature.getMatchMode()) or "Same Chicken",
-                rarities = (AutoFuseFeature.getSelectedRarities and AutoFuseFeature.getSelectedRarities()) or {},
-                keepCopies = (AutoFuseFeature.getKeepCopies and AutoFuseFeature.getKeepCopies()) or 1,
-                protectFavorites = (AutoFuseFeature.getProtectFavorites and AutoFuseFeature.getProtectFavorites()) or true,
-                protectMutated = (AutoFuseFeature.getProtectMutated and AutoFuseFeature.getProtectMutated()) or true,
-            }
-        end, function(data)
-            if type(data) ~= "table" or not AutoFuseFeature then return end
-            if BYPASS_STARTUP or ISOLATION_MODE then return end
-            if type(data.matchMode) == "string" then pcall(AutoFuseFeature.setMatchMode, data.matchMode) end
-            if data.keepCopies ~= nil then pcall(AutoFuseFeature.setKeepCopies, data.keepCopies) end
-            if type(data.rarities) == "table" then
-                if AutoFuseFeature.clearRaritySelection then pcall(AutoFuseFeature.clearRaritySelection) end
-                for _, r in ipairs(data.rarities) do pcall(AutoFuseFeature.setRaritySelected, r, true) end
-            end
-            if data.protectFavorites ~= nil then pcall(AutoFuseFeature.setProtectFavorites, data.protectFavorites == true) end
-            if data.protectMutated ~= nil then pcall(AutoFuseFeature.setProtectMutated, data.protectMutated == true) end
-            if data.dryRun ~= nil then pcall(AutoFuseFeature.setDryRun, data.dryRun == true) end
-            if data.enabled ~= nil then pcall(AutoFuseFeature.setAutoFuse, data.enabled == true) end
-        end, { defaults = { enabled = false, dryRun = true, matchMode = "Same Chicken", keepCopies = 1 } })
-
-        ConfigManager.registerSection("performance", function()
-            if not PerformanceManager then return {} end
-            return {
-                boostFPS = PerformanceManager.getBoostFPS(),
-                disableVFX = PerformanceManager.getDisableVFX(),
-                disableShadows = PerformanceManager.getDisableShadows(),
-                hideOtherPlayers = PerformanceManager.getHideOtherPlayers(),
-                hideOtherChickens = PerformanceManager.getHideOtherChickens(),
-                whiteScreen = PerformanceManager.getWhiteScreen(),
-                ultraPerformance = PerformanceManager.getUltraPerformance(),
-            }
-        end, function(data)
-            if type(data) ~= "table" or not PerformanceManager then return end
-            if BYPASS_STARTUP or ISOLATION_MODE then return end
-            if data.disableVFX ~= nil then PerformanceManager.setDisableVFX(data.disableVFX == true) end
-            if data.disableShadows ~= nil then PerformanceManager.setDisableShadows(data.disableShadows == true) end
-            if data.hideOtherPlayers ~= nil then PerformanceManager.setHideOtherPlayers(data.hideOtherPlayers == true) end
-            if data.hideOtherChickens ~= nil then PerformanceManager.setHideOtherChickens(data.hideOtherChickens == true) end
-            if data.whiteScreen ~= nil then PerformanceManager.setWhiteScreen(data.whiteScreen == true) end
-            if data.boostFPS ~= nil then PerformanceManager.setBoostFPS(data.boostFPS == true) end
-            if data.ultraPerformance ~= nil then PerformanceManager.setUltraPerformance(data.ultraPerformance == true) end
-        end, { defaults = { boostFPS = false, disableVFX = false, disableShadows = false, hideOtherPlayers = false, hideOtherChickens = false, whiteScreen = false, ultraPerformance = false } })
-
-        -- load deferred until after AFR/HE definitions
-    end
-end
-
 
 
 --------------------------------------------------------------------
@@ -3689,9 +2796,6 @@ local function economyWorker(name, enabled, body)
     end)
 end
 local function setAutoBuyGenerator(on)
-    on = on == true
-    if State.toggles.autoBuyGenerator == on then return end
-    recordRegression("enabled", "setAutoBuyGenerator", on)
     State.toggles.autoBuyGenerator = on
     if not on then State.economy.buyStatus = "IDLE" end
     economyWorker("autoBuyGenerator", on, function()
@@ -3715,9 +2819,6 @@ local function setAutoBuyGenerator(on)
     end)
 end
 local function setAutoUpgradeGenerator(on)
-    on = on == true
-    if State.toggles.autoUpgradeGenerator == on then return end
-    recordRegression("enabled", "setAutoUpgradeGenerator", on)
     State.toggles.autoUpgradeGenerator = on
     if not on then State.economy.upgradeStatus = "IDLE" end
     economyWorker("autoUpgradeGenerator", on, function()
@@ -3746,9 +2847,6 @@ local function setAutoUpgradeGenerator(on)
     end)
 end
 local function setAutoExpandCoop(on)
-    on = on == true
-    if State.toggles.autoExpandCoop == on then return end
-    recordRegression("enabled", "setAutoExpandCoop", on)
     State.toggles.autoExpandCoop = on
     if not on then State.economy.expandStatus = "IDLE" end
     economyWorker("autoExpandCoop", on, function()
@@ -3767,9 +2865,6 @@ local function setAutoExpandCoop(on)
     end)
 end
 local function setAutoUpgradeRecycler(on)
-    on = on == true
-    if State.toggles.autoUpgradeRecycler == on then return end
-    recordRegression("enabled", "setAutoUpgradeRecycler", on)
     State.toggles.autoUpgradeRecycler = on
     if not on then State.economy.recyclerStatus = "IDLE" end
     economyWorker("autoUpgradeRecycler", on, function()
@@ -4297,9 +3392,6 @@ local function heTick(token)
     if not HE.enabled then heSetPhase("DISABLED", "—") end
 end
 local function setAutoHotEgg(on)
-    on = on == true
-    if State.toggles.autoHotEgg == on then return end
-    recordRegression("enabled", "setAutoHotEgg", on)
     State.toggles.autoHotEgg = on
     HE.enabled = on
     heCancel()
@@ -4451,9 +3543,6 @@ local function afrTick(token)
     if not AFR.enabled then afrSetPhase("DISABLED") end
 end
 local function setAutoFarmRebirth(on)
-    on = on == true
-    if State.toggles.autoFarmRebirth == on then return end
-    recordRegression("enabled", "setAutoFarmRebirth", on)
     State.toggles.autoFarmRebirth = on
     AFR.enabled = on
     afrCancel()
@@ -4634,8 +3723,6 @@ local function setVisible(vis)
 end
 local function shutdown()
     State.closed = true; State.generation += 1
-    -- save config while feature getters still available
-    if ConfigManager then pcall(function() ConfigManager.destroy() end) end
     if AutoCollectEggFeature then pcall(function() AutoCollectEggFeature.setAutoCollectEggs(false); AutoCollectEggFeature.destroy() end) end
     if AutoSellFeature then pcall(function() AutoSellFeature.setAutoSell(false); AutoSellFeature.destroy() end) end
     if AutoFuseFeature then pcall(function() AutoFuseFeature.setAutoFuse(false); AutoFuseFeature.destroy() end) end
@@ -4645,8 +3732,6 @@ local function shutdown()
     afrCancel(); heCancel(); antiAfkGen += 1
     for name in pairs(Economy.generations) do stopEconomy(name) end
     for k in pairs(State.toggles) do State.toggles[k] = false end
-    if PerformanceManager then pcall(function() PerformanceManager.destroy() end) end
-    if visualCoverGui then pcall(function() visualCoverGui:Destroy() end); visualCoverGui = nil end
     maid:Cleanup(); Gui:Destroy()
 end
 minBtn.MouseButton1Click:Connect(function() setVisible(false) end)
@@ -4663,30 +3748,11 @@ end)
 local Views = {}
 local function createScrollPage()
     local sc = Instance.new("ScrollingFrame")
-    sc.Name = "PageRoot"
-    sc.Size = UDim2.fromScale(1, 1)
-    sc.Position = UDim2.fromOffset(0, 0)
-    sc.BackgroundTransparency = 1
-    sc.BorderSizePixel = 0
-    sc.ScrollBarThickness = 3
-    sc.AutomaticCanvasSize = Enum.AutomaticSize.Y
-    sc.CanvasSize = UDim2.new(0, 0, 0, 0)
-    sc.ZIndex = 2
-    sc.Visible = false
-    sc.Parent = PageHost
-    local lay = Instance.new("UIListLayout")
-    lay.Name = "PageLayout"
-    lay.Padding = UDim.new(0, 10)
-    lay.SortOrder = Enum.SortOrder.LayoutOrder
-    lay.Parent = sc
+    sc.Size = UDim2.fromScale(1, 1); sc.BackgroundTransparency = 1; sc.BorderSizePixel = 0
+    sc.ScrollBarThickness = 3; sc.AutomaticCanvasSize = Enum.AutomaticSize.Y; sc.CanvasSize = UDim2.new()
+    sc.Visible = false; sc.Parent = PageHost
+    local lay = Instance.new("UIListLayout"); lay.Padding = UDim.new(0, 10); lay.SortOrder = Enum.SortOrder.LayoutOrder; lay.Parent = sc
     pad(sc, 16, 18, 20, 18)
-    -- Fallback if AutomaticCanvasSize stalls at 0
-    lay:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
-        local y = lay.AbsoluteContentSize.Y + 36
-        if y > 0 and (sc.AbsoluteCanvasSize.Y < 1 or sc.CanvasSize.Y.Offset < y) then
-            sc.CanvasSize = UDim2.new(0, 0, 0, y)
-        end
-    end)
     return sc
 end
 local function card(parent, order, title, desc)
@@ -4721,20 +3787,13 @@ local function settingRow(parent, order, title, desc, key, onChange)
     local sw = select(1, makeSwitch(top, State.toggles[key] == true, function(v)
         State.toggles[key] = v
         if onChange then onChange(v) end
-        markConfigDirty()
     end))
     sw.Position = UDim2.new(1, -40, 0.5, -11)
 end
 local function safeBuild(name, fn)
-    local ok, err = xpcall(fn, function(e)
-        if type(debug) == "table" and type(debug.traceback) == "function" then
-            return debug.traceback(tostring(e), 2)
-        end
-        return tostring(e)
-    end)
+    local ok, err = pcall(fn)
     if not ok then
         log("ERROR", "Build " .. name .. ": " .. tostring(err))
-        warn("[UNO UI] PAGE ERROR", name, err)
         local sc = createScrollPage()
         local _, inner = card(sc, 1, "PAGE ERROR")
         setText(row(inner, 1, "Error"), tostring(err))
@@ -5354,105 +4413,7 @@ safeBuild("Diagnostics", function()
 end)
 safeBuild("Settings", function()
     local sc = createScrollPage()
-    local _, perfCard = card(sc, 1, "PERFORMANCE")
-    if PerformanceManager then
-        local function perfToggle(order, title, getter, setter)
-            local f = Instance.new("Frame"); f.LayoutOrder = order; f.Size = UDim2.new(1, 0, 0, 28)
-            f.BackgroundTransparency = 1; f.Parent = perfCard
-            text(f, title, 13, Theme.TextPrimary, Enum.Font.GothamMedium).Size = UDim2.new(1, -50, 1, 0)
-            local sw = select(1, makeSwitch(f, getter() == true, function(v) setter(v); markConfigDirty() end))
-            sw.Position = UDim2.new(1, -40, 0.5, -11)
-        end
-        perfToggle(1, "Boost FPS + Low Graphics", PerformanceManager.getBoostFPS, PerformanceManager.setBoostFPS)
-        perfToggle(2, "Disable VFX", PerformanceManager.getDisableVFX, PerformanceManager.setDisableVFX)
-        perfToggle(3, "Disable Shadows", PerformanceManager.getDisableShadows, PerformanceManager.setDisableShadows)
-        perfToggle(4, "Hide Other Players", PerformanceManager.getHideOtherPlayers, PerformanceManager.setHideOtherPlayers)
-        perfToggle(5, "Hide Other Chickens", PerformanceManager.getHideOtherChickens, PerformanceManager.setHideOtherChickens)
-        perfToggle(6, "White Screen / AFK Saver", PerformanceManager.getWhiteScreen, PerformanceManager.setWhiteScreen)
-        perfToggle(7, "Ultra Performance", PerformanceManager.getUltraPerformance, PerformanceManager.setUltraPerformance)
-        local pStatus = row(perfCard, 10, "Status")
-        local pVfx = row(perfCard, 11, "VFX Disabled")
-        local pPl = row(perfCard, 12, "Player Parts Hidden")
-        local pCh = row(perfCard, 13, "Chicken Parts Hidden")
-        local pCover = row(perfCard, 14, "Screen Cover")
-        local pRender = row(perfCard, 15, "Actual Rendering Disable")
-        local pNote = row(perfCard, 16, "Hide Chickens")
-        Views._perfUpdate = function()
-            setText(pStatus, PerformanceManager.getStatus())
-            local st = PerformanceManager.getStats()
-            setText(pVfx, st.visualObjectsDisabled)
-            setText(pPl, st.playerPartsHidden)
-            setText(pCh, st.chickenPartsHidden)
-            setText(pCover, st.whiteScreenIsVisualCover and "VISUAL COVER" or "OFF")
-            setText(pRender, "NO")
-            setText(pNote, "UNAVAILABLE — MAPPING NOT VERIFIED")
-        end
-    else
-        setText(row(perfCard, 1, "Status"), "MISSING")
-        Views._perfUpdate = function() end
-    end
-
-    local _, cfgCard = card(sc, 2, "CONFIG")
-    local resetArmedUntil = 0
-    if ConfigManager then
-        do
-            local f = Instance.new("Frame"); f.LayoutOrder = 1; f.Size = UDim2.new(1, 0, 0, 28)
-            f.BackgroundTransparency = 1; f.Parent = cfgCard
-            text(f, "Auto Save Config", 13, Theme.TextPrimary, Enum.Font.GothamMedium).Size = UDim2.new(1, -50, 1, 0)
-            local sw = select(1, makeSwitch(f, ConfigManager.getAutoSave() == true, function(v) ConfigManager.setAutoSave(v) end))
-            sw.Position = UDim2.new(1, -40, 0.5, -11)
-        end
-        do
-            local f = Instance.new("Frame"); f.LayoutOrder = 2; f.Size = UDim2.new(1, 0, 0, 28)
-            f.BackgroundTransparency = 1; f.Parent = cfgCard
-            text(f, "Restore Destructive Automation", 13, Theme.TextPrimary, Enum.Font.GothamMedium).Size = UDim2.new(1, -50, 1, 0)
-            local sw = select(1, makeSwitch(f, ConfigManager.getRestoreDestructiveAutomation() == true, function(v) ConfigManager.setRestoreDestructiveAutomation(v) end))
-            sw.Position = UDim2.new(1, -40, 0.5, -11)
-        end
-        local cPersist = row(cfgCard, 3, "Persistence")
-        local cStatus = row(cfgCard, 4, "Status")
-        local cDirty = row(cfgCard, 5, "Dirty")
-        local cErr = row(cfgCard, 6, "Last Error")
-        local function cfgBtn(parent, order, label, color, fn)
-            local f = Instance.new("Frame"); f.LayoutOrder = order; f.Size = UDim2.new(1, 0, 0, 34)
-            f.BackgroundTransparency = 1; f.Parent = parent
-            local b = Instance.new("TextButton"); b.Size = UDim2.new(1, 0, 1, 0)
-            b.BackgroundColor3 = color or Theme.SurfaceElevated; b.Text = label
-            b.Font = Enum.Font.GothamMedium; b.TextSize = 12; b.TextColor3 = Theme.TextPrimary
-            b.AutoButtonColor = false; b.Parent = f; corner(b, 6); b.MouseButton1Click:Connect(fn)
-            return b
-        end
-        cfgBtn(cfgCard, 7, "Save Now", Theme.Primary, function() ConfigManager.saveNow() end)
-        cfgBtn(cfgCard, 8, "Reload Config", Theme.SurfaceElevated, function()
-            isApplyingConfig = true; State.applyingConfig = true
-            ConfigManager.load()
-            isApplyingConfig = false; State.applyingConfig = false
-        end)
-        local resetBtn = cfgBtn(cfgCard, 9, "Reset Config", Theme.Danger, function()
-            local now = os.clock()
-            if now > resetArmedUntil then
-                resetArmedUntil = now + 4
-                if resetBtn then resetBtn.Text = "CONFIRM RESET" end
-                return
-            end
-            resetArmedUntil = 0
-            if resetBtn then resetBtn.Text = "Reset Config" end
-            isApplyingConfig = true; State.applyingConfig = true
-            ConfigManager.resetToDefaults(true)
-            isApplyingConfig = false; State.applyingConfig = false
-        end)
-        Views._cfgUpdate = function()
-            setText(cPersist, ConfigManager.isPersistenceAvailable() and "AVAILABLE" or "UNAVAILABLE")
-            setText(cStatus, ConfigManager.getStatus())
-            setText(cDirty, ConfigManager.isDirty() and "YES" or "NO")
-            setText(cErr, ConfigManager.getLastError())
-        end
-    else
-        setText(row(cfgCard, 1, "Status"), "MISSING")
-        Views._cfgUpdate = function() end
-    end
-
-    local _, actions = card(sc, 3, "ACTIONS")
+    local _, actions = card(sc, 1, "ACTIONS")
     local function actionBtn(parent, order, label, color, fn)
         local f = Instance.new("Frame"); f.LayoutOrder = order; f.Size = UDim2.new(1, 0, 0, 34)
         f.BackgroundTransparency = 1; f.Parent = parent
@@ -5463,32 +4424,15 @@ safeBuild("Settings", function()
     end
     actionBtn(actions, 1, "Reset Window Position", Theme.SurfaceElevated, function() Main.Position = UDim2.fromScale(0.5, 0.5) end)
     actionBtn(actions, 2, "Close UNO HUB", Theme.Danger, shutdown)
-    Views.Settings = { root = sc, update = function()
-        if Views._perfUpdate then pcall(Views._perfUpdate) end
-        if Views._cfgUpdate then pcall(Views._cfgUpdate) end
-    end }
+    Views.Settings = { root = sc, update = function() end }
 end)
 
 local function showPage(id)
-    local target = Views[id]
-    if type(target) ~= "table" or typeof(target.root) ~= "Instance" then
-        warn("[UNO UI] Missing page:", tostring(id))
-        return
-    end
     State.page = id
-    if PageTitle then PageTitle.Text = string.upper(id) end
-    if PageDesc then PageDesc.Text = pageDescs[id] or "" end
+    PageTitle.Text = string.upper(id)
+    PageDesc.Text = pageDescs[id] or ""
     for pid, view in pairs(Views) do
-        -- Ignore helper keys like _perfUpdate / _cfgUpdate
-        if type(view) == "table" and typeof(view.root) == "Instance" then
-            view.root.Visible = false
-        end
-    end
-    target.root.Visible = true
-    target.root.Position = UDim2.fromOffset(0, 0)
-    target.root.Size = UDim2.fromScale(1, 1)
-    if target.root.Parent ~= PageHost then
-        target.root.Parent = PageHost
+        if view and view.root then view.root.Visible = (pid == id) end
     end
     for pid, btn in pairs(navButtons) do
         local selected = pid == id
@@ -5498,7 +4442,8 @@ local function showPage(id)
         local label = btn:FindFirstChild("Label")
         if label then label.TextColor3 = selected and Theme.TextPrimary or Theme.TextSecondary end
     end
-    if type(target.update) == "function" then pcall(target.update) end
+    local view = Views[id]
+    if view and view.update then pcall(view.update) end
 end
 
 for i, p in ipairs(pages) do
@@ -5526,50 +4471,13 @@ maid:Task(function(token)
     end
 end)
 
-
--- One-time page visibility audit (UI only)
-do
-    local pageIds = {"Home","Auto Farm","Tower","Rebirth","Eggs","Chickens","Fuse","Incubator","Coop","Events","Utility","Diagnostics","Settings"}
-    for _, pid in ipairs(pageIds) do
-        local view = Views[pid]
-        local root = type(view) == "table" and view.root or nil
-        if typeof(root) ~= "Instance" then
-            warn("[UNO UI] missing root:", pid)
-        else
-            local parentName = root.Parent and root.Parent.Name or "nil"
-            local childCount = #root:GetChildren()
-            print(string.format(
-                "[UNO UI] %s root=%s parent=%s visible=%s children=%d absSize=%s",
-                pid, root.Name, parentName, tostring(root.Visible), childCount, tostring(root.AbsoluteSize)
-            ))
-            if root.Parent ~= PageHost then
-                warn("[UNO UI] reparenting", pid, "to PageHost")
-                root.Parent = PageHost
-            end
-            root.Size = UDim2.fromScale(1, 1)
-            root.Position = UDim2.fromOffset(0, 0)
-        end
-    end
-    print("[UNO UI] PageHost absSize=", PageHost.AbsoluteSize, "ContentRoot absSize=", ContentRoot.AbsoluteSize)
-end
-
 refreshData()
 refreshEconomyStatus()
--- Config load after all feature functions exist.
--- In bypass/isolation mode the file is read for diagnostics, but no worker or
--- performance setter is allowed to activate from saved state.
-if ConfigManager then
-    if BYPASS_STARTUP or ISOLATION_MODE then
-        State.diagnostics["Startup Mode"] = ISOLATION_MODE and "ISOLATION — ALL OFF" or "BYPASS — ALL OFF"
-        recordRegression("action", "Startup", "saved config loaded without activation")
-    end
-    isApplyingConfig = true
-    State.applyingConfig = true
-    pcall(function() ConfigManager.load() end)
-    isApplyingConfig = false
-    State.applyingConfig = false
-end
 showPage("Home")
-log("INFO", "UNO HUB — UI page visibility fix")
+log("INFO", "UNO HUB — Feature regression restored from clean base")
 print("[UNO HUB] AutoSellFeature =", AutoSellFeature and "READY" or State.diagnostics["AutoSell.Feature"])
 print("[UNO HUB] AutoFuseFeature =", AutoFuseFeature and "READY" or State.diagnostics["AutoFuse.Feature"])
+print("[UNO HUB] HatchFeature =", HatchFeature and "READY" or "MISSING")
+print("[UNO HUB] AutoCollectEggFeature =", AutoCollectEggFeature and "READY" or "MISSING")
+print("[UNO HUB] IncubatorClaimFeature =", IncubatorClaimFeature and "READY" or "MISSING")
+print("[UNO HUB] AutoUpgradeIncubatorFeature =", AutoUpgradeIncubatorFeature and "READY" or "MISSING")

@@ -84,24 +84,10 @@ Maid.__index = Maid
 function Maid.new() return setmetatable({ items = {} }, Maid) end
 function Maid:Give(item) table.insert(self.items, item) return item end
 function Maid:Connect(signal, fn) local c = signal:Connect(fn) return self:Give(c) end
-function Maid:Task(fn, taskName)
+function Maid:Task(fn)
     local token = { cancelled = false }
     self:Give(function() token.cancelled = true end)
-    task.spawn(function()
-        local ok, err = xpcall(function()
-            fn(token)
-        end, function(message)
-            local trace = tostring(message)
-            if debug and type(debug.traceback) == "function" then
-                local traceOk, traceValue = pcall(debug.traceback, tostring(message), 2)
-                if traceOk and traceValue then trace = tostring(traceValue) end
-            end
-            return trace
-        end)
-        if not ok then
-            warn("[UNO WORKER ERROR] " .. tostring(taskName or "UNNAMED") .. " :: " .. tostring(err))
-        end
-    end)
+    task.spawn(function() fn(token) end)
     return token
 end
 function Maid:Cleanup()
@@ -113,33 +99,6 @@ function Maid:Cleanup()
     self.items = {}
 end
 local maid = Maid.new()
-
--- REV6 diagnostic capture for executor errors that only show "Script '', Line 1".
-do
-    local okService, ScriptContext = pcall(function()
-        return game:GetService("ScriptContext")
-    end)
-    if okService and ScriptContext and ScriptContext.Error then
-        local okConnect, connection = pcall(function()
-            return ScriptContext.Error:Connect(function(message, stackTrace, scriptInstance)
-                local msg = tostring(message or "")
-                if string.find(string.lower(msg), "nil value", 1, true)
-                    or string.find(string.lower(msg), "attempt to call", 1, true) then
-                    warn("[UNO SCRIPT ERROR CAPTURE] " .. msg)
-                    if stackTrace and tostring(stackTrace) ~= "" then
-                        warn("[UNO SCRIPT ERROR STACK] " .. tostring(stackTrace))
-                    end
-                    if scriptInstance then
-                        warn("[UNO SCRIPT ERROR INSTANCE] " .. tostring(scriptInstance))
-                    end
-                end
-            end)
-        end)
-        if okConnect and connection then
-            maid:Give(connection)
-        end
-    end
-end
 
 local State = {
     closed = false, visible = true, page = "Home", generation = 0,
@@ -173,7 +132,7 @@ local State = {
         autoFarmRebirth = false, autoKoDismiss = true, autoHatch = false, autoCollectEgg = false,
         autoIncubatorClaim = false, autoSell = false, autoFuse = false,
         autoBuyGenerator = false, autoUpgradeGenerator = false, autoExpandCoop = false, autoUpgradeRecycler = false, autoUpgradeIncubator = false,
-        antiAfk = false, autoRebirth = false, autoHotEgg = false, autoArena = false, autoEventCapsule = false, autoKraken = false, showFloatingButton = true, reducedMotion = false,
+        antiAfk = true, autoRebirth = false, autoHotEgg = false, autoArena = false, autoEventCapsule = false, autoKraken = false, showFloatingButton = true, reducedMotion = false,
     },
 }
 
@@ -1209,7 +1168,6 @@ local function findPath(root, segments)
     return cur
 end
 
-print("[UNO V2 TRACE] 1 integration modules")
 Integration.modules.Remotes = safeRequire(findPath(ReplicatedStorage, {"Core", "Remotes"}))
 Integration.modules.DataController = safeRequire(findPath(LocalPlayer, {"PlayerScripts", "Core", "Data", "DataController"}))
 Integration.modules.RebirthBonus = safeRequire(findPath(ReplicatedStorage, {"Core", "Progression", "RebirthBonus"}))
@@ -3513,7 +3471,7 @@ local function createAutoHatch(deps)
             feature.selectAllMode = true
         end
         feature.status = "RUNNING"
-        maid:Task(function(token) worker(token, myGen) end, "AutoHatch")
+        maid:Task(function(token) worker(token, myGen) end)
     end
     function feature.getStatus()
         return {
@@ -3579,7 +3537,7 @@ local function createAutoIncubatorClaim(deps)
         local myGen = feature.generation
         if not feature.enabled then feature.status = "DISABLED" return end
         feature.status = "WAITING"
-        maid:Task(function(token) worker(token, myGen) end, "IncubatorClaim")
+        maid:Task(function(token) worker(token, myGen) end)
     end
     function feature.getStatus()
         local inc = getIncubator()
@@ -3591,7 +3549,6 @@ local function createAutoIncubatorClaim(deps)
     return feature
 end
 
-print("[UNO V2 TRACE] 2 core automation constructors")
 local HatchFeature = createAutoHatch({
     Remotes = Integration.modules.Remotes,
     DataController = Integration.modules.DataController,
@@ -3798,7 +3755,7 @@ do
         feature.status = "SCANNING"
         maid:Task(function(token)
             worker(token, myGen)
-        end, "IncubatorUpgrade")
+        end)
     end
 
     function feature.getStatus()
@@ -3881,13 +3838,10 @@ local function economyWorker(name, enabled, body)
     local generation = Economy.generations[name]
     maid:Task(function(token)
         while not token.cancelled and not State.closed and State.toggles[name] and generation == Economy.generations[name] do
-            local ok, err = pcall(body, generation)
-            if not ok then
-                warn("[UNO ECONOMY ERROR] " .. tostring(name) .. " :: " .. tostring(err))
-            end
+            pcall(body, generation)
             task.wait(0.85)
         end
-    end, "Economy:" .. tostring(name))
+    end)
 end
 local function setAutoBuyGenerator(on)
     State.toggles.autoBuyGenerator = on
@@ -4498,7 +4452,7 @@ local function setAutoHotEgg(on)
     if on then
         HE.generation += 1; HE.endConfirmed = false
         heSetPhase("WAITING_EVENT", "Idle")
-        maid:Task(heTick, "HotEgg")
+        maid:Task(heTick)
     else heSetPhase("DISABLED", "—") end
 end
 
@@ -4655,7 +4609,7 @@ local function setAutoFarmRebirth(on)
     if on then
         AFR.generation += 1
         afrSetPhase("CHECKING_REBIRTH")
-        maid:Task(afrTick, "AutoFarmRebirth")
+        maid:Task(afrTick)
     else afrSetPhase("DISABLED") end
 end
 
@@ -4692,7 +4646,7 @@ local function setAutoRebirth(on)
             end
             task.wait(0.8)
         end
-    end, "AutoRebirth")
+    end)
 end
 
 local antiAfkGen = 0
@@ -4706,7 +4660,7 @@ local function setAntiAfk(on)
                 pcall(function() VirtualUser:CaptureController(); VirtualUser:ClickButton2(Vector2.new()) end)
                 task.wait(60)
             end
-        end, "AntiAFK")
+        end)
     end
 end
 
@@ -4847,8 +4801,7 @@ do
         return false
     end
 
-    print("[UNO V2 TRACE] 3 performance/config setup")
-PerformanceManager = createPerformanceManager({
+    PerformanceManager = createPerformanceManager({
         services = { Players = Players, Lighting = Lighting, Workspace = Workspace },
         localPlayer = LocalPlayer,
         getCosmeticRoots = getCosmeticRoots,
@@ -5056,11 +5009,10 @@ if ConfigManager then
     isApplyingConfig = false
 end
 
--- REV6 isolation: Anti-AFK is temporarily disabled to identify anonymous runtime errors.
-State.toggles.antiAfk = false
-setAntiAfk(false)
+-- Anti-AFK is a permanent backend safety feature in UNO HUB V2.
+State.toggles.antiAfk = true
+setAntiAfk(true)
 
-print("[UNO V2 TRACE] 4 UI shell begin")
 local Gui = Instance.new("ScreenGui")
 Gui.Name = "UNO_HUB"; Gui.ResetOnSpawn = false; Gui.IgnoreGuiInset = true; Gui.DisplayOrder = 50
 Gui:SetAttribute("UNO_HUB_Shutdown", false); Gui.Parent = PlayerGui
@@ -5183,18 +5135,9 @@ end
 
 local Sidebar = Instance.new("Frame")
 Sidebar.Position = UDim2.fromOffset(0, 52); Sidebar.Size = UDim2.new(0, 145, 1, -52); Sidebar.BackgroundColor3 = Theme.Sidebar; Sidebar.BorderSizePixel = 0; Sidebar.Parent = Main; corner(Sidebar, 12)
-local brand = Instance.new("Frame")
-brand.Size = UDim2.new(1, 0, 0, 72)
-brand.BackgroundTransparency = 1
-brand.Parent = Sidebar
-
-local brandUno = text(brand, "UnO", 16, Theme.TextPrimary, Enum.Font.GothamBold)
-brandUno.Position = UDim2.fromOffset(16, 8)
-brandUno.Size = UDim2.new(1, -26, 0, 24)
-
-local brandHub = text(brand, "HUB", 10, Theme.TextMuted, Enum.Font.Gotham)
-brandHub.Position = UDim2.fromOffset(16, 31)
-brandHub.Size = UDim2.new(1, -26, 0, 18)
+local brand = Instance.new("Frame"); brand.Size = UDim2.new(1, 0, 0, 72); brand.BackgroundTransparency = 1; brand.Parent = Sidebar
+text(brand, "UnO", 16, Theme.TextPrimary, Enum.Font.GothamBold).Position = UDim2.fromOffset(16, 14)
+text(brand, "HUB", 10, Theme.TextMuted, Enum.Font.Gotham).Position = UDim2.fromOffset(16, 36)
 
 local NavScroll = Instance.new("ScrollingFrame")
 NavScroll.Position = UDim2.fromOffset(0, 76); NavScroll.Size = UDim2.new(1, 0, 1, -82)
@@ -5206,6 +5149,8 @@ pad(NavScroll, 4, 10, 8, 10)
 local pages = {
     { id = "Auto Farm", icon = "", title = "Auto Farm" },
     { id = "Auto Hatch Egg", icon = "", title = "Auto Hatch Egg" },
+    { id = "Chickens", icon = "", title = "Chickens" },
+    { id = "Fuse", icon = "", title = "Fuse" },
     { id = "Performance", icon = "", title = "Performance" },
     { id = "Webhook", icon = "", title = "Webhook" },
     { id = "Configs", icon = "", title = "Configs" },
@@ -5331,61 +5276,7 @@ env.UNO_HUB_RUNTIME = {
 }
 closeBtn.MouseButton1Click:Connect(shutdown)
 
-do
-    local dragging = false
-    local dragStart = nil
-    local startPosition = nil
-    local moved = false
-    local suppressOpenUntil = 0
-
-    maid:Connect(Float.InputBegan, function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1
-            or input.UserInputType == Enum.UserInputType.Touch then
-            dragging = true
-            moved = false
-            dragStart = input.Position
-            startPosition = Float.Position
-        end
-    end)
-
-    maid:Connect(UserInputService.InputChanged, function(input)
-        if not dragging then return end
-        if input.UserInputType ~= Enum.UserInputType.MouseMovement
-            and input.UserInputType ~= Enum.UserInputType.Touch then
-            return
-        end
-
-        local delta = input.Position - dragStart
-        if math.abs(delta.X) > 4 or math.abs(delta.Y) > 4 then
-            moved = true
-        end
-
-        Float.Position = UDim2.new(
-            startPosition.X.Scale,
-            startPosition.X.Offset + delta.X,
-            startPosition.Y.Scale,
-            startPosition.Y.Offset + delta.Y
-        )
-        pcall(clampFloatInViewport)
-    end)
-
-    maid:Connect(UserInputService.InputEnded, function(input)
-        if not dragging then return end
-        if input.UserInputType == Enum.UserInputType.MouseButton1
-            or input.UserInputType == Enum.UserInputType.Touch then
-            dragging = false
-            pcall(clampFloatInViewport)
-            if moved then
-                suppressOpenUntil = os.clock() + 0.20
-            end
-        end
-    end)
-
-    Float.MouseButton1Click:Connect(function()
-        if os.clock() < suppressOpenUntil then return end
-        setVisible(true)
-    end)
-end
+Float.MouseButton1Click:Connect(function() setVisible(true) end)
 maid:Connect(UserInputService.InputBegan, function(input, gp)
     if gp then return end
     if input.KeyCode == Enum.KeyCode.RightShift then
@@ -5565,26 +5456,15 @@ local function makeCollapsibleFilter(parent, order, label, buildRows)
     layout.Parent = list
 
     local built = false
-
-    local function rebuild()
-        for _, child in ipairs(list:GetChildren()) do
-            if not child:IsA("UIListLayout") and not child:IsA("UIPadding") then
-                child:Destroy()
-            end
-        end
-        built = true
-        buildRows(list)
-    end
-
     bar.MouseButton1Click:Connect(function()
         list.Visible = not list.Visible
         bar.Text = label .. (list.Visible and "   ▴" or "   ▾")
         if list.Visible and not built then
-            rebuild()
+            built = true
+            buildRows(list)
         end
     end)
-
-    return bar, list, rebuild
+    return bar, list
 end
 
 local function clearChildrenExceptLayouts(parent)
@@ -5684,12 +5564,8 @@ local function setKrakenPhase9(v)
     return setPhase9Toggle("autoKraken", "setKrakenEnabled", v)
 end
 
-local AutoFarmTabBodies = nil
-
-print("[UNO V2 TRACE] 5 UI pages begin")
 safeBuild("Auto Farm", function()
-    local root, tabs = createTabbedPage({ "Farm", "Events", "Incubator", "Coop", "Chicken", "Fuse" })
-    AutoFarmTabBodies = tabs
+    local root, tabs = createTabbedPage({ "Farm", "Events", "Incubator", "Coop" })
 
     -- FARM
     local farm = tabs.Farm
@@ -5731,14 +5607,7 @@ safeBuild("Auto Farm", function()
     settingRow(coopCard, 3, "Auto Expand Coop", nil, "autoExpandCoop", setAutoExpandCoop)
     settingRow(coopCard, 4, "Auto Upgrade Recycler", nil, "autoUpgradeRecycler", setAutoUpgradeRecycler)
 
-    Views["Auto Farm"] = { root = root, update = function()
-        if Views.Chickens and type(Views.Chickens.update) == "function" then
-            pcall(Views.Chickens.update)
-        end
-        if Views.Fuse and type(Views.Fuse.update) == "function" then
-            pcall(Views.Fuse.update)
-        end
-    end }
+    Views["Auto Farm"] = { root = root, update = function() end }
 end)
 
 safeBuild("Tower", function()
@@ -5762,15 +5631,13 @@ end)
 
 safeBuild("Auto Hatch Egg", function()
     local sc = createScrollPage()
-
     local _, hatchCard = card(sc, 1, "Auto Hatch Egg")
     settingRow(hatchCard, 1, "Auto Hatch Eggs", nil, "autoHatch", function(v)
         HatchFeature.setAutoHatch(v)
     end)
 
     local _, filterCard = card(sc, 2, "Egg Filter")
-
-    local function buildEggRows(host)
+    makeCollapsibleFilter(filterCard, 1, "Select Eggs", function(host)
         local tools = Instance.new("Frame")
         tools.LayoutOrder = 0
         tools.Size = UDim2.new(1, 0, 0, 34)
@@ -5796,67 +5663,77 @@ safeBuild("Auto Hatch Egg", function()
         clear.Position = UDim2.new(0.5, 4, 0, 0)
         clear.Text = "Clear"
         clear.Parent = tools
-        clear.MouseButton1Click:Connect(function()
-            HatchFeature.clearEggSelection()
-        end)
+        clear.MouseButton1Click:Connect(function() HatchFeature.clearEggSelection() end)
 
-        refreshData()
         local available = HatchFeature.getAvailableEggTypes()
-
-        if #available == 0 then
-            local empty = text(host, "No eggs detected.", 11, Theme.TextMuted)
-            empty.LayoutOrder = 10
-            empty.Size = UDim2.new(1, 0, 0, 28)
-            return
-        end
-
         for i, egg in ipairs(available) do
             local friendly = egg.displayName
             if type(friendly) ~= "string" or friendly == "" then
                 friendly = resolveEggDisplayName(egg.id)
             end
-
-            makeFilterRow(
-                host,
-                10 + i,
-                friendly,
-                "x" .. tostring(egg.quantity or 0),
-                HatchFeature.isEggSelected(egg.id),
-                function(checkBtn)
+            local _, check = makeFilterRow(host, 10 + i, friendly, nil,
+                HatchFeature.isEggSelected(egg.id), function(checkBtn)
                     local now = not HatchFeature.isEggSelected(egg.id)
                     HatchFeature.setEggSelected(egg.id, now)
                     checkBtn.Text = now and "✓" or ""
-                end
-            )
+                end)
+        end
+    end)
+
+    local _, inventoryCard = card(sc, 3, "Eggs")
+    local inventoryHost = Instance.new("Frame")
+    inventoryHost.LayoutOrder = 2
+    inventoryHost.Size = UDim2.new(1, 0, 0, 0)
+    inventoryHost.AutomaticSize = Enum.AutomaticSize.Y
+    inventoryHost.BackgroundTransparency = 1
+    inventoryHost.Parent = inventoryCard
+    local invLayout = Instance.new("UIListLayout")
+    invLayout.Padding = UDim.new(0, 4)
+    invLayout.Parent = inventoryHost
+
+    local function refreshEggInventory()
+        clearChildrenExceptLayouts(inventoryHost)
+        refreshData()
+        local available = HatchFeature.getAvailableEggTypes()
+        if #available == 0 then
+            local empty = text(inventoryHost, "No eggs detected.", 11, Theme.TextMuted)
+            empty.Size = UDim2.new(1, 0, 0, 28)
+            return
+        end
+        for i, egg in ipairs(available) do
+            local friendly = egg.displayName
+            if type(friendly) ~= "string" or friendly == "" then
+                friendly = resolveEggDisplayName(egg.id)
+            end
+            local f = Instance.new("Frame")
+            f.LayoutOrder = i
+            f.Size = UDim2.new(1, 0, 0, 34)
+            f.BackgroundColor3 = Theme.SurfaceElevated
+            f.BorderSizePixel = 0
+            f.Parent = inventoryHost
+            corner(f, 6); stroke(f)
+            local n = text(f, friendly, 12, Theme.TextPrimary)
+            n.Position = UDim2.fromOffset(12, 0)
+            n.Size = UDim2.new(1, -90, 1, 0)
+            local q = text(f, "x" .. tostring(egg.quantity or 0), 11, Theme.TextMuted, nil, Enum.TextXAlignment.Right)
+            q.Position = UDim2.new(1, -74, 0, 0)
+            q.Size = UDim2.fromOffset(62, 34)
         end
     end
 
-    local _, _, rebuildEggFilter = makeCollapsibleFilter(
-        filterCard,
-        1,
-        "Select Eggs",
-        buildEggRows
-    )
+    uiButton(inventoryCard, 3, "Refresh", refreshEggInventory)
+    refreshEggInventory()
 
-    uiButton(filterCard, 2, "Refresh", function()
-        refreshData()
-        rebuildEggFilter()
-    end)
-
-    Views["Auto Hatch Egg"] = {
-        root = sc,
-        update = function() end,
-    }
+    Views["Auto Hatch Egg"] = { root = sc, update = function() end }
 end)
 
 -- CHICKENS PAGE (Auto Sell restored)
 safeBuild("Chickens", function()
-    local embedded = AutoFarmTabBodies ~= nil and AutoFarmTabBodies.Chicken ~= nil
-    local sc = embedded and AutoFarmTabBodies.Chicken or createScrollPage()
+    local sc = createScrollPage()
     local _, sellCard = card(sc, 1, "Auto Sell Chickens")
     if not AutoSellFeature then
         setText(row(sellCard, 1, "Status"), "Unavailable")
-        Views.Chickens = { root = embedded and false or sc, update = function() end }
+        Views.Chickens = { root = sc, update = function() end }
         return
     end
 
@@ -5913,7 +5790,7 @@ safeBuild("Chickens", function()
     local _, statusCard = card(sc, 3, "Status")
     local status = row(statusCard, 1, "Auto Sell")
     local err = row(statusCard, 2, "Last Error")
-    Views.Chickens = { root = embedded and false or sc, update = function()
+    Views.Chickens = { root = sc, update = function()
         setText(status, AutoSellFeature.getStatus())
         local st = AutoSellFeature.getStats()
         setText(err, st and st.lastError or "—")
@@ -5922,12 +5799,11 @@ end)
 
 -- FUSE PAGE
 safeBuild("Fuse", function()
-    local embedded = AutoFarmTabBodies ~= nil and AutoFarmTabBodies.Fuse ~= nil
-    local sc = embedded and AutoFarmTabBodies.Fuse or createScrollPage()
+    local sc = createScrollPage()
     local _, fuseCard = card(sc, 1, "Auto Fuse Chickens")
     if not AutoFuseFeature then
         setText(row(fuseCard, 1, "Status"), "Unavailable")
-        Views.Fuse = { root = embedded and false or sc, update = function() end }
+        Views.Fuse = { root = sc, update = function() end }
         return
     end
 
@@ -6011,7 +5887,7 @@ safeBuild("Fuse", function()
     local _, statusCard = card(sc, 4, "Status")
     local status = row(statusCard, 1, "Auto Fuse")
     local err = row(statusCard, 2, "Last Error")
-    Views.Fuse = { root = embedded and false or sc, update = function()
+    Views.Fuse = { root = sc, update = function()
         setText(status, AutoFuseFeature.getStatus())
         local st = AutoFuseFeature.getStats()
         setText(err, st and st.lastError or "—")
@@ -6487,37 +6363,20 @@ end
 
 maid:Task(function(token)
     while not token.cancelled and not State.closed do
-        local okRefresh, refreshErr = pcall(refreshData)
-        if not okRefresh then warn("[UNO UIREFRESH ERROR] refreshData :: " .. tostring(refreshErr)) end
-
-        local okHazard, hazardErr = pcall(pruneHazards)
-        if not okHazard then warn("[UNO UIREFRESH ERROR] pruneHazards :: " .. tostring(hazardErr)) end
-
-        local okHolding, holdingValue = pcall(isLocalHolding)
-        if okHolding then
-            HE.holding = holdingValue
-        else
-            warn("[UNO UIREFRESH ERROR] isLocalHolding :: " .. tostring(holdingValue))
-        end
-
+        refreshData()
+        pruneHazards()
+        HE.holding = isLocalHolding()
         connDot.BackgroundColor3 = (Integration.modules.DataController or Integration.modules.Remotes) and Theme.Success or Theme.Warning
-
         local view = Views[State.page]
-        if view and type(view.update) == "function" then
-            local okView, viewErr = pcall(view.update)
-            if not okView then warn("[UNO UIREFRESH ERROR] page=" .. tostring(State.page) .. " :: " .. tostring(viewErr)) end
-        end
-
+        if view and view.update then pcall(view.update) end
         task.wait(0.45)
     end
-end, "UIRefresh")
+end)
 
 
 refreshData()
 refreshEconomyStatus()
 showPage("Auto Farm")
-print("[UNO V2 TRACE] 6 UI READY")
-print("[UNO REV6] ISOLATION MODE READY — optional automations OFF, Anti-AFK OFF, UIRefresh guarded")
 
 log("INFO", "UNO HUB — Responsive UIScale enabled")
 print("[UNO HUB] AutoSellFeature =", AutoSellFeature and "READY" or State.diagnostics["AutoSell.Feature"])
@@ -9832,10 +9691,10 @@ end
 
 local status = "BOOTSTRAPPING"
 local lastError = nil
-local backends: {[string]: any} = {}
-local integration: any = nil
+local backends = {}
+local integration = nil
 local destroyed = false
-local ownedBackends: {[string]: any} = {}
+local ownedBackends = {}
 local movementBroker = { integration = nil }
 
 local function log(message)
@@ -10150,15 +10009,7 @@ local function createBootstrap()
     integration = createdIntegration
     movementBroker.integration = integration
     log("Priority integration READY")
-    if type(integration.run) ~= "function" then
-        block("Priority integration run() unavailable")
-        return
-    end
-    local runOk, runErr = pcall(integration.run)
-    if not runOk then
-        block("Priority integration run failed: " .. tostring(runErr))
-        return
-    end
+    integration.run()
     status = "READY"
     log("READY")
 end

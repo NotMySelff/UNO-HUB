@@ -91,13 +91,15 @@ function Maid:Task(fn, taskName)
         local ok, err = xpcall(function()
             fn(token)
         end, function(message)
-            local trace = (debug and type(debug.traceback) == "function")
-                and debug.traceback(tostring(message), 2)
-                or tostring(message)
+            local trace = tostring(message)
+            if debug and type(debug.traceback) == "function" then
+                local traceOk, traceValue = pcall(debug.traceback, tostring(message), 2)
+                if traceOk and traceValue then trace = tostring(traceValue) end
+            end
             return trace
         end)
         if not ok then
-            warn("[UNO TASK ERROR] " .. tostring(taskName or "unnamed") .. ": " .. tostring(err))
+            warn("[UNO WORKER ERROR] " .. tostring(taskName or "UNNAMED") .. " :: " .. tostring(err))
         end
     end)
     return token
@@ -111,6 +113,33 @@ function Maid:Cleanup()
     self.items = {}
 end
 local maid = Maid.new()
+
+-- REV6 diagnostic capture for executor errors that only show "Script '', Line 1".
+do
+    local okService, ScriptContext = pcall(function()
+        return game:GetService("ScriptContext")
+    end)
+    if okService and ScriptContext and ScriptContext.Error then
+        local okConnect, connection = pcall(function()
+            return ScriptContext.Error:Connect(function(message, stackTrace, scriptInstance)
+                local msg = tostring(message or "")
+                if string.find(string.lower(msg), "nil value", 1, true)
+                    or string.find(string.lower(msg), "attempt to call", 1, true) then
+                    warn("[UNO SCRIPT ERROR CAPTURE] " .. msg)
+                    if stackTrace and tostring(stackTrace) ~= "" then
+                        warn("[UNO SCRIPT ERROR STACK] " .. tostring(stackTrace))
+                    end
+                    if scriptInstance then
+                        warn("[UNO SCRIPT ERROR INSTANCE] " .. tostring(scriptInstance))
+                    end
+                end
+            end)
+        end)
+        if okConnect and connection then
+            maid:Give(connection)
+        end
+    end
+end
 
 local State = {
     closed = false, visible = true, page = "Home", generation = 0,
@@ -144,7 +173,7 @@ local State = {
         autoFarmRebirth = false, autoKoDismiss = true, autoHatch = false, autoCollectEgg = false,
         autoIncubatorClaim = false, autoSell = false, autoFuse = false,
         autoBuyGenerator = false, autoUpgradeGenerator = false, autoExpandCoop = false, autoUpgradeRecycler = false, autoUpgradeIncubator = false,
-        antiAfk = true, autoRebirth = false, autoHotEgg = false, autoArena = false, autoEventCapsule = false, autoKraken = false, showFloatingButton = true, reducedMotion = false,
+        antiAfk = false, autoRebirth = false, autoHotEgg = false, autoArena = false, autoEventCapsule = false, autoKraken = false, showFloatingButton = true, reducedMotion = false,
     },
 }
 
@@ -1180,6 +1209,7 @@ local function findPath(root, segments)
     return cur
 end
 
+print("[UNO V2 TRACE] 1 integration modules")
 Integration.modules.Remotes = safeRequire(findPath(ReplicatedStorage, {"Core", "Remotes"}))
 Integration.modules.DataController = safeRequire(findPath(LocalPlayer, {"PlayerScripts", "Core", "Data", "DataController"}))
 Integration.modules.RebirthBonus = safeRequire(findPath(ReplicatedStorage, {"Core", "Progression", "RebirthBonus"}))
@@ -3483,7 +3513,7 @@ local function createAutoHatch(deps)
             feature.selectAllMode = true
         end
         feature.status = "RUNNING"
-        maid:Task(function(token) worker(token, myGen) end)
+        maid:Task(function(token) worker(token, myGen) end, "AutoHatch")
     end
     function feature.getStatus()
         return {
@@ -3549,7 +3579,7 @@ local function createAutoIncubatorClaim(deps)
         local myGen = feature.generation
         if not feature.enabled then feature.status = "DISABLED" return end
         feature.status = "WAITING"
-        maid:Task(function(token) worker(token, myGen) end)
+        maid:Task(function(token) worker(token, myGen) end, "IncubatorClaim")
     end
     function feature.getStatus()
         local inc = getIncubator()
@@ -3561,6 +3591,7 @@ local function createAutoIncubatorClaim(deps)
     return feature
 end
 
+print("[UNO V2 TRACE] 2 core automation constructors")
 local HatchFeature = createAutoHatch({
     Remotes = Integration.modules.Remotes,
     DataController = Integration.modules.DataController,
@@ -3767,7 +3798,7 @@ do
         feature.status = "SCANNING"
         maid:Task(function(token)
             worker(token, myGen)
-        end)
+        end, "IncubatorUpgrade")
     end
 
     function feature.getStatus()
@@ -3850,10 +3881,13 @@ local function economyWorker(name, enabled, body)
     local generation = Economy.generations[name]
     maid:Task(function(token)
         while not token.cancelled and not State.closed and State.toggles[name] and generation == Economy.generations[name] do
-            pcall(body, generation)
+            local ok, err = pcall(body, generation)
+            if not ok then
+                warn("[UNO ECONOMY ERROR] " .. tostring(name) .. " :: " .. tostring(err))
+            end
             task.wait(0.85)
         end
-    end)
+    end, "Economy:" .. tostring(name))
 end
 local function setAutoBuyGenerator(on)
     State.toggles.autoBuyGenerator = on
@@ -4464,7 +4498,7 @@ local function setAutoHotEgg(on)
     if on then
         HE.generation += 1; HE.endConfirmed = false
         heSetPhase("WAITING_EVENT", "Idle")
-        maid:Task(heTick)
+        maid:Task(heTick, "HotEgg")
     else heSetPhase("DISABLED", "—") end
 end
 
@@ -4813,7 +4847,8 @@ do
         return false
     end
 
-    PerformanceManager = createPerformanceManager({
+    print("[UNO V2 TRACE] 3 performance/config setup")
+PerformanceManager = createPerformanceManager({
         services = { Players = Players, Lighting = Lighting, Workspace = Workspace },
         localPlayer = LocalPlayer,
         getCosmeticRoots = getCosmeticRoots,
@@ -5021,10 +5056,11 @@ if ConfigManager then
     isApplyingConfig = false
 end
 
--- Anti-AFK is a permanent backend safety feature in UNO HUB V2.
-State.toggles.antiAfk = true
-setAntiAfk(true)
+-- REV6 isolation: Anti-AFK is temporarily disabled to identify anonymous runtime errors.
+State.toggles.antiAfk = false
+setAntiAfk(false)
 
+print("[UNO V2 TRACE] 4 UI shell begin")
 local Gui = Instance.new("ScreenGui")
 Gui.Name = "UNO_HUB"; Gui.ResetOnSpawn = false; Gui.IgnoreGuiInset = true; Gui.DisplayOrder = 50
 Gui:SetAttribute("UNO_HUB_Shutdown", false); Gui.Parent = PlayerGui
@@ -5650,6 +5686,7 @@ end
 
 local AutoFarmTabBodies = nil
 
+print("[UNO V2 TRACE] 5 UI pages begin")
 safeBuild("Auto Farm", function()
     local root, tabs = createTabbedPage({ "Farm", "Events", "Incubator", "Coop", "Chicken", "Fuse" })
     AutoFarmTabBodies = tabs
@@ -6450,12 +6487,27 @@ end
 
 maid:Task(function(token)
     while not token.cancelled and not State.closed do
-        refreshData()
-        pruneHazards()
-        HE.holding = isLocalHolding()
+        local okRefresh, refreshErr = pcall(refreshData)
+        if not okRefresh then warn("[UNO UIREFRESH ERROR] refreshData :: " .. tostring(refreshErr)) end
+
+        local okHazard, hazardErr = pcall(pruneHazards)
+        if not okHazard then warn("[UNO UIREFRESH ERROR] pruneHazards :: " .. tostring(hazardErr)) end
+
+        local okHolding, holdingValue = pcall(isLocalHolding)
+        if okHolding then
+            HE.holding = holdingValue
+        else
+            warn("[UNO UIREFRESH ERROR] isLocalHolding :: " .. tostring(holdingValue))
+        end
+
         connDot.BackgroundColor3 = (Integration.modules.DataController or Integration.modules.Remotes) and Theme.Success or Theme.Warning
+
         local view = Views[State.page]
-        if view and view.update then pcall(view.update) end
+        if view and type(view.update) == "function" then
+            local okView, viewErr = pcall(view.update)
+            if not okView then warn("[UNO UIREFRESH ERROR] page=" .. tostring(State.page) .. " :: " .. tostring(viewErr)) end
+        end
+
         task.wait(0.45)
     end
 end, "UIRefresh")
@@ -6464,6 +6516,8 @@ end, "UIRefresh")
 refreshData()
 refreshEconomyStatus()
 showPage("Auto Farm")
+print("[UNO V2 TRACE] 6 UI READY")
+print("[UNO REV6] ISOLATION MODE READY — optional automations OFF, Anti-AFK OFF, UIRefresh guarded")
 
 log("INFO", "UNO HUB — Responsive UIScale enabled")
 print("[UNO HUB] AutoSellFeature =", AutoSellFeature and "READY" or State.diagnostics["AutoSell.Feature"])
@@ -9778,10 +9832,10 @@ end
 
 local status = "BOOTSTRAPPING"
 local lastError = nil
-local backends = {}
-local integration = nil
+local backends: {[string]: any} = {}
+local integration: any = nil
 local destroyed = false
-local ownedBackends = {}
+local ownedBackends: {[string]: any} = {}
 local movementBroker = { integration = nil }
 
 local function log(message)
@@ -10096,7 +10150,15 @@ local function createBootstrap()
     integration = createdIntegration
     movementBroker.integration = integration
     log("Priority integration READY")
-    integration.run()
+    if type(integration.run) ~= "function" then
+        block("Priority integration run() unavailable")
+        return
+    end
+    local runOk, runErr = pcall(integration.run)
+    if not runOk then
+        block("Priority integration run failed: " .. tostring(runErr))
+        return
+    end
     status = "READY"
     log("READY")
 end
@@ -10170,7 +10232,6 @@ local __status = __unoEnv.UNO_HUB_PHASE9
 print("[UNO HUB] FINAL MERGE STATUS =", tostring(__status))
 if __status == "READY" then
     print("[UNO HUB] FINAL MERGE READY")
-    print("[UNO HUB V2] UI REV3 READY")
 else
     warn("[UNO HUB] FINAL MERGE NOT READY; check [UNO Bootstrap] BLOCKED reason above")
 end

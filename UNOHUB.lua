@@ -55,6 +55,7 @@ do
     if cover then pcall(function() cover:Destroy() end) end
 end
 
+print("[UNO MERGE TRACE] core source entered")
 local Theme = {
     Background = Color3.fromRGB(11, 12, 16), Surface = Color3.fromRGB(17, 18, 24),
     SurfaceElevated = Color3.fromRGB(24, 26, 34), Sidebar = Color3.fromRGB(14, 15, 20),
@@ -5162,6 +5163,8 @@ local function shutdown()
 end
 minBtn.MouseButton1Click:Connect(function() setVisible(false) end)
 local env = (getgenv and getgenv()) or _G
+print("[UNO MERGE TRACE] UI construction complete")
+print("[UNO MERGE TRACE] runtime bridge publishing")
 env.UNO_HUB_RUNTIME = {
     State = State,
     Integration = Integration,
@@ -6163,11 +6166,14 @@ print("[UNO HUB] AutoCollectEggFeature =", AutoCollectEggFeature and "READY" or 
 print("[UNO HUB] IncubatorClaimFeature =", IncubatorClaimFeature and "READY" or "MISSING")
 print("[UNO HUB] AutoUpgradeIncubatorFeature =", AutoUpgradeIncubatorFeature and "READY" or "MISSING")
 
-============================================================
+-- ============================================================
+print("[UNO MERGE TRACE] core feature construction complete")
+print("[UNO MERGE TRACE] entering Phase 9 factories section")
 -- PHASE 9 FACTORIES (inlined)
-============================================================
+-- ============================================================
 
 -- ========== EVENT CAPSULE ==========
+print("[UNO MERGE TRACE] Event Capsule factory section")
 -- AUTO EVENT CAPSULE
 -- Standalone integration-ready backend for UFO/Admin Scrap-style capsules.
 -- This module intentionally excludes Kraken Rain Eggs and does not inspect or filter egg IDs.
@@ -7221,6 +7227,7 @@ local globalEnv = (getgenv and getgenv()) or _G
 
 
 -- ========== AUTO ARENA ==========
+print("[UNO MERGE TRACE] Auto Arena factory section")
 -- AUTO ARENA
 -- Standalone integration-ready backend.
 -- This module automates only the outer Arena loop through injected normal game APIs.
@@ -8061,6 +8068,7 @@ end
 local globalEnv = (getgenv and getgenv()) or _G
 
 -- ========== KRAKEN ==========
+print("[UNO MERGE TRACE] Kraken factory section")
 -- KRAKEN EGG COLLECTOR
 -- EXPERIMENTAL — SOURCE VERIFIED, RUNTIME UNVALIDATED
 -- Standalone integration-ready backend. No UI, Config Manager, Auto Arena, or golden-egg fight integration.
@@ -8572,6 +8580,7 @@ end
 local globalEnv = (getgenv and getgenv()) or _G
 
 -- ========== PRIORITY COORDINATOR ==========
+print("[UNO MERGE TRACE] Coordinator factory section")
 -- EVENT PRIORITY COORDINATOR
 -- Standalone Phase 7 arbitration module.
 -- This file coordinates injected feature adapters only; it does not implement feature logic.
@@ -9031,6 +9040,7 @@ local globalEnv = (getgenv and getgenv()) or _G
 
 
 -- ========== PRIORITY INTEGRATION ==========
+print("[UNO MERGE TRACE] Priority Integration factory section")
 -- UNO HUB PRIORITY INTEGRATION
 -- Phase 8 thin compatibility bridge. It does not duplicate feature logic.
 
@@ -9377,6 +9387,7 @@ end
 local globalEnv = (getgenv and getgenv()) or _G
 
 -- ========== BOOTSTRAP ==========
+print("[UNO MERGE TRACE] bootstrap section entered")
 -- UNO HUB PHASE 9 AUTOMATIC RUNTIME BOOTSTRAP
 -- Constructs real backend instances from source-backed game modules.
 -- It never fabricates Arena/Kraken dependencies and never claims runtime PASS.
@@ -9613,7 +9624,9 @@ local function resolveKraken(root, modules, remotes)
 end
 
 local function createBootstrap()
+    print("[UNO MERGE TRACE] bootstrap getRoot starting")
     local root, rootError = getRoot()
+    print("[UNO MERGE TRACE] bootstrap getRoot complete", root and "OK" or tostring(rootError))
     if not root then block(rootError) return end
     status = "RESOLVING_DEPENDENCIES"
     local integrationModules = root.runtime.Integration and root.runtime.Integration.modules or {}
@@ -9770,5 +9783,31 @@ local api = {
 
 env.UNO_HUB_PHASE9 = api
 env.UNO_HUB = api
-createBootstrap()
+
+print("[UNO MERGE TRACE] Event Capsule factory available:", type(createEventCapsuleCollector) == "function")
+print("[UNO MERGE TRACE] Auto Arena factory available:", type(createAutoArena) == "function")
+print("[UNO MERGE TRACE] Kraken factory available:", type(createKrakenEggCollector) == "function")
+print("[UNO MERGE TRACE] Coordinator factory available:", type(createEventPriorityCoordinator) == "function")
+print("[UNO MERGE TRACE] Priority Integration factory available:", type(createUNOHubPriorityIntegration) == "function")
+print("[UNO MERGE TRACE] bootstrap entering")
+
+local bootOk, bootErr = xpcall(function()
+    createBootstrap()
+end, function(err)
+    local tb = debug.traceback(tostring(err), 2)
+    print("[UNO MERGE TRACE] bootstrap FAILED")
+    print("[UNO MERGE TRACE] error:", tostring(err))
+    print("[UNO MERGE TRACE] traceback:", tb)
+    return err
+end)
+
+if not bootOk then
+    status = "BLOCKED"
+    lastError = tostring(bootErr)
+    print("PHASE 9 BOOTSTRAP: BLOCKED — " .. tostring(bootErr))
+else
+    print("[UNO MERGE TRACE] bootstrap finished status=" .. tostring(status))
+end
+
 return api
+

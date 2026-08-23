@@ -1,47 +1,30 @@
 --[[
-    UNO HUB FINAL - ChatGPT Safe Single-File Merge
-    Grow a Chicken Fighter / Phase 9
+    UNO HUB FINAL - Phase 9
+    Safe single-file consolidation from the supplied working 01-07 sources.
 
-    Packaging strategy:
-    - Core/UI executes in its own function scope.
-    - Phase 9 files 02-07 execute in separate function scopes, in the exact
-      original order that was runtime-tested.
-    - This avoids putting ~10k lines worth of locals into one Luau chunk scope.
-    - The original factory globals/API contracts are preserved between stages.
+    IMPORTANT:
+    - One executable file.
+    - Original Phase 9 source order is preserved.
+    - Each former file is isolated in its own lexical function scope.
+    - Factories/APIs communicate through the same getgenv() contracts used by 01-07.
+    - The core publishes UNO_HUB_RUNTIME before Phase 9 bootstrap runs.
 ]]
 
 
-local function __uno_stage(name, fn)
-    print("[UNO MERGE] START " .. name)
+local function __unoRunStage(name, fn)
+    print("[UNO FINAL] START " .. name)
     local ok, result = pcall(fn)
     if not ok then
-        warn("[UNO MERGE] FAILED " .. name .. ": " .. tostring(result))
-        error("[UNO MERGE] " .. name .. " failed: " .. tostring(result), 0)
+        warn("[UNO FINAL] FAILED " .. name .. ": " .. tostring(result))
+        error("[UNO FINAL] " .. name .. " failed: " .. tostring(result), 0)
     end
-    print("[UNO MERGE] OK " .. name)
+    print("[UNO FINAL] OK " .. name)
     return result
 end
 
 
-local function __uno_core()
---[[
-    UNO HUB FINAL
-    Grow a Chicken Fighter
-    Phase 9 consolidated single-file build
 
-    Merges:
-      01_UNOHUB_PHASE9.lua (core + UI + Hot Egg + Normal Farm)
-      02 Event Capsule Collector
-      03 Auto Arena
-      04 Kraken Egg Collector
-      05 Event Priority Coordinator
-      06 Priority Integration
-      07 Phase 9 Bootstrap
-
-    Canonical priorities:
-      HOT_EGG=100  EVENT_CAPSULE=80  KRAKEN_EGG=70  AUTO_ARENA=40  NORMAL_FARM=10
-]]
-
+local function __unoStage01()
 --[[
     UNO HUB · Responsive UIScale
     Grow a Chicken Fighter
@@ -81,7 +64,6 @@ do
     if cover then pcall(function() cover:Destroy() end) end
 end
 
-print("[UNO MERGE TRACE] core source entered")
 local Theme = {
     Background = Color3.fromRGB(11, 12, 16), Surface = Color3.fromRGB(17, 18, 24),
     SurfaceElevated = Color3.fromRGB(24, 26, 34), Sidebar = Color3.fromRGB(14, 15, 20),
@@ -5163,6 +5145,10 @@ local function setVisible(vis)
 end
 local function shutdown()
     local env = (getgenv and getgenv()) or _G
+    local phase9 = env.UNO_HUB_PHASE9
+    if phase9 and type(phase9.destroy) == "function" then
+        pcall(phase9.destroy)
+    end
     local integration = env.UNO_HUB_PRIORITY_INTEGRATION
     if integration and type(integration.destroy) == "function" then
         pcall(integration.destroy)
@@ -5189,8 +5175,6 @@ local function shutdown()
 end
 minBtn.MouseButton1Click:Connect(function() setVisible(false) end)
 local env = (getgenv and getgenv()) or _G
-print("[UNO MERGE TRACE] UI construction complete")
-print("[UNO MERGE TRACE] runtime bridge publishing")
 env.UNO_HUB_RUNTIME = {
     State = State,
     Integration = Integration,
@@ -5848,9 +5832,52 @@ safeBuild("Coop", function()
         end
     end }
 end)
+
+local function getPhase9API()
+    local env = (getgenv and getgenv()) or _G
+    local api = env.UNO_HUB_PHASE9
+    return type(api) == "table" and api or nil
+end
+
+local function setPhase9Toggle(toggleKey, setterName, value)
+    local api = getPhase9API()
+    if not api or type(api[setterName]) ~= "function" then
+        State.toggles[toggleKey] = false
+        log("ERROR", setterName .. " unavailable; Phase 9 bootstrap not READY")
+        return false
+    end
+    local ok, result = pcall(api[setterName], value == true)
+    if not ok or result == false then
+        State.toggles[toggleKey] = false
+        log("ERROR", setterName .. " failed: " .. tostring(result))
+        return false
+    end
+    State.toggles[toggleKey] = value == true
+    return true
+end
+
+local function setAutoArenaPhase9(v)
+    return setPhase9Toggle("autoArena", "setAutoArenaEnabled", v)
+end
+local function setEventCapsulePhase9(v)
+    return setPhase9Toggle("autoEventCapsule", "setEventCapsuleEnabled", v)
+end
+local function setKrakenPhase9(v)
+    return setPhase9Toggle("autoKraken", "setKrakenEnabled", v)
+end
+
 safeBuild("Events", function()
     local sc = createScrollPage()
-    local _, heCard = card(sc, 1, "HOT EGG")
+
+    local _, phase9Card = card(sc, 1, "PHASE 9 EVENTS")
+    settingRow(phase9Card, 1, "Event Capsule", nil, "autoEventCapsule", setEventCapsulePhase9)
+    settingRow(phase9Card, 2, "Auto Arena", nil, "autoArena", setAutoArenaPhase9)
+    settingRow(phase9Card, 3, "Auto Kraken Eggs", nil, "autoKraken", setKrakenPhase9)
+    local p9Status = row(phase9Card, 4, "Phase 9 Status")
+    local p9Owner = row(phase9Card, 5, "Priority Owner")
+    local p9Error = row(phase9Card, 6, "Last Error")
+
+    local _, heCard = card(sc, 2, "HOT EGG")
     settingRow(heCard, 1, "Auto Hot Egg", nil, "autoHotEgg", setAutoHotEgg)
     local phase = row(heCard, 2, "Phase")
     local ended = row(heCard, 3, "End Confirmed")
@@ -5861,44 +5888,31 @@ safeBuild("Events", function()
     local evade = row(heCard, 8, "Last Evade Reason")
     local action = row(heCard, 9, "Action")
 
-    local _, arenaCard = card(sc, 2, "AUTO ARENA")
-    settingRow(arenaCard, 1, "Auto Arena", nil, "autoArena", function(v)
-        State.toggles.autoArena = v == true
-        local api = ((getgenv and getgenv()) or _G).UNO_HUB_PHASE9
-        if api and type(api.setAutoArenaEnabled) == "function" then
-            api.setAutoArenaEnabled(v == true)
-        end
-        markConfigDirty()
-    end)
-    local arenaStatus = row(arenaCard, 2, "Status")
-    local arenaDecision = row(arenaCard, 3, "Decision")
-    local arenaErr = row(arenaCard, 4, "Last Error")
-
-    local _, capCard = card(sc, 3, "EVENT CAPSULE")
-    settingRow(capCard, 1, "Event Capsule", nil, "autoEventCapsule", function(v)
-        State.toggles.autoEventCapsule = v == true
-        local api = ((getgenv and getgenv()) or _G).UNO_HUB_PHASE9
-        if api and type(api.setEventCapsuleEnabled) == "function" then
-            api.setEventCapsuleEnabled(v == true)
-        end
-        markConfigDirty()
-    end)
-    local capStatus = row(capCard, 2, "Status")
-    local capCarry = row(capCard, 3, "Carry")
-    local capPending = row(capCard, 4, "Pending")
-
-    local _, krCard = card(sc, 4, "KRAKEN")
-    settingRow(krCard, 1, "Auto Kraken Eggs", nil, "autoKraken", function(v)
-        State.toggles.autoKraken = v == true
-        local api = ((getgenv and getgenv()) or _G).UNO_HUB_PHASE9
-        if api and type(api.setKrakenEnabled) == "function" then
-            api.setKrakenEnabled(v == true)
-        end
-        markConfigDirty()
-    end)
-    local krStatus = row(krCard, 2, "Status")
-
     Views.Events = { root = sc, update = function()
+        local api = getPhase9API()
+        if api then
+            local okStatus, statusValue = pcall(api.getStatus)
+            setText(p9Status, okStatus and statusValue or "ERROR")
+            local owner = "NONE"
+            if type(api.getCoordinatorState) == "function" then
+                local okState, state = pcall(api.getCoordinatorState)
+                if okState and type(state) == "table" then
+                    owner = state.currentOwner or state.owner or "NONE"
+                end
+            end
+            setText(p9Owner, owner)
+            if type(api.getLastError) == "function" then
+                local okErr, err = pcall(api.getLastError)
+                setText(p9Error, okErr and err or "—")
+            else
+                setText(p9Error, "—")
+            end
+        else
+            setText(p9Status, "BOOTSTRAPPING")
+            setText(p9Owner, "NONE")
+            setText(p9Error, "—")
+        end
+
         setText(phase, HE.phase)
         setText(ended, HE.endConfirmed and "YES" or "NO")
         setText(holding, HE.holding and "YES" or "NO")
@@ -5907,31 +5921,6 @@ safeBuild("Events", function()
         setText(dist, HE.distToEgg and string.format("%.1f", HE.distToEgg) or "—")
         setText(evade, HE.lastEvadeReason)
         setText(action, HE.action)
-        local api = ((getgenv and getgenv()) or _G).UNO_HUB_PHASE9
-        local backends = api and api.getBackends and api.getBackends() or {}
-        local arena = backends.AUTO_ARENA
-        if arena then
-            setText(arenaStatus, type(arena.getStatus)=="function" and arena.getStatus() or "—")
-            setText(arenaDecision, type(arena.getDecision)=="function" and arena.getDecision() or "—")
-            setText(arenaErr, type(arena.getLastError)=="function" and (arena.getLastError() or "—") or "—")
-        else
-            setText(arenaStatus, "UNAVAILABLE")
-        end
-        local cap = backends.EVENT_CAPSULE
-        if cap then
-            setText(capStatus, type(cap.getStatus)=="function" and cap.getStatus() or "—")
-            setText(capCarry, type(cap.getCarryCount)=="function" and cap.getCarryCount() or "—")
-            local pending = type(cap.getPendingCapsules)=="function" and cap.getPendingCapsules() or nil
-            setText(capPending, type(pending)=="table" and #pending or "—")
-        else
-            setText(capStatus, "UNAVAILABLE")
-        end
-        local kr = backends.KRAKEN_EGG
-        if kr then
-            setText(krStatus, type(kr.getStatus)=="function" and kr.getStatus() or "—")
-        else
-            setText(krStatus, "UNAVAILABLE")
-        end
     end }
 end)
 safeBuild("Utility", function()
@@ -6192,18 +6181,55 @@ print("[UNO HUB] AutoCollectEggFeature =", AutoCollectEggFeature and "READY" or 
 print("[UNO HUB] IncubatorClaimFeature =", IncubatorClaimFeature and "READY" or "MISSING")
 print("[UNO HUB] AutoUpgradeIncubatorFeature =", AutoUpgradeIncubatorFeature and "READY" or "MISSING")
 
--- ============================================================
-print("[UNO MERGE TRACE] core feature construction complete")
-print("[UNO MERGE TRACE] entering Phase 9 factories section")
--- PHASE 9 FACTORIES (inlined)
--- ============================================================
+
+do
+    local env = (getgenv and getgenv()) or _G
+    env.UNO_HUB_RUNTIME = {
+        State = State,
+        Integration = Integration,
+        Services = {
+            Players = Players,
+            ReplicatedStorage = ReplicatedStorage,
+            Workspace = Workspace,
+            CollectionService = CollectionService,
+            TweenService = TweenService,
+        },
+        MovementAdapter = MovementAdapter,
+        cancelMovement = cancelMovement,
+        moveTo = moveTo,
+        setHotEggCoordinatorPaused = function(reason, value)
+            reason = tostring(reason or "COORDINATOR")
+            if value == true then
+                HE.coordinatorPauseReasons[reason] = true
+            else
+                HE.coordinatorPauseReasons[reason] = nil
+            end
+        end,
+        setNormalFarmCoordinatorPaused = function(reason, value)
+            reason = tostring(reason or "COORDINATOR")
+            if value == true then
+                AFR.coordinatorPauseReasons[reason] = true
+            else
+                AFR.coordinatorPauseReasons[reason] = nil
+            end
+        end,
+        getHotEggCoordinatorPauseReasons = function() return HE.coordinatorPauseReasons end,
+        getNormalFarmCoordinatorPauseReasons = function() return AFR.coordinatorPauseReasons end,
+        setAutoHotEgg = setAutoHotEgg,
+        setAutoFarmRebirth = setAutoFarmRebirth,
+        getHotEggState = function() return HE end,
+        getNormalFarmState = function() return AFR end,
+        shutdown = shutdown,
+    }
+    print("[UNO HUB] Core runtime bridge READY")
+end
 end
 
-__uno_stage("01 CORE/UI", __uno_core)
+
+__unoRunStage("01 CORE/UI + RUNTIME BRIDGE", __unoStage01)
 
 
--- ===== 02_UNO_HUB_EVENT_CAPSULE_COLLECTOR_PHASE9.lua =====
-local function __uno_file_02()
+local function __unoStage02()
 -- AUTO EVENT CAPSULE
 -- Standalone integration-ready backend for UFO/Admin Scrap-style capsules.
 -- This module intentionally excludes Kraken Rain Eggs and does not inspect or filter egg IDs.
@@ -7259,11 +7285,11 @@ globalEnv.UNO_EVENT_CAPSULE_COLLECTOR_FACTORY = createEventCapsuleCollector
 return createEventCapsuleCollector
 end
 
-__uno_stage("02 02_UNO_HUB_EVENT_CAPSULE_COLLECTOR_PHASE9.lua", __uno_file_02)
+
+__unoRunStage("02 02_UNO_HUB_EVENT_CAPSULE_COLLECTOR_PHASE9(1).lua", __unoStage02)
 
 
--- ===== 03_UNO_HUB_AUTO_ARENA_PHASE9.lua =====
-local function __uno_file_03()
+local function __unoStage03()
 -- AUTO ARENA
 -- Standalone integration-ready backend.
 -- This module automates only the outer Arena loop through injected normal game APIs.
@@ -8106,11 +8132,11 @@ globalEnv.UNO_AUTO_ARENA_FACTORY = createAutoArena
 return createAutoArena
 end
 
-__uno_stage("03 03_UNO_HUB_AUTO_ARENA_PHASE9.lua", __uno_file_03)
+
+__unoRunStage("03 03_UNO_HUB_AUTO_ARENA_PHASE9(1).lua", __unoStage03)
 
 
--- ===== 04_UNO_HUB_KRAKEN_EGG_COLLECTOR_PHASE9.lua =====
-local function __uno_file_04()
+local function __unoStage04()
 -- KRAKEN EGG COLLECTOR
 -- EXPERIMENTAL — SOURCE VERIFIED, RUNTIME UNVALIDATED
 -- Standalone integration-ready backend. No UI, Config Manager, Auto Arena, or golden-egg fight integration.
@@ -8624,11 +8650,11 @@ globalEnv.UNO_KRAKEN_EGG_COLLECTOR_FACTORY = createKrakenEggCollector
 return createKrakenEggCollector
 end
 
-__uno_stage("04 04_UNO_HUB_KRAKEN_EGG_COLLECTOR_PHASE9.lua", __uno_file_04)
+
+__unoRunStage("04 04_UNO_HUB_KRAKEN_EGG_COLLECTOR_PHASE9(1).lua", __unoStage04)
 
 
--- ===== 05_UNO_HUB_EVENT_PRIORITY_COORDINATOR_PHASE9.lua =====
-local function __uno_file_05()
+local function __unoStage05()
 -- EVENT PRIORITY COORDINATOR
 -- Standalone Phase 7 arbitration module.
 -- This file coordinates injected feature adapters only; it does not implement feature logic.
@@ -9090,11 +9116,11 @@ globalEnv.UNO_EVENT_PRIORITY = PRIORITY
 return createEventPriorityCoordinator
 end
 
-__uno_stage("05 05_UNO_HUB_EVENT_PRIORITY_COORDINATOR_PHASE9.lua", __uno_file_05)
+
+__unoRunStage("05 05_UNO_HUB_EVENT_PRIORITY_COORDINATOR_PHASE9(1).lua", __unoStage05)
 
 
--- ===== 06_UNO_HUB_PRIORITY_INTEGRATION_PHASE9.lua =====
-local function __uno_file_06()
+local function __unoStage06()
 -- UNO HUB PRIORITY INTEGRATION
 -- Phase 8 thin compatibility bridge. It does not duplicate feature logic.
 
@@ -9443,11 +9469,11 @@ globalEnv.UNO_HUB_PRIORITY_INTEGRATION_FACTORY = createUNOHubPriorityIntegration
 return createUNOHubPriorityIntegration
 end
 
-__uno_stage("06 06_UNO_HUB_PRIORITY_INTEGRATION_PHASE9.lua", __uno_file_06)
+
+__unoRunStage("06 06_UNO_HUB_PRIORITY_INTEGRATION_PHASE9(1).lua", __unoStage06)
 
 
--- ===== 07_UNO_HUB_PHASE9_BOOTSTRAP.lua =====
-local function __uno_file_07()
+local function __unoStage07()
 -- UNO HUB PHASE 9 AUTOMATIC RUNTIME BOOTSTRAP
 -- Constructs real backend instances from source-backed game modules.
 -- It never fabricates Arena/Kraken dependencies and never claims runtime PASS.
@@ -9703,8 +9729,15 @@ local function createBootstrap()
     status = "CONSTRUCTING_BACKENDS"
     local tween = createTweenMovement(root)
     local looseRemotes = child(root.ReplicatedStorage, "Remotes")
-    local scrapDeposited = looseRemotes and looseRemotes:FindFirstChild("ScrapDeposited")
-    if not scrapDeposited then block("ScrapDeposited client event unresolved") return end
+    local scrapDepositedRemote = looseRemotes and looseRemotes:FindFirstChild("ScrapDeposited")
+    local scrapDeposited = scrapDepositedRemote
+    if scrapDepositedRemote and scrapDepositedRemote:IsA("RemoteEvent") then
+        scrapDeposited = scrapDepositedRemote.OnClientEvent
+    end
+    if not scrapDeposited or type(scrapDeposited.Connect) ~= "function" then
+        block("ScrapDeposited client signal unresolved")
+        return
+    end
     local eventOk, eventBackend = pcall(eventFactory, {
         player = root.player,
         workspace = root.Workspace,
@@ -9828,12 +9861,25 @@ createBootstrap()
 return api
 end
 
-local __uno_api = __uno_stage("07 07_UNO_HUB_PHASE9_BOOTSTRAP.lua", __uno_file_07)
+
+local __unoFinalApi = __unoRunStage("07 07_UNO_HUB_PHASE9_BOOTSTRAP(1).lua", __unoStage07)
 
 
-local __uno_env = (getgenv and getgenv()) or _G
-if __uno_env.UNO_HUB_PHASE9 then
-    __uno_env.UNO_HUB = __uno_env.UNO_HUB_PHASE9
+local __unoEnv = (getgenv and getgenv()) or _G
+if type(__unoEnv.UNO_HUB_PHASE9) == "table" then
+    __unoEnv.UNO_HUB = __unoEnv.UNO_HUB_PHASE9
 end
-print("[UNO HUB] SINGLE-FILE MERGE EXECUTION COMPLETE")
-return __uno_api or __uno_env.UNO_HUB_PHASE9
+
+local __status = __unoEnv.UNO_HUB_PHASE9
+    and type(__unoEnv.UNO_HUB_PHASE9.getStatus) == "function"
+    and __unoEnv.UNO_HUB_PHASE9.getStatus()
+    or "UNAVAILABLE"
+
+print("[UNO HUB] FINAL MERGE STATUS =", tostring(__status))
+if __status == "READY" then
+    print("[UNO HUB] FINAL MERGE READY")
+else
+    warn("[UNO HUB] FINAL MERGE NOT READY; check [UNO Bootstrap] BLOCKED reason above")
+end
+
+return __unoFinalApi or __unoEnv.UNO_HUB_PHASE9

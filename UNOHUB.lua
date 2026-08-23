@@ -65,12 +65,18 @@ do
 end
 
 local Theme = {
-    Background = Color3.fromRGB(11, 12, 16), Surface = Color3.fromRGB(17, 18, 24),
-    SurfaceElevated = Color3.fromRGB(24, 26, 34), Sidebar = Color3.fromRGB(14, 15, 20),
-    Border = Color3.fromRGB(36, 39, 50), TextPrimary = Color3.fromRGB(236, 239, 246),
-    TextSecondary = Color3.fromRGB(160, 168, 185), TextMuted = Color3.fromRGB(110, 118, 135),
-    Primary = Color3.fromRGB(79, 140, 255), Success = Color3.fromRGB(52, 199, 123),
-    Warning = Color3.fromRGB(234, 179, 8), Danger = Color3.fromRGB(239, 68, 68),
+    Background = Color3.fromRGB(18, 18, 18),
+    Surface = Color3.fromRGB(22, 22, 22),
+    SurfaceElevated = Color3.fromRGB(30, 30, 30),
+    Sidebar = Color3.fromRGB(23, 23, 23),
+    Border = Color3.fromRGB(52, 52, 52),
+    TextPrimary = Color3.fromRGB(242, 242, 242),
+    TextSecondary = Color3.fromRGB(205, 205, 205),
+    TextMuted = Color3.fromRGB(135, 135, 145),
+    Primary = Color3.fromRGB(238, 238, 238),
+    Success = Color3.fromRGB(90, 205, 135),
+    Warning = Color3.fromRGB(230, 185, 70),
+    Danger = Color3.fromRGB(225, 80, 80),
 }
 
 local Maid = {}
@@ -126,7 +132,7 @@ local State = {
         autoFarmRebirth = false, autoKoDismiss = true, autoHatch = false, autoCollectEgg = false,
         autoIncubatorClaim = false, autoSell = false, autoFuse = false,
         autoBuyGenerator = false, autoUpgradeGenerator = false, autoExpandCoop = false, autoUpgradeRecycler = false, autoUpgradeIncubator = false,
-        antiAfk = false, autoHotEgg = false, autoArena = false, autoEventCapsule = false, autoKraken = false, showFloatingButton = true, reducedMotion = false,
+        antiAfk = true, autoRebirth = false, autoHotEgg = false, autoArena = false, autoEventCapsule = false, autoKraken = false, showFloatingButton = true, reducedMotion = false,
     },
 }
 
@@ -709,8 +715,8 @@ end
 -- Configuration is data only. This module never executes config text.
 
 local CONFIG_VERSION = 1
-local CONFIG_FOLDER = "UNO_HUB"
-local CONFIG_FILE = "UNO_HUB/GrowAChickenFighter_Config.json"
+local CONFIG_FOLDER = "UNOHUB"
+local DEFAULT_CONFIG_NAME = "default"
 
 local function clone(value, seen)
     if type(value) ~= "table" then return value end
@@ -740,6 +746,10 @@ local function delay(seconds, callback, deps)
 end
 
 local function getGlobal(name)
+    local env = (getgenv and getgenv()) or nil
+    if type(env) == "table" and type(env[name]) == "function" then
+        return env[name]
+    end
     if type(_G) == "table" and type(_G[name]) == "function" then
         return _G[name]
     end
@@ -783,10 +793,28 @@ local function createConfigManager(deps)
         and type(encode) == "function"
         and type(decode) == "function"
 
+    if persistenceAvailable then
+        pcall(makefolder, CONFIG_FOLDER)
+    end
+
     local config = {
         autoSave = true,
         restoreDestructiveAutomation = false,
+        configName = DEFAULT_CONFIG_NAME,
     }
+
+    local function sanitizeConfigName(value)
+        value = tostring(value or "")
+        value = string.gsub(value, "^%s+", "")
+        value = string.gsub(value, "%s+$", "")
+        value = string.gsub(value, "[^%w%-%_]", "_")
+        if value == "" then value = DEFAULT_CONFIG_NAME end
+        return string.sub(value, 1, 48)
+    end
+
+    local function configPath()
+        return CONFIG_FOLDER .. "/" .. sanitizeConfigName(config.configName) .. ".json"
+    end
     for key, value in pairs(deps.defaults or {}) do
         config[key] = clone(value)
     end
@@ -954,7 +982,7 @@ local function createConfigManager(deps)
             -- the write attempt because writefile is the decisive operation.
             log("CONFIG FOLDER CHECK", "CONTINUING")
         end
-        local okWrite, writeError = pcall(writefile, CONFIG_FILE, text)
+        local okWrite, writeError = pcall(writefile, configPath(), text)
         if not okWrite then
             setStatus("SAVE ERROR", writeError)
             return false, writeError
@@ -1005,13 +1033,13 @@ local function createConfigManager(deps)
             setStatus("PERSISTENCE UNAVAILABLE")
             return false, "PERSISTENCE UNAVAILABLE"
         end
-        local existsOk, exists = pcall(isfile, CONFIG_FILE)
+        local existsOk, exists = pcall(isfile, configPath())
         if not existsOk or exists ~= true then
             applyDocument(currentDefaults())
             setStatus("NO CONFIG")
             return false, "NO CONFIG"
         end
-        local okRead, text = pcall(readfile, CONFIG_FILE)
+        local okRead, text = pcall(readfile, configPath())
         if not okRead or type(text) ~= "string" then
             applyDocument(currentDefaults())
             setStatus("LOAD ERROR", text)
@@ -1059,6 +1087,19 @@ local function createConfigManager(deps)
 
     function api.getAutoSave()
         return config.autoSave
+    end
+
+    function api.setConfigName(value)
+        config.configName = sanitizeConfigName(value)
+        return config.configName
+    end
+
+    function api.getConfigName()
+        return config.configName
+    end
+
+    function api.getConfigPath()
+        return configPath()
     end
 
     function api.setRestoreDestructiveAutomation(enabled)
@@ -4572,6 +4613,42 @@ local function setAutoFarmRebirth(on)
     else afrSetPhase("DISABLED") end
 end
 
+local autoRebirthGeneration = 0
+local function setAutoRebirth(on)
+    State.toggles.autoRebirth = on == true
+    autoRebirthGeneration += 1
+    local myGeneration = autoRebirthGeneration
+    if not State.toggles.autoRebirth then return end
+
+    maid:Task(function(token)
+        while not token.cancelled and not State.closed
+            and State.toggles.autoRebirth and myGeneration == autoRebirthGeneration do
+            -- Auto Farm Rebirth already owns the full rebirth lifecycle.
+            if not AFR.enabled and next(AFR.coordinatorPauseReasons) == nil then
+                refreshData()
+                local ready = select(3, getRebirthInfo())
+                if ready and not isTowerActive() and not isContinueOpen() then
+                    local before = select(1, getRebirthInfo())
+                    local ok = tryInvoke("Rebirth")
+                    if ok then
+                        local deadline = os.clock() + 8
+                        while os.clock() < deadline and State.toggles.autoRebirth
+                            and myGeneration == autoRebirthGeneration do
+                            refreshData()
+                            if select(1, getRebirthInfo()) > before then
+                                State.successfulRebirths += 1
+                                break
+                            end
+                            task.wait(0.35)
+                        end
+                    end
+                end
+            end
+            task.wait(0.8)
+        end
+    end)
+end
+
 local antiAfkGen = 0
 local function setAntiAfk(on)
     State.toggles.antiAfk = on
@@ -4749,10 +4826,10 @@ do
         ConfigManager.registerSection("automation", function()
             return {
                 autoFarmRebirth = State.toggles.autoFarmRebirth == true,
+                autoRebirth = State.toggles.autoRebirth == true,
                 autoKoDismiss = State.toggles.autoKoDismiss == true,
                 autoCollectEgg = State.toggles.autoCollectEgg == true,
                 autoHotEgg = State.toggles.autoHotEgg == true,
-                antiAfk = State.toggles.antiAfk == true,
                 autoHatch = State.toggles.autoHatch == true,
                 autoIncubatorClaim = State.toggles.autoIncubatorClaim == true,
                 autoUpgradeIncubator = State.toggles.autoUpgradeIncubator == true,
@@ -4771,9 +4848,9 @@ do
             -- Preferences + optional worker start (allowed; user can toggle after)
             applyToggle("autoKoDismiss")
             applyToggle("autoFarmRebirth", setAutoFarmRebirth)
+            applyToggle("autoRebirth", setAutoRebirth)
             if AutoCollectEggFeature then applyToggle("autoCollectEgg", function(v) AutoCollectEggFeature.setAutoCollectEggs(v) end) end
             applyToggle("autoHotEgg", setAutoHotEgg)
-            applyToggle("antiAfk", setAntiAfk)
             if HatchFeature then applyToggle("autoHatch", function(v) HatchFeature.setAutoHatch(v) end) end
             if IncubatorClaimFeature then applyToggle("autoIncubatorClaim", function(v) IncubatorClaimFeature.setAutoIncubatorClaim(v) end) end
             if AutoUpgradeIncubatorFeature then applyToggle("autoUpgradeIncubator", function(v) AutoUpgradeIncubatorFeature.setAutoUpgradeIncubator(v) end) end
@@ -4781,7 +4858,20 @@ do
             applyToggle("autoUpgradeGenerator", setAutoUpgradeGenerator)
             applyToggle("autoExpandCoop", setAutoExpandCoop)
             applyToggle("autoUpgradeRecycler", setAutoUpgradeRecycler)
-        end, { defaults = {} })
+        end, { defaults = {
+            autoFarmRebirth = false,
+            autoRebirth = false,
+            autoKoDismiss = true,
+            autoCollectEgg = false,
+            autoHotEgg = false,
+            autoHatch = false,
+            autoIncubatorClaim = false,
+            autoUpgradeIncubator = false,
+            autoBuyGenerator = false,
+            autoUpgradeGenerator = false,
+            autoExpandCoop = false,
+            autoUpgradeRecycler = false,
+        } })
 
         ConfigManager.registerSection("hotEgg", function()
             return {
@@ -4901,17 +4991,12 @@ do
             return {
                 showFloatingButton = State.toggles.showFloatingButton ~= false,
                 reducedMotion = State.toggles.reducedMotion == true,
-                responsiveUI = RESPONSIVE.enabled ~= false,
-                uiScaleMode = RESPONSIVE.mode or "Auto",
             }
         end, function(data)
             if type(data) ~= "table" then return end
             if data.showFloatingButton ~= nil then State.toggles.showFloatingButton = data.showFloatingButton == true end
             if data.reducedMotion ~= nil then State.toggles.reducedMotion = data.reducedMotion == true end
-            if data.responsiveUI ~= nil then RESPONSIVE.enabled = data.responsiveUI == true end
-            if type(data.uiScaleMode) == "string" then RESPONSIVE.mode = data.uiScaleMode end
-            if type(updateResponsiveScale) == "function" then pcall(updateResponsiveScale) end
-        end, { defaults = { showFloatingButton = true, reducedMotion = false, responsiveUI = true, uiScaleMode = "Auto" } })
+        end, { defaults = { showFloatingButton = true, reducedMotion = false } })
     end
 end
 
@@ -4924,13 +5009,17 @@ if ConfigManager then
     isApplyingConfig = false
 end
 
+-- Anti-AFK is a permanent backend safety feature in UNO HUB V2.
+State.toggles.antiAfk = true
+setAntiAfk(true)
+
 local Gui = Instance.new("ScreenGui")
 Gui.Name = "UNO_HUB"; Gui.ResetOnSpawn = false; Gui.IgnoreGuiInset = true; Gui.DisplayOrder = 50
 Gui:SetAttribute("UNO_HUB_Shutdown", false); Gui.Parent = PlayerGui
 
 local Main = Instance.new("Frame")
 Main.Name = "Main"
-Main.Size = UDim2.fromOffset(900, 560); Main.Position = UDim2.fromScale(0.5, 0.5); Main.AnchorPoint = Vector2.new(0.5, 0.5)
+Main.Size = UDim2.fromOffset(920, 620); Main.Position = UDim2.fromScale(0.5, 0.5); Main.AnchorPoint = Vector2.new(0.5, 0.5)
 Main.BackgroundColor3 = Theme.Background; Main.BorderSizePixel = 0; Main.ClipsDescendants = true; Main.Parent = Gui
 corner(Main, 12); stroke(Main)
 
@@ -4945,11 +5034,11 @@ local RESPONSIVE = {
     mode = "Auto", -- Auto | 1.0 | 0.9 | 0.8 | 0.7
     refW = 1920,
     refH = 1080,
-    baseW = 900,
-    baseH = 560,
-    sidebarNormal = 200,
-    sidebarSmall = 155,
-    sidebarTiny = 140,
+    baseW = 920,
+    baseH = 620,
+    sidebarNormal = 145,
+    sidebarSmall = 135,
+    sidebarTiny = 125,
     minScale = 0.55,
     maxScale = 1.00,
     maxViewportW = 0.88,
@@ -4977,11 +5066,12 @@ end
 local function applySidebarWidth(width)
     width = math.floor(width)
     if Sidebar then
-        Sidebar.Size = UDim2.fromOffset(width, RESPONSIVE.baseH)
+        Sidebar.Position = UDim2.fromOffset(0, 52)
+        Sidebar.Size = UDim2.new(0, width, 1, -52)
     end
     if ContentRoot then
-        ContentRoot.Position = UDim2.fromOffset(width, 0)
-        ContentRoot.Size = UDim2.new(1, -width, 1, 0)
+        ContentRoot.Position = UDim2.fromOffset(width, 52)
+        ContentRoot.Size = UDim2.new(1, -width, 1, -52)
     end
 end
 
@@ -5044,62 +5134,41 @@ do
 end
 
 local Sidebar = Instance.new("Frame")
-Sidebar.Size = UDim2.fromOffset(200, 560); Sidebar.BackgroundColor3 = Theme.Sidebar; Sidebar.BorderSizePixel = 0; Sidebar.Parent = Main; corner(Sidebar, 12)
-local brand = Instance.new("Frame"); brand.Size = UDim2.new(1, 0, 0, 64); brand.BackgroundTransparency = 1; brand.Parent = Sidebar
-text(brand, "UNO HUB", 18, Theme.Primary, Enum.Font.GothamBold).Position = UDim2.fromOffset(18, 14)
-text(brand, "Grow a Chicken Fighter", 10, Theme.TextMuted).Position = UDim2.fromOffset(18, 38)
+Sidebar.Position = UDim2.fromOffset(0, 52); Sidebar.Size = UDim2.new(0, 145, 1, -52); Sidebar.BackgroundColor3 = Theme.Sidebar; Sidebar.BorderSizePixel = 0; Sidebar.Parent = Main; corner(Sidebar, 12)
+local brand = Instance.new("Frame"); brand.Size = UDim2.new(1, 0, 0, 72); brand.BackgroundTransparency = 1; brand.Parent = Sidebar
+text(brand, "UnO", 16, Theme.TextPrimary, Enum.Font.GothamBold).Position = UDim2.fromOffset(16, 14)
+text(brand, "HUB", 10, Theme.TextMuted, Enum.Font.Gotham).Position = UDim2.fromOffset(16, 36)
 
 local NavScroll = Instance.new("ScrollingFrame")
-NavScroll.Position = UDim2.fromOffset(0, 68); NavScroll.Size = UDim2.new(1, 0, 1, -130)
+NavScroll.Position = UDim2.fromOffset(0, 76); NavScroll.Size = UDim2.new(1, 0, 1, -82)
 NavScroll.BackgroundTransparency = 1; NavScroll.BorderSizePixel = 0; NavScroll.ScrollBarThickness = 2
 NavScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y; NavScroll.CanvasSize = UDim2.new(); NavScroll.Parent = Sidebar
 Instance.new("UIListLayout", NavScroll).Padding = UDim.new(0, 2)
 pad(NavScroll, 4, 10, 8, 10)
 
 local pages = {
-    { id = "Home", icon = "◇", title = "Home" },
-    { id = "Auto Farm", icon = "⚡", title = "Auto Farm" },
-    { id = "Tower", icon = "△", title = "Tower" },
-    { id = "Rebirth", icon = "↻", title = "Rebirth" },
-    { id = "Eggs", icon = "○", title = "Eggs" },
-    { id = "Chickens", icon = "★", title = "Chickens" },
-    { id = "Fuse", icon = "⊕", title = "Fuse" },
-    { id = "Incubator", icon = "◎", title = "Incubator" },
-    { id = "Coop", icon = "⌂", title = "Coop" },
-    { id = "Events", icon = "✦", title = "Events" },
-    { id = "Utility", icon = "◈", title = "Utility" },
-    { id = "Diagnostics", icon = "◉", title = "Diagnostics" },
-    { id = "Settings", icon = "⚙", title = "Settings" },
+    { id = "Auto Farm", icon = "", title = "Auto Farm" },
+    { id = "Auto Hatch Egg", icon = "", title = "Auto Hatch Egg" },
+    { id = "Chickens", icon = "", title = "Chickens" },
+    { id = "Fuse", icon = "", title = "Fuse" },
+    { id = "Performance", icon = "", title = "Performance" },
+    { id = "Webhook", icon = "", title = "Webhook" },
+    { id = "Configs", icon = "", title = "Configs" },
 }
 local navButtons = {}
-local pageDescs = {
-    Home = "Overview", ["Auto Farm"] = "Farm + Collect", Tower = "Tower",
-    Rebirth = "Rebirth", Eggs = "Hatch filter", Chickens = "Auto Sell",
-    Fuse = "Auto Fuse", Incubator = "Auto claim", Coop = "Generators", Events = "Hot Egg",
-    Utility = "Anti-AFK", Diagnostics = "Integration", Settings = "Actions",
-}
-
-local Profile = Instance.new("Frame")
-Profile.Position = UDim2.new(0, 0, 1, -58); Profile.Size = UDim2.new(1, 0, 0, 58); Profile.BackgroundTransparency = 1; Profile.Parent = Sidebar
-local avatar = Instance.new("ImageLabel")
-avatar.Size = UDim2.fromOffset(32, 32); avatar.Position = UDim2.fromOffset(16, 10)
-avatar.BackgroundColor3 = Theme.SurfaceElevated; avatar.BorderSizePixel = 0
-avatar.Image = "https://www.roblox.com/headshot-thumbnail/image?userId=" .. LocalPlayer.UserId .. "&width=48&height=48&format=png"
-avatar.Parent = Profile; corner(avatar, 8)
-text(Profile, LocalPlayer.DisplayName, 12, Theme.TextPrimary, Enum.Font.GothamMedium).Position = UDim2.fromOffset(56, 10)
-text(Profile, "@" .. LocalPlayer.Name, 10, Theme.TextMuted).Position = UDim2.fromOffset(56, 28)
+local pageDescs = {}
 
 local ContentRoot = Instance.new("Frame")
-ContentRoot.Position = UDim2.fromOffset(200, 0); ContentRoot.Size = UDim2.new(1, -200, 1, 0)
+ContentRoot.Position = UDim2.fromOffset(145, 52); ContentRoot.Size = UDim2.new(1, -145, 1, -52)
 ContentRoot.BackgroundColor3 = Theme.Background; ContentRoot.BorderSizePixel = 0; ContentRoot.Parent = Main
 local Topbar = Instance.new("Frame")
-Topbar.Size = UDim2.new(1, 0, 0, 52); Topbar.BackgroundColor3 = Theme.Surface; Topbar.BorderSizePixel = 0; Topbar.Parent = ContentRoot; stroke(Topbar)
-local PageTitle = text(Topbar, "HOME", 16, Theme.TextPrimary, Enum.Font.GothamBold)
-PageTitle.Position = UDim2.fromOffset(20, 8); PageTitle.Size = UDim2.fromOffset(280, 20)
-local PageDesc = text(Topbar, "Overview", 11, Theme.TextMuted)
-PageDesc.Position = UDim2.fromOffset(20, 28); PageDesc.Size = UDim2.fromOffset(280, 16)
+Topbar.Position = UDim2.fromOffset(0, 0); Topbar.Size = UDim2.new(1, 0, 0, 52); Topbar.BackgroundColor3 = Theme.Surface; Topbar.BorderSizePixel = 0; Topbar.Parent = Main; stroke(Topbar)
+local PageTitle = text(Topbar, "Grow A Chicken Fighter | V2", 13, Theme.TextPrimary, Enum.Font.GothamBold)
+PageTitle.Position = UDim2.fromOffset(18, 15); PageTitle.Size = UDim2.new(1, -130, 0, 22)
+local PageDesc = text(Topbar, "", 1, Theme.TextMuted)
+PageDesc.Visible = false
 local connDot = Instance.new("Frame")
-connDot.Size = UDim2.fromOffset(7, 7); connDot.Position = UDim2.new(1, -160, 0.5, -3)
+connDot.Size = UDim2.fromOffset(6, 6); connDot.Position = UDim2.new(1, -118, 0.5, -3)
 connDot.BackgroundColor3 = Theme.Success; connDot.BorderSizePixel = 0; connDot.Parent = Topbar; corner(connDot, 4)
 local minBtn = Instance.new("TextButton")
 minBtn.Size = UDim2.fromOffset(28, 28); minBtn.Position = UDim2.new(1, -72, 0.5, -14)
@@ -5110,11 +5179,11 @@ closeBtn.Size = UDim2.fromOffset(28, 28); closeBtn.Position = UDim2.new(1, -38, 
 closeBtn.BackgroundColor3 = Theme.SurfaceElevated; closeBtn.Text = "✕"; closeBtn.Font = Enum.Font.GothamBold
 closeBtn.TextSize = 12; closeBtn.TextColor3 = Theme.TextSecondary; closeBtn.AutoButtonColor = false; closeBtn.Parent = Topbar; corner(closeBtn, 6)
 local PageHost = Instance.new("Frame")
-PageHost.Position = UDim2.fromOffset(0, 52); PageHost.Size = UDim2.new(1, 0, 1, -52)
+PageHost.Position = UDim2.fromOffset(0, 0); PageHost.Size = UDim2.new(1, 0, 1, 0)
 PageHost.BackgroundTransparency = 1; PageHost.ClipsDescendants = true; PageHost.Parent = ContentRoot
 local Float = Instance.new("TextButton")
 Float.Size = UDim2.fromOffset(52, 32); Float.Position = UDim2.new(0, 24, 0.5, -16)
-Float.BackgroundColor3 = Theme.Primary; Float.Text = "UNO"; Float.Font = Enum.Font.GothamBold
+Float.BackgroundColor3 = Theme.Primary; Float.Text = "UnO"; Float.Font = Enum.Font.GothamBold
 Float.TextSize = 13; Float.TextColor3 = Color3.new(1, 1, 1); Float.Visible = false; Float.AutoButtonColor = false; Float.Parent = Gui; corner(Float, 8)
 
 -- Bind responsive scale to camera viewport changes
@@ -5200,6 +5269,7 @@ env.UNO_HUB_RUNTIME = {
     getNormalFarmCoordinatorPauseReasons = function() return AFR.coordinatorPauseReasons end,
     setAutoHotEgg = setAutoHotEgg,
     setAutoFarmRebirth = setAutoFarmRebirth,
+    setAutoRebirth = setAutoRebirth,
     getHotEggState = function() return HE end,
     getNormalFarmState = function() return AFR end,
     shutdown = shutdown,
@@ -5261,6 +5331,150 @@ local function settingRow(parent, order, title, desc, key, onChange)
     end))
     sw.Position = UDim2.new(1, -40, 0.5, -11)
 end
+
+local function uiButton(parent, order, label, onClick, widthScale)
+    local holder = Instance.new("Frame")
+    holder.LayoutOrder = order or 0
+    holder.Size = UDim2.new(widthScale or 1, 0, 0, 36)
+    holder.BackgroundTransparency = 1
+    holder.Parent = parent
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(1, 0, 1, 0)
+    b.BackgroundColor3 = Theme.SurfaceElevated
+    b.Text = label
+    b.Font = Enum.Font.GothamMedium
+    b.TextSize = 12
+    b.TextColor3 = Theme.TextPrimary
+    b.AutoButtonColor = false
+    b.Parent = holder
+    corner(b, 7); stroke(b)
+    if onClick then b.MouseButton1Click:Connect(onClick) end
+    return b, holder
+end
+
+local function createTabbedPage(tabNames)
+    local root = Instance.new("Frame")
+    root.Size = UDim2.fromScale(1, 1)
+    root.BackgroundTransparency = 1
+    root.Visible = false
+    root.Parent = PageHost
+
+    local tabs = Instance.new("Frame")
+    tabs.Position = UDim2.fromOffset(18, 10)
+    tabs.Size = UDim2.new(1, -36, 0, 38)
+    tabs.BackgroundTransparency = 1
+    tabs.Parent = root
+    local tabsLayout = Instance.new("UIListLayout")
+    tabsLayout.FillDirection = Enum.FillDirection.Horizontal
+    tabsLayout.Padding = UDim.new(0, 12)
+    tabsLayout.Parent = tabs
+
+    local body = Instance.new("Frame")
+    body.Position = UDim2.fromOffset(0, 50)
+    body.Size = UDim2.new(1, 0, 1, -50)
+    body.BackgroundTransparency = 1
+    body.Parent = root
+
+    local bodies, buttons = {}, {}
+    local current = nil
+    local function selectTab(name)
+        current = name
+        for tabName, frame in pairs(bodies) do frame.Visible = tabName == name end
+        for tabName, button in pairs(buttons) do
+            button.TextColor3 = tabName == name and Theme.TextPrimary or Theme.TextMuted
+            button.BackgroundTransparency = tabName == name and 0 or 1
+        end
+    end
+
+    for i, name in ipairs(tabNames) do
+        local b = Instance.new("TextButton")
+        b.LayoutOrder = i
+        b.Size = UDim2.fromOffset(math.max(72, #name * 8 + 24), 30)
+        b.BackgroundColor3 = Theme.SurfaceElevated
+        b.BackgroundTransparency = 1
+        b.Text = name
+        b.Font = Enum.Font.GothamMedium
+        b.TextSize = 12
+        b.TextColor3 = Theme.TextMuted
+        b.AutoButtonColor = false
+        b.Parent = tabs
+        corner(b, 5)
+        buttons[name] = b
+
+        local sc = Instance.new("ScrollingFrame")
+        sc.Size = UDim2.fromScale(1, 1)
+        sc.BackgroundTransparency = 1
+        sc.BorderSizePixel = 0
+        sc.ScrollBarThickness = 3
+        sc.AutomaticCanvasSize = Enum.AutomaticSize.Y
+        sc.CanvasSize = UDim2.new()
+        sc.Visible = false
+        sc.Parent = body
+        local lay = Instance.new("UIListLayout")
+        lay.Padding = UDim.new(0, 12)
+        lay.SortOrder = Enum.SortOrder.LayoutOrder
+        lay.Parent = sc
+        pad(sc, 14, 18, 18, 18)
+        bodies[name] = sc
+        b.MouseButton1Click:Connect(function() selectTab(name) end)
+    end
+
+    selectTab(tabNames[1])
+    return root, bodies, selectTab
+end
+
+local function makeCollapsibleFilter(parent, order, label, buildRows)
+    local wrap = Instance.new("Frame")
+    wrap.LayoutOrder = order or 0
+    wrap.Size = UDim2.new(1, 0, 0, 38)
+    wrap.AutomaticSize = Enum.AutomaticSize.Y
+    wrap.BackgroundTransparency = 1
+    wrap.Parent = parent
+
+    local bar = Instance.new("TextButton")
+    bar.Size = UDim2.new(1, 0, 0, 36)
+    bar.BackgroundColor3 = Theme.SurfaceElevated
+    bar.Text = label .. "   ▾"
+    bar.TextXAlignment = Enum.TextXAlignment.Left
+    bar.Font = Enum.Font.Gotham
+    bar.TextSize = 12
+    bar.TextColor3 = Theme.TextSecondary
+    bar.AutoButtonColor = false
+    bar.Parent = wrap
+    corner(bar, 7); stroke(bar)
+    pad(bar, 0, 12, 0, 12)
+
+    local list = Instance.new("Frame")
+    list.Position = UDim2.fromOffset(0, 42)
+    list.Size = UDim2.new(1, 0, 0, 0)
+    list.AutomaticSize = Enum.AutomaticSize.Y
+    list.BackgroundTransparency = 1
+    list.Visible = false
+    list.Parent = wrap
+    local layout = Instance.new("UIListLayout")
+    layout.Padding = UDim.new(0, 4)
+    layout.Parent = list
+
+    local built = false
+    bar.MouseButton1Click:Connect(function()
+        list.Visible = not list.Visible
+        bar.Text = label .. (list.Visible and "   ▴" or "   ▾")
+        if list.Visible and not built then
+            built = true
+            buildRows(list)
+        end
+    end)
+    return bar, list
+end
+
+local function clearChildrenExceptLayouts(parent)
+    for _, child in ipairs(parent:GetChildren()) do
+        if not child:IsA("UIListLayout") and not child:IsA("UIPadding") then
+            child:Destroy()
+        end
+    end
+end
+
 local function safeBuild(name, fn)
     local ok, err = pcall(fn)
     if not ok then
@@ -5317,27 +5531,83 @@ safeBuild("Home", function()
     end }
 end)
 
+local function getPhase9API()
+    local env = (getgenv and getgenv()) or _G
+    local api = env.UNO_HUB_PHASE9
+    return type(api) == "table" and api or nil
+end
+
+local function setPhase9Toggle(toggleKey, setterName, value)
+    local api = getPhase9API()
+    if not api or type(api[setterName]) ~= "function" then
+        State.toggles[toggleKey] = false
+        log("ERROR", setterName .. " unavailable; Phase 9 bootstrap not READY")
+        return false
+    end
+    local ok, result = pcall(api[setterName], value == true)
+    if not ok or result == false then
+        State.toggles[toggleKey] = false
+        log("ERROR", setterName .. " failed: " .. tostring(result))
+        return false
+    end
+    State.toggles[toggleKey] = value == true
+    return true
+end
+
+local function setAutoArenaPhase9(v)
+    return setPhase9Toggle("autoArena", "setAutoArenaEnabled", v)
+end
+local function setEventCapsulePhase9(v)
+    return setPhase9Toggle("autoEventCapsule", "setEventCapsuleEnabled", v)
+end
+local function setKrakenPhase9(v)
+    return setPhase9Toggle("autoKraken", "setKrakenEnabled", v)
+end
+
 safeBuild("Auto Farm", function()
-    local sc = createScrollPage()
-    local _, primary = card(sc, 1, "PRIMARY")
-    settingRow(primary, 1, "Auto Farm Rebirth", nil, "autoFarmRebirth", setAutoFarmRebirth)
-    settingRow(primary, 2, "Auto K.O. Dismiss", nil, "autoKoDismiss")
-    settingRow(primary, 3, "Auto Hatch Eggs", nil, "autoHatch", function(v) HatchFeature.setAutoHatch(v) end)
+    local root, tabs = createTabbedPage({ "Farm", "Events", "Incubator", "Coop" })
+
+    -- FARM
+    local farm = tabs.Farm
+    local _, farming = card(farm, 1, "Farming")
+    settingRow(farming, 1, "Auto Farm Rebirth", nil, "autoFarmRebirth", setAutoFarmRebirth)
+    settingRow(farming, 2, "Auto Rebirth", nil, "autoRebirth", setAutoRebirth)
+    settingRow(farming, 3, "Auto K.O. Dismiss", nil, "autoKoDismiss")
     if AutoCollectEggFeature then
-        local _, collectCard = card(sc, 2, "AUTO COLLECT LAID EGGS")
-        settingRow(collectCard, 1, "Auto Collect Laid Eggs", nil, "autoCollectEgg", function(v)
+        settingRow(farming, 4, "Collect Laid Eggs", nil, "autoCollectEgg", function(v)
             AutoCollectEggFeature.setAutoCollectEggs(v)
         end)
-        local cState = row(collectCard, 2, "Status")
-        local cCount = row(collectCard, 3, "Detected Eggs")
-        Views["Auto Farm"] = { root = sc, update = function()
-            local st = AutoCollectEggFeature.getStatus()
-            setText(cState, st.state)
-            setText(cCount, st.trackedEggCount)
-        end }
-    else
-        Views["Auto Farm"] = { root = sc, update = function() end }
     end
+
+    -- EVENTS
+    local events = tabs.Events
+    local _, eventCard = card(events, 1, "Events")
+    settingRow(eventCard, 1, "Auto Hot Egg", nil, "autoHotEgg", setAutoHotEgg)
+    settingRow(eventCard, 2, "Event Capsule", nil, "autoEventCapsule", setEventCapsulePhase9)
+    settingRow(eventCard, 3, "Auto Kraken Eggs", nil, "autoKraken", setKrakenPhase9)
+    settingRow(eventCard, 4, "Auto Arena", nil, "autoArena", setAutoArenaPhase9)
+
+    -- INCUBATOR
+    local incubator = tabs.Incubator
+    local _, incubatorCard = card(incubator, 1, "Incubator")
+    settingRow(incubatorCard, 1, "Auto Claim Eggs", nil, "autoIncubatorClaim", function(v)
+        IncubatorClaimFeature.setAutoIncubatorClaim(v)
+    end)
+    if AutoUpgradeIncubatorFeature then
+        settingRow(incubatorCard, 2, "Auto Upgrade Incubator", nil, "autoUpgradeIncubator", function(v)
+            AutoUpgradeIncubatorFeature.setAutoUpgradeIncubator(v)
+        end)
+    end
+
+    -- COOP
+    local coop = tabs.Coop
+    local _, coopCard = card(coop, 1, "Coop")
+    settingRow(coopCard, 1, "Auto Buy Generator", nil, "autoBuyGenerator", setAutoBuyGenerator)
+    settingRow(coopCard, 2, "Auto Upgrade Generator", nil, "autoUpgradeGenerator", setAutoUpgradeGenerator)
+    settingRow(coopCard, 3, "Auto Expand Coop", nil, "autoExpandCoop", setAutoExpandCoop)
+    settingRow(coopCard, 4, "Auto Upgrade Recycler", nil, "autoUpgradeRecycler", setAutoUpgradeRecycler)
+
+    Views["Auto Farm"] = { root = root, update = function() end }
 end)
 
 safeBuild("Tower", function()
@@ -5359,93 +5629,110 @@ safeBuild("Rebirth", function()
     end }
 end)
 
-safeBuild("Eggs", function()
+safeBuild("Auto Hatch Egg", function()
     local sc = createScrollPage()
-    local _, hatchCard = card(sc, 1, "AUTO HATCH EGGS")
-    settingRow(hatchCard, 1, "Auto Hatch Eggs", nil, "autoHatch", function(v) HatchFeature.setAutoHatch(v) end)
-    local st = row(hatchCard, 2, "Status")
-    local tgt = row(hatchCard, 3, "Target")
-
-    local _, filterCard = card(sc, 2, "EGG FILTER")
-    local filterHost = Instance.new("Frame")
-    filterHost.LayoutOrder = 10
-    filterHost.Size = UDim2.new(1, 0, 0, 0)
-    filterHost.AutomaticSize = Enum.AutomaticSize.Y
-    filterHost.BackgroundTransparency = 1
-    filterHost.Parent = filterCard
-    Instance.new("UIListLayout", filterHost).Padding = UDim.new(0, 4)
-
-    local btnRow = Instance.new("Frame")
-    btnRow.LayoutOrder = 0
-    btnRow.Size = UDim2.new(1, 0, 0, 28)
-    btnRow.BackgroundTransparency = 1
-    btnRow.Parent = filterHost
-    local function smallBtn(parent, label, x, fn)
-        local b = Instance.new("TextButton")
-        b.Size = UDim2.fromOffset(90, 24)
-        b.Position = UDim2.fromOffset(x, 2)
-        b.BackgroundColor3 = Theme.SurfaceElevated
-        b.Text = label
-        b.Font = Enum.Font.Gotham
-        b.TextSize = 11
-        b.TextColor3 = Theme.TextPrimary
-        b.AutoButtonColor = false
-        b.Parent = parent
-        corner(b, 5)
-        b.MouseButton1Click:Connect(fn)
-    end
-    smallBtn(btnRow, "Select All", 0, function()
-        HatchFeature.selectAllAvailableEggs()
-        HatchFeature.userCustomized = true
+    local _, hatchCard = card(sc, 1, "Auto Hatch Egg")
+    settingRow(hatchCard, 1, "Auto Hatch Eggs", nil, "autoHatch", function(v)
+        HatchFeature.setAutoHatch(v)
     end)
-    smallBtn(btnRow, "Clear", 96, function() HatchFeature.clearEggSelection() end)
 
-    local eggRows = {}
-    Views.Eggs = { root = sc, update = function()
-        refreshData()
+    local _, filterCard = card(sc, 2, "Egg Filter")
+    makeCollapsibleFilter(filterCard, 1, "Select Eggs", function(host)
+        local tools = Instance.new("Frame")
+        tools.LayoutOrder = 0
+        tools.Size = UDim2.new(1, 0, 0, 34)
+        tools.BackgroundTransparency = 1
+        tools.Parent = host
+
+        local selectAll = Instance.new("TextButton")
+        selectAll.Size = UDim2.new(0.5, -4, 0, 30)
+        selectAll.BackgroundColor3 = Theme.SurfaceElevated
+        selectAll.Text = "Select All"
+        selectAll.Font = Enum.Font.Gotham
+        selectAll.TextSize = 11
+        selectAll.TextColor3 = Theme.TextPrimary
+        selectAll.Parent = tools
+        selectAll.AutoButtonColor = false
+        corner(selectAll, 6)
+        selectAll.MouseButton1Click:Connect(function()
+            HatchFeature.selectAllAvailableEggs()
+            HatchFeature.userCustomized = true
+        end)
+
+        local clear = selectAll:Clone()
+        clear.Position = UDim2.new(0.5, 4, 0, 0)
+        clear.Text = "Clear"
+        clear.Parent = tools
+        clear.MouseButton1Click:Connect(function() HatchFeature.clearEggSelection() end)
+
         local available = HatchFeature.getAvailableEggTypes()
         for i, egg in ipairs(available) do
-            local key = egg.key
             local friendly = egg.displayName
             if type(friendly) ~= "string" or friendly == "" then
                 friendly = resolveEggDisplayName(egg.id)
             end
-            local rowUI = eggRows[key]
-            if not rowUI then
-                local f, check, nameL, qtyL = makeFilterRow(
-                    filterHost, 10 + i, friendly, "x" .. tostring(egg.quantity),
-                    HatchFeature.isEggSelected(egg.id),
-                    function(checkBtn)
-                        local now = not HatchFeature.isEggSelected(egg.id)
-                        HatchFeature.setEggSelected(egg.id, now)
-                        checkBtn.Text = now and "✓" or ""
-                    end
-                )
-                eggRows[key] = { frame = f, check = check, name = nameL, qty = qtyL, id = egg.id }
-            else
-                rowUI.name.Text = friendly
-                if rowUI.qty then rowUI.qty.Text = "x" .. tostring(egg.quantity) end
-                rowUI.check.Text = HatchFeature.isEggSelected(egg.id) and "✓" or ""
-            end
+            local _, check = makeFilterRow(host, 10 + i, friendly, nil,
+                HatchFeature.isEggSelected(egg.id), function(checkBtn)
+                    local now = not HatchFeature.isEggSelected(egg.id)
+                    HatchFeature.setEggSelected(egg.id, now)
+                    checkBtn.Text = now and "✓" or ""
+                end)
         end
-        local hs = HatchFeature.getStatus()
-        setText(st, hs.status)
-        setText(tgt, hs.target and resolveEggDisplayName(hs.target) or hs.target)
-    end }
+    end)
+
+    local _, inventoryCard = card(sc, 3, "Eggs")
+    local inventoryHost = Instance.new("Frame")
+    inventoryHost.LayoutOrder = 2
+    inventoryHost.Size = UDim2.new(1, 0, 0, 0)
+    inventoryHost.AutomaticSize = Enum.AutomaticSize.Y
+    inventoryHost.BackgroundTransparency = 1
+    inventoryHost.Parent = inventoryCard
+    local invLayout = Instance.new("UIListLayout")
+    invLayout.Padding = UDim.new(0, 4)
+    invLayout.Parent = inventoryHost
+
+    local function refreshEggInventory()
+        clearChildrenExceptLayouts(inventoryHost)
+        refreshData()
+        local available = HatchFeature.getAvailableEggTypes()
+        if #available == 0 then
+            local empty = text(inventoryHost, "No eggs detected.", 11, Theme.TextMuted)
+            empty.Size = UDim2.new(1, 0, 0, 28)
+            return
+        end
+        for i, egg in ipairs(available) do
+            local friendly = egg.displayName
+            if type(friendly) ~= "string" or friendly == "" then
+                friendly = resolveEggDisplayName(egg.id)
+            end
+            local f = Instance.new("Frame")
+            f.LayoutOrder = i
+            f.Size = UDim2.new(1, 0, 0, 34)
+            f.BackgroundColor3 = Theme.SurfaceElevated
+            f.BorderSizePixel = 0
+            f.Parent = inventoryHost
+            corner(f, 6); stroke(f)
+            local n = text(f, friendly, 12, Theme.TextPrimary)
+            n.Position = UDim2.fromOffset(12, 0)
+            n.Size = UDim2.new(1, -90, 1, 0)
+            local q = text(f, "x" .. tostring(egg.quantity or 0), 11, Theme.TextMuted, nil, Enum.TextXAlignment.Right)
+            q.Position = UDim2.new(1, -74, 0, 0)
+            q.Size = UDim2.fromOffset(62, 34)
+        end
+    end
+
+    uiButton(inventoryCard, 3, "Refresh", refreshEggInventory)
+    refreshEggInventory()
+
+    Views["Auto Hatch Egg"] = { root = sc, update = function() end }
 end)
 
 -- CHICKENS PAGE (Auto Sell restored)
 safeBuild("Chickens", function()
     local sc = createScrollPage()
-    local _, sellCard = card(sc, 1, "AUTO SELL CHICKENS")
-
+    local _, sellCard = card(sc, 1, "Auto Sell Chickens")
     if not AutoSellFeature then
-        local err = State.diagnostics["AutoSell.Feature"] or "unknown error"
-        setText(row(sellCard, 1, "Status"), tostring(err))
-        setText(row(sellCard, 2, "Remotes"), State.diagnostics["AutoSell.Remotes"] or "—")
-        setText(row(sellCard, 3, "DataController"), State.diagnostics["AutoSell.DataController"] or "—")
-        setText(row(sellCard, 4, "Catalog"), State.diagnostics["AutoSell.Catalog"] or "—")
-        setText(row(sellCard, 5, "SellChickens"), State.diagnostics["AutoSell.SellChickens"] or "—")
+        setText(row(sellCard, 1, "Status"), "Unavailable")
         Views.Chickens = { root = sc, update = function() end }
         return
     end
@@ -5453,133 +5740,69 @@ safeBuild("Chickens", function()
     settingRow(sellCard, 1, "Auto Sell Chickens", nil, "autoSell", function(v)
         AutoSellFeature.setAutoSell(v)
     end)
-    do
-        local f = Instance.new("Frame"); f.LayoutOrder = 2; f.Size = UDim2.new(1, 0, 0, 28)
+
+    local function simpleToggle(order, label, getter, setter)
+        local f = Instance.new("Frame")
+        f.LayoutOrder = order; f.Size = UDim2.new(1, 0, 0, 28)
         f.BackgroundTransparency = 1; f.Parent = sellCard
-        text(f, "Dry Run", 13, Theme.TextPrimary, Enum.Font.GothamMedium).Size = UDim2.new(1, -50, 1, 0)
-        local sw = select(1, makeSwitch(f, AutoSellFeature.getDryRun() == true, function(v)
-            AutoSellFeature.setDryRun(v)
-        end))
-        sw.Position = UDim2.new(1, -40, 0.5, -11)
-    end
-    do
-        local f = Instance.new("Frame"); f.LayoutOrder = 3; f.Size = UDim2.new(1, 0, 0, 28)
-        f.BackgroundTransparency = 1; f.Parent = sellCard
-        text(f, "Protect Mutated", 13, Theme.TextPrimary, Enum.Font.GothamMedium).Size = UDim2.new(1, -50, 1, 0)
-        local sw = select(1, makeSwitch(f, AutoSellFeature.getProtectMutated() == true, function(v)
-            AutoSellFeature.setProtectMutated(v)
-        end))
-        sw.Position = UDim2.new(1, -40, 0.5, -11)
-    end
-    do
-        local f = Instance.new("Frame"); f.LayoutOrder = 4; f.Size = UDim2.new(1, 0, 0, 28)
-        f.BackgroundTransparency = 1; f.Parent = sellCard
-        text(f, "Protect Favorites", 13, Theme.TextPrimary, Enum.Font.GothamMedium).Size = UDim2.new(1, -50, 1, 0)
-        local sw = select(1, makeSwitch(f, AutoSellFeature.getProtectFavorites() == true, function(v)
-            AutoSellFeature.setProtectFavorites(v)
-        end))
+        text(f, label, 13, Theme.TextPrimary, Enum.Font.GothamMedium).Size = UDim2.new(1, -50, 1, 0)
+        local sw = select(1, makeSwitch(f, getter() == true, setter))
         sw.Position = UDim2.new(1, -40, 0.5, -11)
     end
 
-    local _, rarityCard = card(sc, 2, "RARITY FILTER")
-    local rarityHost = Instance.new("Frame")
-    rarityHost.LayoutOrder = 5
-    rarityHost.Size = UDim2.new(1, 0, 0, 0)
-    rarityHost.AutomaticSize = Enum.AutomaticSize.Y
-    rarityHost.BackgroundTransparency = 1
-    rarityHost.Parent = rarityCard
-    Instance.new("UIListLayout", rarityHost).Padding = UDim.new(0, 4)
+    simpleToggle(2, "Dry Run", AutoSellFeature.getDryRun, AutoSellFeature.setDryRun)
+    simpleToggle(3, "Protect Mutated", AutoSellFeature.getProtectMutated, AutoSellFeature.setProtectMutated)
+    simpleToggle(4, "Protect Favorites", AutoSellFeature.getProtectFavorites, AutoSellFeature.setProtectFavorites)
 
-    local rarities = AutoSellFeature.getAvailableRarities()
-    if #rarities == 0 then
-        rarities = { "common", "uncommon", "rare", "epic", "legendary", "mythic", "divine", "celestial", "cosmic", "secret" }
-    end
-    for i, rarityId in ipairs(rarities) do
-        local friendly = resolveRarityDisplayName(rarityId)
-        diagNameOnce("RARITY", rarityId, friendly)
-        makeFilterRow(rarityHost, i, friendly, nil, AutoSellFeature.isRaritySelected(rarityId), function(checkBtn)
-            local now = not AutoSellFeature.isRaritySelected(rarityId)
-            AutoSellFeature.setRaritySelected(rarityId, now)
-            checkBtn.Text = now and "✓" or ""
-        end)
-    end
-
-    local _, abilityCard = card(sc, 3, "ABILITY WHITELIST")
-    local abilityHost = Instance.new("Frame")
-    abilityHost.LayoutOrder = 5
-    abilityHost.Size = UDim2.new(1, 0, 0, 0)
-    abilityHost.AutomaticSize = Enum.AutomaticSize.Y
-    abilityHost.BackgroundTransparency = 1
-    abilityHost.Parent = abilityCard
-    Instance.new("UIListLayout", abilityHost).Padding = UDim.new(0, 4)
-
-    local abilities = AutoSellFeature.getAvailableAbilities()
-    if #abilities == 0 then
-        abilities = {
-            { id = "voodoo", name = "Voodoo" },
-            { id = "cycleofash", name = "Cycle of Ash" },
-        }
-    end
-    table.sort(abilities, function(a, b)
-        return resolveAbilityDisplayName(a) < resolveAbilityDisplayName(b)
+    local _, filters = card(sc, 2, "Filters")
+    makeCollapsibleFilter(filters, 1, "Rarity", function(host)
+        local rarities = AutoSellFeature.getAvailableRarities()
+        if #rarities == 0 then
+            rarities = { "common", "uncommon", "rare", "epic", "legendary", "mythic", "divine", "celestial", "cosmic", "secret" }
+        end
+        for i, rarityId in ipairs(rarities) do
+            makeFilterRow(host, i, resolveRarityDisplayName(rarityId), nil,
+                AutoSellFeature.isRaritySelected(rarityId), function(checkBtn)
+                    local now = not AutoSellFeature.isRaritySelected(rarityId)
+                    AutoSellFeature.setRaritySelected(rarityId, now)
+                    checkBtn.Text = now and "✓" or ""
+                end)
+        end
     end)
-    for i, ab in ipairs(abilities) do
-        local aid = ab.id
-        local friendly = resolveAbilityDisplayName(ab)
-        diagNameOnce("ABILITY", aid, friendly)
-        makeFilterRow(abilityHost, i, friendly, nil, AutoSellFeature.isAbilityWhitelisted(aid), function(checkBtn)
-            local now = not AutoSellFeature.isAbilityWhitelisted(aid)
-            AutoSellFeature.setAbilityWhitelisted(aid, now)
-            checkBtn.Text = now and "✓" or ""
-        end)
-    end
 
-    local _, statsCard = card(sc, 4, "SELL STATUS / DIAGNOSTICS")
-    local sStatus = row(statsCard, 1, "Status")
-    local sDry = row(statsCard, 2, "Dry Run")
-    local sSel = row(statsCard, 3, "Selected Rarities")
-    local sEval = row(statsCard, 4, "Evaluated")
-    local sSold = row(statsCard, 5, "Confirmed Sold")
-    local sAct = row(statsCard, 6, "Protected Active")
-    local sFav = row(statsCard, 7, "Protected Favorite")
-    local sMut = row(statsCard, 8, "Protected Mutated")
-    local sAb = row(statsCard, 9, "Protected Ability")
-    local sInc = row(statsCard, 10, "Protected Incubator")
-    local sFail = row(statsCard, 11, "Failed / Not Confirmed")
-    local sBatch = row(statsCard, 12, "Last Batch")
-    local sErr = row(statsCard, 13, "Last Error")
+    makeCollapsibleFilter(filters, 2, "Protected Abilities", function(host)
+        local abilities = AutoSellFeature.getAvailableAbilities()
+        if #abilities == 0 then
+            abilities = { { id = "voodoo", name = "Voodoo" }, { id = "cycleofash", name = "Cycle of Ash" } }
+        end
+        table.sort(abilities, function(a, b) return resolveAbilityDisplayName(a) < resolveAbilityDisplayName(b) end)
+        for i, ab in ipairs(abilities) do
+            local aid = ab.id
+            makeFilterRow(host, i, resolveAbilityDisplayName(ab), nil,
+                AutoSellFeature.isAbilityWhitelisted(aid), function(checkBtn)
+                    local now = not AutoSellFeature.isAbilityWhitelisted(aid)
+                    AutoSellFeature.setAbilityWhitelisted(aid, now)
+                    checkBtn.Text = now and "✓" or ""
+                end)
+        end
+    end)
 
+    local _, statusCard = card(sc, 3, "Status")
+    local status = row(statusCard, 1, "Auto Sell")
+    local err = row(statusCard, 2, "Last Error")
     Views.Chickens = { root = sc, update = function()
-        setText(sStatus, AutoSellFeature.getStatus())
-        setText(sDry, AutoSellFeature.getDryRun() and "ON" or "OFF")
+        setText(status, AutoSellFeature.getStatus())
         local st = AutoSellFeature.getStats()
-        local sel = st.selectedRarities or {}
-        setText(sSel, #sel > 0 and table.concat(sel, ", ") or "(none)")
-        setText(sEval, st.totalEvaluated)
-        setText(sSold, st.totalSoldConfirmed)
-        setText(sAct, st.totalProtectedActive)
-        setText(sFav, st.totalProtectedFavorite)
-        setText(sMut, st.totalProtectedMutated)
-        setText(sAb, st.totalProtectedAbility)
-        setText(sInc, st.totalProtectedIncubator)
-        setText(sFail, st.totalFailedNotConfirmed)
-        setText(sBatch, st.lastBatchSize)
-        setText(sErr, st.lastError)
+        setText(err, st and st.lastError or "—")
     end }
 end)
-
 
 -- FUSE PAGE
 safeBuild("Fuse", function()
     local sc = createScrollPage()
-    local _, fuseCard = card(sc, 1, "AUTO FUSE CHICKENS")
-
+    local _, fuseCard = card(sc, 1, "Auto Fuse Chickens")
     if not AutoFuseFeature then
-        local err = State.diagnostics["AutoFuse.Feature"] or "unknown error"
-        setText(row(fuseCard, 1, "Status"), tostring(err))
-        setText(row(fuseCard, 2, "Remotes"), State.diagnostics["AutoFuse.Remotes"] or "—")
-        setText(row(fuseCard, 3, "FusionRules"), State.diagnostics["AutoFuse.FusionRules"] or "—")
-        setText(row(fuseCard, 4, "FuseChickens"), State.diagnostics["AutoFuse.FuseChickens"] or "—")
+        setText(row(fuseCard, 1, "Status"), "Unavailable")
         Views.Fuse = { root = sc, update = function() end }
         return
     end
@@ -5587,201 +5810,87 @@ safeBuild("Fuse", function()
     settingRow(fuseCard, 1, "Auto Fuse Chickens", nil, "autoFuse", function(v)
         AutoFuseFeature.setAutoFuse(v)
     end)
-    do
-        local f = Instance.new("Frame"); f.LayoutOrder = 2; f.Size = UDim2.new(1, 0, 0, 28)
+
+    local function simpleToggle(order, label, getter, setter)
+        local f = Instance.new("Frame")
+        f.LayoutOrder = order; f.Size = UDim2.new(1, 0, 0, 28)
         f.BackgroundTransparency = 1; f.Parent = fuseCard
-        text(f, "Dry Run", 13, Theme.TextPrimary, Enum.Font.GothamMedium).Size = UDim2.new(1, -50, 1, 0)
-        local sw = select(1, makeSwitch(f, AutoFuseFeature.getDryRun() == true, function(v)
-            AutoFuseFeature.setDryRun(v)
-        end))
-        sw.Position = UDim2.new(1, -40, 0.5, -11)
-    end
-    setText(row(fuseCard, 3, "Active Chicken"), "ALWAYS PROTECTED")
-    do
-        local f = Instance.new("Frame"); f.LayoutOrder = 4; f.Size = UDim2.new(1, 0, 0, 28)
-        f.BackgroundTransparency = 1; f.Parent = fuseCard
-        text(f, "Protect Favorites", 13, Theme.TextPrimary, Enum.Font.GothamMedium).Size = UDim2.new(1, -50, 1, 0)
-        local sw = select(1, makeSwitch(f, AutoFuseFeature.getProtectFavorites() == true, function(v)
-            AutoFuseFeature.setProtectFavorites(v)
-        end))
-        sw.Position = UDim2.new(1, -40, 0.5, -11)
-    end
-    do
-        local f = Instance.new("Frame"); f.LayoutOrder = 5; f.Size = UDim2.new(1, 0, 0, 28)
-        f.BackgroundTransparency = 1; f.Parent = fuseCard
-        text(f, "Protect Mutated", 13, Theme.TextPrimary, Enum.Font.GothamMedium).Size = UDim2.new(1, -50, 1, 0)
-        local sw = select(1, makeSwitch(f, AutoFuseFeature.getProtectMutated() == true, function(v)
-            AutoFuseFeature.setProtectMutated(v)
-        end))
+        text(f, label, 13, Theme.TextPrimary, Enum.Font.GothamMedium).Size = UDim2.new(1, -50, 1, 0)
+        local sw = select(1, makeSwitch(f, getter() == true, setter))
         sw.Position = UDim2.new(1, -40, 0.5, -11)
     end
 
-    -- Match Mode
-    local _, matchCard = card(sc, 2, "MATCH MODE")
-    local matchLabel = row(matchCard, 1, "Mode")
-    local function matchBtn(parent, order, label, mode)
-        local f = Instance.new("Frame"); f.LayoutOrder = order; f.Size = UDim2.new(1, 0, 0, 28)
-        f.BackgroundTransparency = 1; f.Parent = parent
+    simpleToggle(2, "Dry Run", AutoFuseFeature.getDryRun, AutoFuseFeature.setDryRun)
+    simpleToggle(3, "Protect Favorites", AutoFuseFeature.getProtectFavorites, AutoFuseFeature.setProtectFavorites)
+    simpleToggle(4, "Protect Mutated", AutoFuseFeature.getProtectMutated, AutoFuseFeature.setProtectMutated)
+
+    local _, settings = card(sc, 2, "Fuse Settings")
+    local modeBtn = uiButton(settings, 1, "Match Mode: " .. tostring(AutoFuseFeature.getMatchMode()), function() end)
+    modeBtn.MouseButton1Click:Connect(function()
+        local nextMode = AutoFuseFeature.getMatchMode() == "Same Chicken" and "Same Rarity" or "Same Chicken"
+        AutoFuseFeature.setMatchMode(nextMode)
+        modeBtn.Text = "Match Mode: " .. nextMode
+    end)
+
+    local keepRow = Instance.new("Frame")
+    keepRow.LayoutOrder = 2; keepRow.Size = UDim2.new(1, 0, 0, 36)
+    keepRow.BackgroundTransparency = 1; keepRow.Parent = settings
+    local keepLabel = text(keepRow, "Keep Copies: " .. tostring(AutoFuseFeature.getKeepCopies()), 12, Theme.TextSecondary)
+    keepLabel.Size = UDim2.new(1, -100, 1, 0)
+    for i, spec in ipairs({{"−", -1}, {"+", 1}}) do
         local b = Instance.new("TextButton")
-        b.Size = UDim2.new(1, 0, 1, 0)
+        b.Size = UDim2.fromOffset(38, 30)
+        b.Position = UDim2.new(1, -((3-i)*44), 0, 3)
         b.BackgroundColor3 = Theme.SurfaceElevated
-        b.Text = label
-        b.Font = Enum.Font.Gotham
-        b.TextSize = 12
-        b.TextColor3 = Theme.TextPrimary
-        b.AutoButtonColor = false
-        b.Parent = f
+        b.Text = spec[1]; b.Font = Enum.Font.GothamBold; b.TextSize = 14
+        b.TextColor3 = Theme.TextPrimary; b.AutoButtonColor = false; b.Parent = keepRow
         corner(b, 6)
         b.MouseButton1Click:Connect(function()
-            AutoFuseFeature.setMatchMode(mode)
-        end)
-    end
-    matchBtn(matchCard, 2, "Same Chicken", "Same Chicken")
-    matchBtn(matchCard, 3, "Same Rarity", "Same Rarity")
-
-    -- Keep Copies
-    local _, keepCard = card(sc, 3, "KEEP COPIES PER CHICKEN")
-    local keepVal = row(keepCard, 1, "Keep Copies")
-    do
-        local f = Instance.new("Frame"); f.LayoutOrder = 2; f.Size = UDim2.new(1, 0, 0, 30)
-        f.BackgroundTransparency = 1; f.Parent = keepCard
-        local function nbtn(x, label, delta)
-            local b = Instance.new("TextButton")
-            b.Size = UDim2.fromOffset(36, 26)
-            b.Position = UDim2.fromOffset(x, 2)
-            b.BackgroundColor3 = Theme.SurfaceElevated
-            b.Text = label
-            b.Font = Enum.Font.GothamBold
-            b.TextSize = 14
-            b.TextColor3 = Theme.TextPrimary
-            b.AutoButtonColor = false
-            b.Parent = f
-            corner(b, 6)
-            b.MouseButton1Click:Connect(function()
-                local cur = AutoFuseFeature.getKeepCopies() or 1
-                AutoFuseFeature.setKeepCopies(math.max(0, cur + delta))
-            end)
-        end
-        nbtn(0, "−", -1)
-        nbtn(44, "+", 1)
-    end
-
-    -- Rarity Filter
-    local _, rarityCard = card(sc, 4, "RARITY FILTER")
-    local rarityHost = Instance.new("Frame")
-    rarityHost.LayoutOrder = 5
-    rarityHost.Size = UDim2.new(1, 0, 0, 0)
-    rarityHost.AutomaticSize = Enum.AutomaticSize.Y
-    rarityHost.BackgroundTransparency = 1
-    rarityHost.Parent = rarityCard
-    Instance.new("UIListLayout", rarityHost).Padding = UDim.new(0, 4)
-    do
-        local btnRow = Instance.new("Frame")
-        btnRow.LayoutOrder = 0
-        btnRow.Size = UDim2.new(1, 0, 0, 28)
-        btnRow.BackgroundTransparency = 1
-        btnRow.Parent = rarityHost
-        local function smallBtn(parent, label, x, fn)
-            local b = Instance.new("TextButton")
-            b.Size = UDim2.fromOffset(90, 24)
-            b.Position = UDim2.fromOffset(x, 2)
-            b.BackgroundColor3 = Theme.SurfaceElevated
-            b.Text = label
-            b.Font = Enum.Font.Gotham
-            b.TextSize = 11
-            b.TextColor3 = Theme.TextPrimary
-            b.AutoButtonColor = false
-            b.Parent = parent
-            corner(b, 5)
-            b.MouseButton1Click:Connect(fn)
-        end
-        smallBtn(btnRow, "Select All", 0, function() AutoFuseFeature.selectAllRarities() end)
-        smallBtn(btnRow, "Clear", 96, function() AutoFuseFeature.clearRaritySelection() end)
-    end
-    local rarities = AutoFuseFeature.getAvailableRarities()
-    for i, rarityId in ipairs(rarities) do
-        local friendly = resolveRarityDisplayName(rarityId)
-        diagNameOnce("FUSE_RARITY", rarityId, friendly)
-        makeFilterRow(rarityHost, 10 + i, friendly, nil, AutoFuseFeature.isRaritySelected(rarityId), function(checkBtn)
-            local now = not AutoFuseFeature.isRaritySelected(rarityId)
-            AutoFuseFeature.setRaritySelected(rarityId, now)
-            checkBtn.Text = now and "✓" or ""
+            AutoFuseFeature.setKeepCopies(math.max(0, (AutoFuseFeature.getKeepCopies() or 1) + spec[2]))
+            keepLabel.Text = "Keep Copies: " .. tostring(AutoFuseFeature.getKeepCopies())
         end)
     end
 
-    -- Ability whitelist
-    local _, abilityCard = card(sc, 5, "PROTECTED ABILITIES")
-    local abilityHost = Instance.new("Frame")
-    abilityHost.LayoutOrder = 5
-    abilityHost.Size = UDim2.new(1, 0, 0, 0)
-    abilityHost.AutomaticSize = Enum.AutomaticSize.Y
-    abilityHost.BackgroundTransparency = 1
-    abilityHost.Parent = abilityCard
-    Instance.new("UIListLayout", abilityHost).Padding = UDim.new(0, 4)
-    local abilitiesMap = AutoFuseFeature.getAvailableAbilities()
-    local abilities = {}
-    if type(abilitiesMap) == "table" then
-        for id, def in pairs(abilitiesMap) do
-            table.insert(abilities, type(def) == "table" and def or { id = id, name = id })
+    local _, filters = card(sc, 3, "Filters")
+    makeCollapsibleFilter(filters, 1, "Rarity", function(host)
+        local rarities = AutoFuseFeature.getAvailableRarities()
+        for i, rarityId in ipairs(rarities) do
+            makeFilterRow(host, i, resolveRarityDisplayName(rarityId), nil,
+                AutoFuseFeature.isRaritySelected(rarityId), function(checkBtn)
+                    local now = not AutoFuseFeature.isRaritySelected(rarityId)
+                    AutoFuseFeature.setRaritySelected(rarityId, now)
+                    checkBtn.Text = now and "✓" or ""
+                end)
         end
-    end
-    if #abilities == 0 then
-        abilities = {
-            { id = "voodoo", name = "Voodoo" },
-            { id = "cycleofash", name = "Cycle of Ash" },
-        }
-    end
-    table.sort(abilities, function(a, b)
-        return resolveAbilityDisplayName(a) < resolveAbilityDisplayName(b)
     end)
-    for i, ab in ipairs(abilities) do
-        local aid = ab.id
-        local friendly = resolveAbilityDisplayName(ab)
-        diagNameOnce("FUSE_ABILITY", aid, friendly)
-        makeFilterRow(abilityHost, i, friendly, nil, AutoFuseFeature.isAbilityWhitelisted(aid), function(checkBtn)
-            local now = not AutoFuseFeature.isAbilityWhitelisted(aid)
-            AutoFuseFeature.setAbilityWhitelisted(aid, now)
-            checkBtn.Text = now and "✓" or ""
-        end)
-    end
 
-    -- Status / stats
-    local _, statsCard = card(sc, 6, "FUSE STATUS / DIAGNOSTICS")
-    local sStatus = row(statsCard, 1, "Status")
-    local sDry = row(statsCard, 2, "Dry Run")
-    local sMatch = row(statsCard, 3, "Match Mode")
-    local sKeep = row(statsCard, 4, "Keep Copies")
-    local sElig = row(statsCard, 5, "Eligible")
-    local sPairs = row(statsCard, 6, "Pairs Available")
-    local sRes = row(statsCard, 7, "Reserved Keep")
-    local sConf = row(statsCard, 8, "Confirmed Fusions")
-    local sPA = row(statsCard, 9, "Last Parent A")
-    local sPB = row(statsCard, 10, "Last Parent B")
-    local sResId = row(statsCard, 11, "Last Result")
-    local sRar = row(statsCard, 12, "Last Result Rarity")
-    local sAsc = row(statsCard, 13, "Ascended")
-    local sCost = row(statsCard, 14, "Last Cost")
-    local sErr = row(statsCard, 15, "Last Error")
+    makeCollapsibleFilter(filters, 2, "Protected Abilities", function(host)
+        local abilitiesMap = AutoFuseFeature.getAvailableAbilities()
+        local abilities = {}
+        if type(abilitiesMap) == "table" then
+            for id, def in pairs(abilitiesMap) do
+                table.insert(abilities, type(def) == "table" and def or { id = id, name = id })
+            end
+        end
+        table.sort(abilities, function(a, b) return resolveAbilityDisplayName(a) < resolveAbilityDisplayName(b) end)
+        for i, ab in ipairs(abilities) do
+            local aid = ab.id
+            makeFilterRow(host, i, resolveAbilityDisplayName(ab), nil,
+                AutoFuseFeature.isAbilityWhitelisted(aid), function(checkBtn)
+                    local now = not AutoFuseFeature.isAbilityWhitelisted(aid)
+                    AutoFuseFeature.setAbilityWhitelisted(aid, now)
+                    checkBtn.Text = now and "✓" or ""
+                end)
+        end
+    end)
 
+    local _, statusCard = card(sc, 4, "Status")
+    local status = row(statusCard, 1, "Auto Fuse")
+    local err = row(statusCard, 2, "Last Error")
     Views.Fuse = { root = sc, update = function()
-        setText(sStatus, AutoFuseFeature.getStatus())
-        setText(sDry, AutoFuseFeature.getDryRun() and "ON" or "OFF")
-        setText(sMatch, AutoFuseFeature.getMatchMode())
-        setText(sKeep, AutoFuseFeature.getKeepCopies())
-        setText(keepVal, AutoFuseFeature.getKeepCopies())
-        setText(matchLabel, AutoFuseFeature.getMatchMode())
+        setText(status, AutoFuseFeature.getStatus())
         local st = AutoFuseFeature.getStats()
-        setText(sElig, st.eligibleChickens)
-        setText(sPairs, st.pairsBuilt)
-        setText(sRes, st.reservedKeepCopies)
-        setText(sConf, st.confirmedFusions)
-        setText(sPA, st.lastParentA)
-        setText(sPB, st.lastParentB)
-        setText(sResId, st.lastResultId)
-        setText(sRar, st.lastResultRarity)
-        setText(sAsc, st.lastAscended)
-        setText(sCost, st.lastCost)
-        setText(sErr, st.lastError)
+        setText(err, st and st.lastError or "—")
     end }
 end)
 
@@ -5833,38 +5942,6 @@ safeBuild("Coop", function()
     end }
 end)
 
-local function getPhase9API()
-    local env = (getgenv and getgenv()) or _G
-    local api = env.UNO_HUB_PHASE9
-    return type(api) == "table" and api or nil
-end
-
-local function setPhase9Toggle(toggleKey, setterName, value)
-    local api = getPhase9API()
-    if not api or type(api[setterName]) ~= "function" then
-        State.toggles[toggleKey] = false
-        log("ERROR", setterName .. " unavailable; Phase 9 bootstrap not READY")
-        return false
-    end
-    local ok, result = pcall(api[setterName], value == true)
-    if not ok or result == false then
-        State.toggles[toggleKey] = false
-        log("ERROR", setterName .. " failed: " .. tostring(result))
-        return false
-    end
-    State.toggles[toggleKey] = value == true
-    return true
-end
-
-local function setAutoArenaPhase9(v)
-    return setPhase9Toggle("autoArena", "setAutoArenaEnabled", v)
-end
-local function setEventCapsulePhase9(v)
-    return setPhase9Toggle("autoEventCapsule", "setEventCapsuleEnabled", v)
-end
-local function setKrakenPhase9(v)
-    return setPhase9Toggle("autoKraken", "setKrakenEnabled", v)
-end
 
 safeBuild("Events", function()
     local sc = createScrollPage()
@@ -5950,6 +6027,135 @@ safeBuild("Diagnostics", function()
         end
     end }
 end)
+safeBuild("Performance", function()
+    local sc = createScrollPage()
+    local _, perfCard = card(sc, 1, "Performance")
+    if PerformanceManager then
+        local function perfToggle(order, title, getter, setter)
+            local f = Instance.new("Frame")
+            f.LayoutOrder = order; f.Size = UDim2.new(1, 0, 0, 38)
+            f.BackgroundColor3 = Theme.SurfaceElevated; f.BorderSizePixel = 0; f.Parent = perfCard
+            corner(f, 7); stroke(f)
+            local t = text(f, title, 12, Theme.TextPrimary, Enum.Font.GothamMedium)
+            t.Position = UDim2.fromOffset(12, 0); t.Size = UDim2.new(1, -62, 1, 0)
+            local sw = select(1, makeSwitch(f, getter() == true, function(v)
+                setter(v); markConfigDirty()
+            end))
+            sw.Position = UDim2.new(1, -44, 0.5, -11)
+        end
+        perfToggle(1, "Boost FPS", PerformanceManager.getBoostFPS, PerformanceManager.setBoostFPS)
+        perfToggle(2, "Disable VFX", PerformanceManager.getDisableVFX, PerformanceManager.setDisableVFX)
+        perfToggle(3, "Disable Shadows", PerformanceManager.getDisableShadows, PerformanceManager.setDisableShadows)
+        perfToggle(4, "Hide Other Players", PerformanceManager.getHideOtherPlayers, PerformanceManager.setHideOtherPlayers)
+        perfToggle(5, "White Screen / AFK Saver", PerformanceManager.getWhiteScreen, PerformanceManager.setWhiteScreen)
+        perfToggle(6, "Ultra Performance", PerformanceManager.getUltraPerformance, PerformanceManager.setUltraPerformance)
+    else
+        setText(row(perfCard, 1, "Status"), "Unavailable")
+    end
+    Views.Performance = { root = sc, update = function() end }
+end)
+
+safeBuild("Webhook", function()
+    local sc = createScrollPage()
+    Views.Webhook = { root = sc, update = function() end }
+end)
+
+safeBuild("Configs", function()
+    local sc = createScrollPage()
+    local _, cfg = card(sc, 1, "Configs")
+
+    if not ConfigManager then
+        setText(row(cfg, 1, "Status"), "Unavailable")
+        Views.Configs = { root = sc, update = function() end }
+        return
+    end
+
+    local nameLabel = text(cfg, "Config name", 12, Theme.TextSecondary)
+    nameLabel.LayoutOrder = 1; nameLabel.Size = UDim2.new(1, 0, 0, 18)
+
+    local nameBox = Instance.new("TextBox")
+    nameBox.LayoutOrder = 2
+    nameBox.Size = UDim2.new(1, 0, 0, 38)
+    nameBox.BackgroundColor3 = Theme.SurfaceElevated
+    nameBox.BorderSizePixel = 0
+    nameBox.ClearTextOnFocus = false
+    nameBox.PlaceholderText = "default"
+    nameBox.Text = ConfigManager.getConfigName and ConfigManager.getConfigName() or "default"
+    nameBox.Font = Enum.Font.Gotham
+    nameBox.TextSize = 12
+    nameBox.TextColor3 = Theme.TextPrimary
+    nameBox.PlaceholderColor3 = Theme.TextMuted
+    nameBox.TextXAlignment = Enum.TextXAlignment.Left
+    nameBox.Parent = cfg
+    corner(nameBox, 7); stroke(nameBox)
+    pad(nameBox, 0, 12, 0, 12)
+
+    local loadLabel = text(cfg, "Load config", 12, Theme.TextSecondary)
+    loadLabel.LayoutOrder = 3; loadLabel.Size = UDim2.new(1, 0, 0, 18)
+
+    local loadBox = nameBox:Clone()
+    loadBox.LayoutOrder = 4
+    loadBox.Text = nameBox.Text
+    loadBox.Parent = cfg
+
+    local actions = Instance.new("Frame")
+    actions.LayoutOrder = 5; actions.Size = UDim2.new(1, 0, 0, 38)
+    actions.BackgroundTransparency = 1; actions.Parent = cfg
+
+    local function actionButton(label, left, fn)
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(0.5, -4, 1, 0)
+        b.Position = UDim2.new(left and 0 or 0.5, left and 0 or 4, 0, 0)
+        b.BackgroundColor3 = Theme.SurfaceElevated
+        b.Text = label
+        b.Font = Enum.Font.GothamMedium
+        b.TextSize = 12
+        b.TextColor3 = Theme.TextPrimary
+        b.AutoButtonColor = false
+        b.Parent = actions
+        corner(b, 7); stroke(b)
+        b.MouseButton1Click:Connect(fn)
+    end
+
+    actionButton("Save config", true, function()
+        ConfigManager.setConfigName(nameBox.Text)
+        nameBox.Text = ConfigManager.getConfigName()
+        loadBox.Text = nameBox.Text
+        ConfigManager.saveNow()
+    end)
+    actionButton("Load config", false, function()
+        ConfigManager.setConfigName(loadBox.Text)
+        loadBox.Text = ConfigManager.getConfigName()
+        nameBox.Text = loadBox.Text
+        isApplyingConfig = true
+        ConfigManager.load()
+        isApplyingConfig = false
+        State.toggles.antiAfk = true
+        setAntiAfk(true)
+    end)
+
+    local autoSave = Instance.new("Frame")
+    autoSave.LayoutOrder = 6; autoSave.Size = UDim2.new(1, 0, 0, 44)
+    autoSave.BackgroundColor3 = Theme.SurfaceElevated; autoSave.BorderSizePixel = 0; autoSave.Parent = cfg
+    corner(autoSave, 7); stroke(autoSave)
+    local autoText = text(autoSave, "Auto Save & Load Config", 12, Theme.TextPrimary, Enum.Font.GothamMedium)
+    autoText.Position = UDim2.fromOffset(12, 3); autoText.Size = UDim2.new(1, -64, 0, 20)
+    local autoSub = text(autoSave, "Saves changes automatically.", 10, Theme.TextMuted)
+    autoSub.Position = UDim2.fromOffset(12, 21); autoSub.Size = UDim2.new(1, -64, 0, 16)
+    local sw = select(1, makeSwitch(autoSave, ConfigManager.getAutoSave() == true, function(v)
+        ConfigManager.setAutoSave(v)
+    end))
+    sw.Position = UDim2.new(1, -44, 0.5, -11)
+
+    local status = row(cfg, 7, "Status")
+    local path = row(cfg, 8, "File")
+
+    Views.Configs = { root = sc, update = function()
+        setText(status, ConfigManager.getStatus())
+        setText(path, ConfigManager.getConfigPath and ConfigManager.getConfigPath() or "UNOHUB/default.json")
+    end }
+end)
+
 safeBuild("Settings", function()
     local sc = createScrollPage()
 
@@ -6124,8 +6330,7 @@ end)
 
 local function showPage(id)
     State.page = id
-    PageTitle.Text = string.upper(id)
-    PageDesc.Text = pageDescs[id] or ""
+    PageTitle.Text = "Grow A Chicken Fighter | V2"
     for pid, view in pairs(Views) do
         if type(view) == "table" and typeof(view.root) == "Instance" then
             view.root.Visible = (pid == id)
@@ -6150,7 +6355,7 @@ for i, p in ipairs(pages) do
     local accent = Instance.new("Frame"); accent.Name = "Accent"; accent.Size = UDim2.fromOffset(3, 16)
     accent.Position = UDim2.fromOffset(0, 8); accent.BackgroundColor3 = Theme.Primary
     accent.BorderSizePixel = 0; accent.Visible = false; accent.Parent = btn; corner(accent, 2)
-    local label = text(btn, p.icon .. "   " .. p.title, 13, Theme.TextSecondary)
+    local label = text(btn, (p.icon ~= "" and (p.icon .. "   ") or "") .. p.title, 12, Theme.TextSecondary)
     label.Name = "Label"; label.Position = UDim2.fromOffset(14, 0); label.Size = UDim2.new(1, -20, 1, 0)
     btn.MouseButton1Click:Connect(function() showPage(p.id) end)
     navButtons[p.id] = btn
@@ -6171,7 +6376,7 @@ end)
 
 refreshData()
 refreshEconomyStatus()
-showPage("Home")
+showPage("Auto Farm")
 
 log("INFO", "UNO HUB — Responsive UIScale enabled")
 print("[UNO HUB] AutoSellFeature =", AutoSellFeature and "READY" or State.diagnostics["AutoSell.Feature"])

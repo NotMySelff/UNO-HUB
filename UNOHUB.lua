@@ -5135,9 +5135,18 @@ end
 
 local Sidebar = Instance.new("Frame")
 Sidebar.Position = UDim2.fromOffset(0, 52); Sidebar.Size = UDim2.new(0, 145, 1, -52); Sidebar.BackgroundColor3 = Theme.Sidebar; Sidebar.BorderSizePixel = 0; Sidebar.Parent = Main; corner(Sidebar, 12)
-local brand = Instance.new("Frame"); brand.Size = UDim2.new(1, 0, 0, 72); brand.BackgroundTransparency = 1; brand.Parent = Sidebar
-text(brand, "UnO", 16, Theme.TextPrimary, Enum.Font.GothamBold).Position = UDim2.fromOffset(16, 14)
-text(brand, "HUB", 10, Theme.TextMuted, Enum.Font.Gotham).Position = UDim2.fromOffset(16, 36)
+local brand = Instance.new("Frame")
+brand.Size = UDim2.new(1, 0, 0, 72)
+brand.BackgroundTransparency = 1
+brand.Parent = Sidebar
+
+local brandUno = text(brand, "UnO", 16, Theme.TextPrimary, Enum.Font.GothamBold)
+brandUno.Position = UDim2.fromOffset(16, 8)
+brandUno.Size = UDim2.new(1, -26, 0, 24)
+
+local brandHub = text(brand, "HUB", 10, Theme.TextMuted, Enum.Font.Gotham)
+brandHub.Position = UDim2.fromOffset(16, 31)
+brandHub.Size = UDim2.new(1, -26, 0, 18)
 
 local NavScroll = Instance.new("ScrollingFrame")
 NavScroll.Position = UDim2.fromOffset(0, 76); NavScroll.Size = UDim2.new(1, 0, 1, -82)
@@ -5149,8 +5158,6 @@ pad(NavScroll, 4, 10, 8, 10)
 local pages = {
     { id = "Auto Farm", icon = "", title = "Auto Farm" },
     { id = "Auto Hatch Egg", icon = "", title = "Auto Hatch Egg" },
-    { id = "Chickens", icon = "", title = "Chickens" },
-    { id = "Fuse", icon = "", title = "Fuse" },
     { id = "Performance", icon = "", title = "Performance" },
     { id = "Webhook", icon = "", title = "Webhook" },
     { id = "Configs", icon = "", title = "Configs" },
@@ -5276,7 +5283,61 @@ env.UNO_HUB_RUNTIME = {
 }
 closeBtn.MouseButton1Click:Connect(shutdown)
 
-Float.MouseButton1Click:Connect(function() setVisible(true) end)
+do
+    local dragging = false
+    local dragStart = nil
+    local startPosition = nil
+    local moved = false
+    local suppressOpenUntil = 0
+
+    maid:Connect(Float.InputBegan, function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            moved = false
+            dragStart = input.Position
+            startPosition = Float.Position
+        end
+    end)
+
+    maid:Connect(UserInputService.InputChanged, function(input)
+        if not dragging then return end
+        if input.UserInputType ~= Enum.UserInputType.MouseMovement
+            and input.UserInputType ~= Enum.UserInputType.Touch then
+            return
+        end
+
+        local delta = input.Position - dragStart
+        if math.abs(delta.X) > 4 or math.abs(delta.Y) > 4 then
+            moved = true
+        end
+
+        Float.Position = UDim2.new(
+            startPosition.X.Scale,
+            startPosition.X.Offset + delta.X,
+            startPosition.Y.Scale,
+            startPosition.Y.Offset + delta.Y
+        )
+        pcall(clampFloatInViewport)
+    end)
+
+    maid:Connect(UserInputService.InputEnded, function(input)
+        if not dragging then return end
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+            pcall(clampFloatInViewport)
+            if moved then
+                suppressOpenUntil = os.clock() + 0.20
+            end
+        end
+    end)
+
+    Float.MouseButton1Click:Connect(function()
+        if os.clock() < suppressOpenUntil then return end
+        setVisible(true)
+    end)
+end
 maid:Connect(UserInputService.InputBegan, function(input, gp)
     if gp then return end
     if input.KeyCode == Enum.KeyCode.RightShift then
@@ -5456,15 +5517,26 @@ local function makeCollapsibleFilter(parent, order, label, buildRows)
     layout.Parent = list
 
     local built = false
+
+    local function rebuild()
+        for _, child in ipairs(list:GetChildren()) do
+            if not child:IsA("UIListLayout") and not child:IsA("UIPadding") then
+                child:Destroy()
+            end
+        end
+        built = true
+        buildRows(list)
+    end
+
     bar.MouseButton1Click:Connect(function()
         list.Visible = not list.Visible
         bar.Text = label .. (list.Visible and "   ▴" or "   ▾")
         if list.Visible and not built then
-            built = true
-            buildRows(list)
+            rebuild()
         end
     end)
-    return bar, list
+
+    return bar, list, rebuild
 end
 
 local function clearChildrenExceptLayouts(parent)
@@ -5564,8 +5636,11 @@ local function setKrakenPhase9(v)
     return setPhase9Toggle("autoKraken", "setKrakenEnabled", v)
 end
 
+local AutoFarmTabBodies = nil
+
 safeBuild("Auto Farm", function()
-    local root, tabs = createTabbedPage({ "Farm", "Events", "Incubator", "Coop" })
+    local root, tabs = createTabbedPage({ "Farm", "Events", "Incubator", "Coop", "Chicken", "Fuse" })
+    AutoFarmTabBodies = tabs
 
     -- FARM
     local farm = tabs.Farm
@@ -5607,7 +5682,14 @@ safeBuild("Auto Farm", function()
     settingRow(coopCard, 3, "Auto Expand Coop", nil, "autoExpandCoop", setAutoExpandCoop)
     settingRow(coopCard, 4, "Auto Upgrade Recycler", nil, "autoUpgradeRecycler", setAutoUpgradeRecycler)
 
-    Views["Auto Farm"] = { root = root, update = function() end }
+    Views["Auto Farm"] = { root = root, update = function()
+        if Views.Chickens and type(Views.Chickens.update) == "function" then
+            pcall(Views.Chickens.update)
+        end
+        if Views.Fuse and type(Views.Fuse.update) == "function" then
+            pcall(Views.Fuse.update)
+        end
+    end }
 end)
 
 safeBuild("Tower", function()
@@ -5631,13 +5713,15 @@ end)
 
 safeBuild("Auto Hatch Egg", function()
     local sc = createScrollPage()
+
     local _, hatchCard = card(sc, 1, "Auto Hatch Egg")
     settingRow(hatchCard, 1, "Auto Hatch Eggs", nil, "autoHatch", function(v)
         HatchFeature.setAutoHatch(v)
     end)
 
     local _, filterCard = card(sc, 2, "Egg Filter")
-    makeCollapsibleFilter(filterCard, 1, "Select Eggs", function(host)
+
+    local function buildEggRows(host)
         local tools = Instance.new("Frame")
         tools.LayoutOrder = 0
         tools.Size = UDim2.new(1, 0, 0, 34)
@@ -5663,77 +5747,67 @@ safeBuild("Auto Hatch Egg", function()
         clear.Position = UDim2.new(0.5, 4, 0, 0)
         clear.Text = "Clear"
         clear.Parent = tools
-        clear.MouseButton1Click:Connect(function() HatchFeature.clearEggSelection() end)
+        clear.MouseButton1Click:Connect(function()
+            HatchFeature.clearEggSelection()
+        end)
 
-        local available = HatchFeature.getAvailableEggTypes()
-        for i, egg in ipairs(available) do
-            local friendly = egg.displayName
-            if type(friendly) ~= "string" or friendly == "" then
-                friendly = resolveEggDisplayName(egg.id)
-            end
-            local _, check = makeFilterRow(host, 10 + i, friendly, nil,
-                HatchFeature.isEggSelected(egg.id), function(checkBtn)
-                    local now = not HatchFeature.isEggSelected(egg.id)
-                    HatchFeature.setEggSelected(egg.id, now)
-                    checkBtn.Text = now and "✓" or ""
-                end)
-        end
-    end)
-
-    local _, inventoryCard = card(sc, 3, "Eggs")
-    local inventoryHost = Instance.new("Frame")
-    inventoryHost.LayoutOrder = 2
-    inventoryHost.Size = UDim2.new(1, 0, 0, 0)
-    inventoryHost.AutomaticSize = Enum.AutomaticSize.Y
-    inventoryHost.BackgroundTransparency = 1
-    inventoryHost.Parent = inventoryCard
-    local invLayout = Instance.new("UIListLayout")
-    invLayout.Padding = UDim.new(0, 4)
-    invLayout.Parent = inventoryHost
-
-    local function refreshEggInventory()
-        clearChildrenExceptLayouts(inventoryHost)
         refreshData()
         local available = HatchFeature.getAvailableEggTypes()
+
         if #available == 0 then
-            local empty = text(inventoryHost, "No eggs detected.", 11, Theme.TextMuted)
+            local empty = text(host, "No eggs detected.", 11, Theme.TextMuted)
+            empty.LayoutOrder = 10
             empty.Size = UDim2.new(1, 0, 0, 28)
             return
         end
+
         for i, egg in ipairs(available) do
             local friendly = egg.displayName
             if type(friendly) ~= "string" or friendly == "" then
                 friendly = resolveEggDisplayName(egg.id)
             end
-            local f = Instance.new("Frame")
-            f.LayoutOrder = i
-            f.Size = UDim2.new(1, 0, 0, 34)
-            f.BackgroundColor3 = Theme.SurfaceElevated
-            f.BorderSizePixel = 0
-            f.Parent = inventoryHost
-            corner(f, 6); stroke(f)
-            local n = text(f, friendly, 12, Theme.TextPrimary)
-            n.Position = UDim2.fromOffset(12, 0)
-            n.Size = UDim2.new(1, -90, 1, 0)
-            local q = text(f, "x" .. tostring(egg.quantity or 0), 11, Theme.TextMuted, nil, Enum.TextXAlignment.Right)
-            q.Position = UDim2.new(1, -74, 0, 0)
-            q.Size = UDim2.fromOffset(62, 34)
+
+            makeFilterRow(
+                host,
+                10 + i,
+                friendly,
+                "x" .. tostring(egg.quantity or 0),
+                HatchFeature.isEggSelected(egg.id),
+                function(checkBtn)
+                    local now = not HatchFeature.isEggSelected(egg.id)
+                    HatchFeature.setEggSelected(egg.id, now)
+                    checkBtn.Text = now and "✓" or ""
+                end
+            )
         end
     end
 
-    uiButton(inventoryCard, 3, "Refresh", refreshEggInventory)
-    refreshEggInventory()
+    local _, _, rebuildEggFilter = makeCollapsibleFilter(
+        filterCard,
+        1,
+        "Select Eggs",
+        buildEggRows
+    )
 
-    Views["Auto Hatch Egg"] = { root = sc, update = function() end }
+    uiButton(filterCard, 2, "Refresh", function()
+        refreshData()
+        rebuildEggFilter()
+    end)
+
+    Views["Auto Hatch Egg"] = {
+        root = sc,
+        update = function() end,
+    }
 end)
 
 -- CHICKENS PAGE (Auto Sell restored)
 safeBuild("Chickens", function()
-    local sc = createScrollPage()
+    local embedded = AutoFarmTabBodies ~= nil and AutoFarmTabBodies.Chicken ~= nil
+    local sc = embedded and AutoFarmTabBodies.Chicken or createScrollPage()
     local _, sellCard = card(sc, 1, "Auto Sell Chickens")
     if not AutoSellFeature then
         setText(row(sellCard, 1, "Status"), "Unavailable")
-        Views.Chickens = { root = sc, update = function() end }
+        Views.Chickens = { root = embedded and false or sc, update = function() end }
         return
     end
 
@@ -5790,7 +5864,7 @@ safeBuild("Chickens", function()
     local _, statusCard = card(sc, 3, "Status")
     local status = row(statusCard, 1, "Auto Sell")
     local err = row(statusCard, 2, "Last Error")
-    Views.Chickens = { root = sc, update = function()
+    Views.Chickens = { root = embedded and false or sc, update = function()
         setText(status, AutoSellFeature.getStatus())
         local st = AutoSellFeature.getStats()
         setText(err, st and st.lastError or "—")
@@ -5799,11 +5873,12 @@ end)
 
 -- FUSE PAGE
 safeBuild("Fuse", function()
-    local sc = createScrollPage()
+    local embedded = AutoFarmTabBodies ~= nil and AutoFarmTabBodies.Fuse ~= nil
+    local sc = embedded and AutoFarmTabBodies.Fuse or createScrollPage()
     local _, fuseCard = card(sc, 1, "Auto Fuse Chickens")
     if not AutoFuseFeature then
         setText(row(fuseCard, 1, "Status"), "Unavailable")
-        Views.Fuse = { root = sc, update = function() end }
+        Views.Fuse = { root = embedded and false or sc, update = function() end }
         return
     end
 
@@ -5887,7 +5962,7 @@ safeBuild("Fuse", function()
     local _, statusCard = card(sc, 4, "Status")
     local status = row(statusCard, 1, "Auto Fuse")
     local err = row(statusCard, 2, "Last Error")
-    Views.Fuse = { root = sc, update = function()
+    Views.Fuse = { root = embedded and false or sc, update = function()
         setText(status, AutoFuseFeature.getStatus())
         local st = AutoFuseFeature.getStats()
         setText(err, st and st.lastError or "—")

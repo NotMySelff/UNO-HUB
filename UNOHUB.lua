@@ -1,5 +1,13 @@
 --[[
-    UNO HUB
+    UNO HUB FINAL - Phase 9
+    Safe single-file consolidation from the supplied working 01-07 sources.
+
+    IMPORTANT:
+    - One executable file.
+    - Original Phase 9 source order is preserved.
+    - Each former file is isolated in its own lexical function scope.
+    - Factories/APIs communicate through the same getgenv() contracts used by 01-07.
+    - The core publishes UNO_HUB_RUNTIME before Phase 9 bootstrap runs.
 ]]
 
 
@@ -5743,9 +5751,132 @@ safeBuild("Auto Farm", function()
     local fuse = tabs.Fuse
     local _, fuseCard = card(fuse, 1, "Fuse")
     if AutoFuseFeature then
-        settingRow(fuseCard, 1, "Auto Fuse Chickens", nil, "autoFuse", function(v)
-            AutoFuseFeature.setAutoFuse(v)
+        -- V2 rule:
+        -- Auto Fuse may only be enabled after exactly one match mode is selected.
+        -- Same Chicken and Same Rarity behave like an exclusive radio pair.
+        local selectedFuseMode = nil
+        local setAutoFuseVisual = nil
+        local setSameChickenVisual = nil
+        local setSameRarityVisual = nil
+
+        -- Do not inherit an old enabled state without an explicit V2 mode choice.
+        if AutoFuseFeature.isEnabled and AutoFuseFeature.isEnabled() then
+            pcall(AutoFuseFeature.setAutoFuse, false)
+        end
+        State.toggles.autoFuse = false
+
+        local autoFuseRow = Instance.new("Frame")
+        autoFuseRow.LayoutOrder = 1
+        autoFuseRow.Size = UDim2.new(1, 0, 0, 34)
+        autoFuseRow.BackgroundTransparency = 1
+        autoFuseRow.Parent = fuseCard
+
+        local autoFuseLabel = text(autoFuseRow, "Auto Fuse Chickens", 13, Theme.TextPrimary, Enum.Font.GothamMedium)
+        autoFuseLabel.Size = UDim2.new(1, -350, 1, 0)
+
+        local fuseRequirement = text(
+            autoFuseRow,
+            "",
+            10,
+            Theme.Danger,
+            Enum.Font.Gotham,
+            Enum.TextXAlignment.Right
+        )
+        fuseRequirement.Position = UDim2.new(1, -326, 0, 0)
+        fuseRequirement.Size = UDim2.fromOffset(270, 34)
+
+        local autoFuseTrack
+        autoFuseTrack, setAutoFuseVisual = makeSwitch(autoFuseRow, false, function(v)
+            if v and selectedFuseMode == nil then
+                State.toggles.autoFuse = false
+                setAutoFuseVisual(false, true)
+                fuseRequirement.Text = "Select Same Chicken or Same Rarity first"
+                return
+            end
+
+            fuseRequirement.Text = ""
+            State.toggles.autoFuse = v == true
+            AutoFuseFeature.setAutoFuse(v == true)
+            markConfigDirty()
         end)
+        autoFuseTrack.Position = UDim2.new(1, -40, 0.5, -11)
+
+        local function disableAutoFuseBecauseNoMode()
+            if State.toggles.autoFuse then
+                State.toggles.autoFuse = false
+                pcall(AutoFuseFeature.setAutoFuse, false)
+                if setAutoFuseVisual then
+                    setAutoFuseVisual(false, true)
+                end
+            end
+        end
+
+        local function selectFuseMode(mode, enabled)
+            if enabled then
+                selectedFuseMode = mode
+                fuseRequirement.Text = ""
+                pcall(AutoFuseFeature.setMatchMode, mode)
+
+                if mode == "Same Chicken" then
+                    if setSameChickenVisual then setSameChickenVisual(true, true) end
+                    if setSameRarityVisual then setSameRarityVisual(false, true) end
+                else
+                    if setSameChickenVisual then setSameChickenVisual(false, true) end
+                    if setSameRarityVisual then setSameRarityVisual(true, true) end
+                end
+            elseif selectedFuseMode == mode then
+                selectedFuseMode = nil
+                if mode == "Same Chicken" then
+                    if setSameChickenVisual then setSameChickenVisual(false, true) end
+                else
+                    if setSameRarityVisual then setSameRarityVisual(false, true) end
+                end
+                disableAutoFuseBecauseNoMode()
+            end
+            markConfigDirty()
+        end
+
+        local sameChickenRow = Instance.new("Frame")
+        sameChickenRow.LayoutOrder = 2
+        sameChickenRow.Size = UDim2.new(1, 0, 0, 30)
+        sameChickenRow.BackgroundTransparency = 1
+        sameChickenRow.Parent = fuseCard
+
+        local sameChickenLabel = text(
+            sameChickenRow,
+            "Same Chicken",
+            12,
+            Theme.TextPrimary,
+            Enum.Font.GothamMedium
+        )
+        sameChickenLabel.Size = UDim2.new(1, -50, 1, 0)
+
+        local sameChickenTrack
+        sameChickenTrack, setSameChickenVisual = makeSwitch(sameChickenRow, false, function(v)
+            selectFuseMode("Same Chicken", v)
+        end)
+        sameChickenTrack.Position = UDim2.new(1, -40, 0.5, -11)
+
+        local sameRarityRow = Instance.new("Frame")
+        sameRarityRow.LayoutOrder = 3
+        sameRarityRow.Size = UDim2.new(1, 0, 0, 30)
+        sameRarityRow.BackgroundTransparency = 1
+        sameRarityRow.Parent = fuseCard
+
+        local sameRarityLabel = text(
+            sameRarityRow,
+            "Same Rarity",
+            12,
+            Theme.TextPrimary,
+            Enum.Font.GothamMedium
+        )
+        sameRarityLabel.Size = UDim2.new(1, -50, 1, 0)
+
+        local sameRarityTrack
+        sameRarityTrack, setSameRarityVisual = makeSwitch(sameRarityRow, false, function(v)
+            selectFuseMode("Same Rarity", v)
+        end)
+        sameRarityTrack.Position = UDim2.new(1, -40, 0.5, -11)
 
         local _, fuseFilters = card(fuse, 2, "Filters")
         makeCollapsibleFilter(fuseFilters, 1, "Rarity", function(host)

@@ -1,4 +1,30 @@
 --[[
+    UNO HUB FINAL - ChatGPT Safe Single-File Merge
+    Grow a Chicken Fighter / Phase 9
+
+    Packaging strategy:
+    - Core/UI executes in its own function scope.
+    - Phase 9 files 02-07 execute in separate function scopes, in the exact
+      original order that was runtime-tested.
+    - This avoids putting ~10k lines worth of locals into one Luau chunk scope.
+    - The original factory globals/API contracts are preserved between stages.
+]]
+
+
+local function __uno_stage(name, fn)
+    print("[UNO MERGE] START " .. name)
+    local ok, result = pcall(fn)
+    if not ok then
+        warn("[UNO MERGE] FAILED " .. name .. ": " .. tostring(result))
+        error("[UNO MERGE] " .. name .. " failed: " .. tostring(result), 0)
+    end
+    print("[UNO MERGE] OK " .. name)
+    return result
+end
+
+
+local function __uno_core()
+--[[
     UNO HUB FINAL
     Grow a Chicken Fighter
     Phase 9 consolidated single-file build
@@ -6171,9 +6197,13 @@ print("[UNO MERGE TRACE] core feature construction complete")
 print("[UNO MERGE TRACE] entering Phase 9 factories section")
 -- PHASE 9 FACTORIES (inlined)
 -- ============================================================
+end
 
--- ========== EVENT CAPSULE ==========
-print("[UNO MERGE TRACE] Event Capsule factory section")
+__uno_stage("01 CORE/UI", __uno_core)
+
+
+-- ===== 02_UNO_HUB_EVENT_CAPSULE_COLLECTOR_PHASE9.lua =====
+local function __uno_file_02()
 -- AUTO EVENT CAPSULE
 -- Standalone integration-ready backend for UFO/Admin Scrap-style capsules.
 -- This module intentionally excludes Kraken Rain Eggs and does not inspect or filter egg IDs.
@@ -7224,10 +7254,16 @@ local function createEventCapsuleCollector(deps)
 end
 
 local globalEnv = (getgenv and getgenv()) or _G
+globalEnv.UNO_EVENT_CAPSULE_COLLECTOR_FACTORY = createEventCapsuleCollector
+
+return createEventCapsuleCollector
+end
+
+__uno_stage("02 02_UNO_HUB_EVENT_CAPSULE_COLLECTOR_PHASE9.lua", __uno_file_02)
 
 
--- ========== AUTO ARENA ==========
-print("[UNO MERGE TRACE] Auto Arena factory section")
+-- ===== 03_UNO_HUB_AUTO_ARENA_PHASE9.lua =====
+local function __uno_file_03()
 -- AUTO ARENA
 -- Standalone integration-ready backend.
 -- This module automates only the outer Arena loop through injected normal game APIs.
@@ -8066,9 +8102,15 @@ end
 -- AutoArenaFeature.setAutoArena(true)
 
 local globalEnv = (getgenv and getgenv()) or _G
+globalEnv.UNO_AUTO_ARENA_FACTORY = createAutoArena
+return createAutoArena
+end
 
--- ========== KRAKEN ==========
-print("[UNO MERGE TRACE] Kraken factory section")
+__uno_stage("03 03_UNO_HUB_AUTO_ARENA_PHASE9.lua", __uno_file_03)
+
+
+-- ===== 04_UNO_HUB_KRAKEN_EGG_COLLECTOR_PHASE9.lua =====
+local function __uno_file_04()
 -- KRAKEN EGG COLLECTOR
 -- EXPERIMENTAL — SOURCE VERIFIED, RUNTIME UNVALIDATED
 -- Standalone integration-ready backend. No UI, Config Manager, Auto Arena, or golden-egg fight integration.
@@ -8578,9 +8620,15 @@ local function createKrakenEggCollector(deps)
 end
 
 local globalEnv = (getgenv and getgenv()) or _G
+globalEnv.UNO_KRAKEN_EGG_COLLECTOR_FACTORY = createKrakenEggCollector
+return createKrakenEggCollector
+end
 
--- ========== PRIORITY COORDINATOR ==========
-print("[UNO MERGE TRACE] Coordinator factory section")
+__uno_stage("04 04_UNO_HUB_KRAKEN_EGG_COLLECTOR_PHASE9.lua", __uno_file_04)
+
+
+-- ===== 05_UNO_HUB_EVENT_PRIORITY_COORDINATOR_PHASE9.lua =====
+local function __uno_file_05()
 -- EVENT PRIORITY COORDINATOR
 -- Standalone Phase 7 arbitration module.
 -- This file coordinates injected feature adapters only; it does not implement feature logic.
@@ -9035,12 +9083,18 @@ local function createEventPriorityCoordinator(deps)
 end
 
 local globalEnv = (getgenv and getgenv()) or _G
+globalEnv.UNO_EVENT_PRIORITY_COORDINATOR_FACTORY = createEventPriorityCoordinator
 
--- PRIORITY kept local
+globalEnv.UNO_EVENT_PRIORITY = PRIORITY
+
+return createEventPriorityCoordinator
+end
+
+__uno_stage("05 05_UNO_HUB_EVENT_PRIORITY_COORDINATOR_PHASE9.lua", __uno_file_05)
 
 
--- ========== PRIORITY INTEGRATION ==========
-print("[UNO MERGE TRACE] Priority Integration factory section")
+-- ===== 06_UNO_HUB_PRIORITY_INTEGRATION_PHASE9.lua =====
+local function __uno_file_06()
 -- UNO HUB PRIORITY INTEGRATION
 -- Phase 8 thin compatibility bridge. It does not duplicate feature logic.
 
@@ -9385,9 +9439,15 @@ local function createUNOHubPriorityIntegration(deps)
 end
 
 local globalEnv = (getgenv and getgenv()) or _G
+globalEnv.UNO_HUB_PRIORITY_INTEGRATION_FACTORY = createUNOHubPriorityIntegration
+return createUNOHubPriorityIntegration
+end
 
--- ========== BOOTSTRAP ==========
-print("[UNO MERGE TRACE] bootstrap section entered")
+__uno_stage("06 06_UNO_HUB_PRIORITY_INTEGRATION_PHASE9.lua", __uno_file_06)
+
+
+-- ===== 07_UNO_HUB_PHASE9_BOOTSTRAP.lua =====
+local function __uno_file_07()
 -- UNO HUB PHASE 9 AUTOMATIC RUNTIME BOOTSTRAP
 -- Constructs real backend instances from source-backed game modules.
 -- It never fabricates Arena/Kraken dependencies and never claims runtime PASS.
@@ -9624,9 +9684,7 @@ local function resolveKraken(root, modules, remotes)
 end
 
 local function createBootstrap()
-    print("[UNO MERGE TRACE] bootstrap getRoot starting")
     local root, rootError = getRoot()
-    print("[UNO MERGE TRACE] bootstrap getRoot complete", root and "OK" or tostring(rootError))
     if not root then block(rootError) return end
     status = "RESOLVING_DEPENDENCIES"
     local integrationModules = root.runtime.Integration and root.runtime.Integration.modules or {}
@@ -9634,26 +9692,19 @@ local function createBootstrap()
         or safeRequire(child(child(root.ReplicatedStorage, "Core"), "Remotes"))
     local charm = integrationModules.Charm
         or safeRequire(child(child(root.ReplicatedStorage, "Packages"), "Charm"))
-    local eventFactory = createEventCapsuleCollector
-    local arenaFactory = createAutoArena
-    local krakenFactory = createKrakenEggCollector
-    local integrationFactory = createUNOHubPriorityIntegration
-    if type(eventFactory) ~= "function" then block("Event Capsule factory unavailable") return end
-    if type(arenaFactory) ~= "function" then block("Auto Arena factory unavailable") return end
-    if type(krakenFactory) ~= "function" then block("Kraken factory unavailable") return end
-    if type(integrationFactory) ~= "function" then block("Priority integration factory unavailable") return end
+    local eventFactory = env.UNO_EVENT_CAPSULE_COLLECTOR_FACTORY
+    local arenaFactory = env.UNO_AUTO_ARENA_FACTORY
+    local krakenFactory = env.UNO_KRAKEN_EGG_COLLECTOR_FACTORY
+    local integrationFactory = env.UNO_HUB_PRIORITY_INTEGRATION_FACTORY
+    if type(eventFactory) ~= "function" then block("Event Capsule factory unavailable: UNO_EVENT_CAPSULE_COLLECTOR_FACTORY") return end
+    if type(arenaFactory) ~= "function" then block("Auto Arena factory unavailable: UNO_AUTO_ARENA_FACTORY") return end
+    if type(krakenFactory) ~= "function" then block("Kraken factory unavailable: UNO_KRAKEN_EGG_COLLECTOR_FACTORY") return end
+    if type(integrationFactory) ~= "function" then block("Priority integration factory unavailable: UNO_HUB_PRIORITY_INTEGRATION_FACTORY") return end
     status = "CONSTRUCTING_BACKENDS"
     local tween = createTweenMovement(root)
     local looseRemotes = child(root.ReplicatedStorage, "Remotes")
-    local scrapDepositedRemote = looseRemotes and looseRemotes:FindFirstChild("ScrapDeposited")
-    local scrapDeposited = scrapDepositedRemote
-    if scrapDepositedRemote and scrapDepositedRemote:IsA("RemoteEvent") then
-        scrapDeposited = scrapDepositedRemote.OnClientEvent
-    end
-    if not scrapDeposited or type(scrapDeposited.Connect) ~= "function" then
-        block("ScrapDeposited client signal unresolved")
-        return
-    end
+    local scrapDeposited = looseRemotes and looseRemotes:FindFirstChild("ScrapDeposited")
+    if not scrapDeposited then block("ScrapDeposited client event unresolved") return end
     local eventOk, eventBackend = pcall(eventFactory, {
         player = root.player,
         workspace = root.Workspace,
@@ -9664,9 +9715,8 @@ local function createBootstrap()
         movement = tween,
         moveTo = tween.moveTo,
         acquireMovement = function(owner, priority)
-            -- Canonical EVENT_CAPSULE priority is 80. Never accept a lower override (e.g. 50).
             if not movementBroker.integration then return false end
-            return movementBroker.integration.getCoordinator().acquireMovement("EVENT_CAPSULE", nil)
+            return movementBroker.integration.getCoordinator().acquireMovement("EVENT_CAPSULE", priority)
         end,
         releaseMovement = function(owner)
             if movementBroker.integration then
@@ -9714,7 +9764,6 @@ local function createBootstrap()
     local integrationOk, createdIntegration = pcall(integrationFactory, {
         runtime = root.runtime,
         backends = backends,
-        coordinatorFactory = createEventPriorityCoordinator,
         log = function(level, message) log(message) end,
         destroyBackends = false,
     })
@@ -9725,13 +9774,6 @@ local function createBootstrap()
     integration.run()
     status = "READY"
     log("READY")
-    print("[UNO HUB] Core READY")
-    print("[UNO HUB] Event Capsule READY")
-    print("[UNO HUB] Auto Arena READY")
-    print("[UNO HUB] Kraken READY")
-    print("[UNO HUB] Priority Coordinator READY")
-    print("[UNO HUB] Priority Integration READY")
-    print("[UNO HUB] Phase 9 merge READY")
 end
 
 local function destroy()
@@ -9782,32 +9824,16 @@ local api = {
 }
 
 env.UNO_HUB_PHASE9 = api
-env.UNO_HUB = api
-
-print("[UNO MERGE TRACE] Event Capsule factory available:", type(createEventCapsuleCollector) == "function")
-print("[UNO MERGE TRACE] Auto Arena factory available:", type(createAutoArena) == "function")
-print("[UNO MERGE TRACE] Kraken factory available:", type(createKrakenEggCollector) == "function")
-print("[UNO MERGE TRACE] Coordinator factory available:", type(createEventPriorityCoordinator) == "function")
-print("[UNO MERGE TRACE] Priority Integration factory available:", type(createUNOHubPriorityIntegration) == "function")
-print("[UNO MERGE TRACE] bootstrap entering")
-
-local bootOk, bootErr = xpcall(function()
-    createBootstrap()
-end, function(err)
-    local tb = debug.traceback(tostring(err), 2)
-    print("[UNO MERGE TRACE] bootstrap FAILED")
-    print("[UNO MERGE TRACE] error:", tostring(err))
-    print("[UNO MERGE TRACE] traceback:", tb)
-    return err
-end)
-
-if not bootOk then
-    status = "BLOCKED"
-    lastError = tostring(bootErr)
-    print("PHASE 9 BOOTSTRAP: BLOCKED — " .. tostring(bootErr))
-else
-    print("[UNO MERGE TRACE] bootstrap finished status=" .. tostring(status))
+createBootstrap()
+return api
 end
 
-return api
+local __uno_api = __uno_stage("07 07_UNO_HUB_PHASE9_BOOTSTRAP.lua", __uno_file_07)
 
+
+local __uno_env = (getgenv and getgenv()) or _G
+if __uno_env.UNO_HUB_PHASE9 then
+    __uno_env.UNO_HUB = __uno_env.UNO_HUB_PHASE9
+end
+print("[UNO HUB] SINGLE-FILE MERGE EXECUTION COMPLETE")
+return __uno_api or __uno_env.UNO_HUB_PHASE9

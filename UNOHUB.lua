@@ -1168,6 +1168,7 @@ local function findPath(root, segments)
     return cur
 end
 
+print("[UNO V2 TRACE] 1 integration modules")
 Integration.modules.Remotes = safeRequire(findPath(ReplicatedStorage, {"Core", "Remotes"}))
 Integration.modules.DataController = safeRequire(findPath(LocalPlayer, {"PlayerScripts", "Core", "Data", "DataController"}))
 Integration.modules.RebirthBonus = safeRequire(findPath(ReplicatedStorage, {"Core", "Progression", "RebirthBonus"}))
@@ -3549,6 +3550,7 @@ local function createAutoIncubatorClaim(deps)
     return feature
 end
 
+print("[UNO V2 TRACE] 2 core automation constructors")
 local HatchFeature = createAutoHatch({
     Remotes = Integration.modules.Remotes,
     DataController = Integration.modules.DataController,
@@ -4801,7 +4803,8 @@ do
         return false
     end
 
-    PerformanceManager = createPerformanceManager({
+    print("[UNO V2 TRACE] 3 performance/config setup")
+PerformanceManager = createPerformanceManager({
         services = { Players = Players, Lighting = Lighting, Workspace = Workspace },
         localPlayer = LocalPlayer,
         getCosmeticRoots = getCosmeticRoots,
@@ -5013,6 +5016,7 @@ end
 State.toggles.antiAfk = true
 setAntiAfk(true)
 
+print("[UNO V2 TRACE] 4 UI shell begin")
 local Gui = Instance.new("ScreenGui")
 Gui.Name = "UNO_HUB"; Gui.ResetOnSpawn = false; Gui.IgnoreGuiInset = true; Gui.DisplayOrder = 50
 Gui:SetAttribute("UNO_HUB_Shutdown", false); Gui.Parent = PlayerGui
@@ -5638,6 +5642,7 @@ end
 
 local AutoFarmTabBodies = nil
 
+print("[UNO V2 TRACE] 5 UI pages begin")
 safeBuild("Auto Farm", function()
     local root, tabs = createTabbedPage({ "Farm", "Events", "Incubator", "Coop", "Chicken", "Fuse" })
     AutoFarmTabBodies = tabs
@@ -6452,6 +6457,7 @@ end)
 refreshData()
 refreshEconomyStatus()
 showPage("Auto Farm")
+print("[UNO V2 TRACE] 6 UI READY")
 
 log("INFO", "UNO HUB — Responsive UIScale enabled")
 print("[UNO HUB] AutoSellFeature =", AutoSellFeature and "READY" or State.diagnostics["AutoSell.Feature"])
@@ -9766,10 +9772,10 @@ end
 
 local status = "BOOTSTRAPPING"
 local lastError = nil
-local backends = {}
-local integration = nil
+local backends: {[string]: any} = {}
+local integration: any = nil
 local destroyed = false
-local ownedBackends = {}
+local ownedBackends: {[string]: any} = {}
 local movementBroker = { integration = nil }
 
 local function log(message)
@@ -10084,7 +10090,15 @@ local function createBootstrap()
     integration = createdIntegration
     movementBroker.integration = integration
     log("Priority integration READY")
-    integration.run()
+    if type(integration.run) ~= "function" then
+        block("Priority integration run() unavailable")
+        return
+    end
+    local runOk, runErr = pcall(integration.run)
+    if not runOk then
+        block("Priority integration run failed: " .. tostring(runErr))
+        return
+    end
     status = "READY"
     log("READY")
 end

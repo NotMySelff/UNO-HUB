@@ -1,4 +1,22 @@
 --[[
+    UNO HUB FINAL
+    Grow a Chicken Fighter
+    Phase 9 consolidated single-file build
+
+    Merges:
+      01_UNOHUB_PHASE9.lua (core + UI + Hot Egg + Normal Farm)
+      02 Event Capsule Collector
+      03 Auto Arena
+      04 Kraken Egg Collector
+      05 Event Priority Coordinator
+      06 Priority Integration
+      07 Phase 9 Bootstrap
+
+    Canonical priorities:
+      HOT_EGG=100  EVENT_CAPSULE=80  KRAKEN_EGG=70  AUTO_ARENA=40  NORMAL_FARM=10
+]]
+
+--[[
     UNO HUB · Responsive UIScale
     Grow a Chicken Fighter
     SOURCE A: createAutoSellChickens + AutoSellFeature + Chickens UI
@@ -21,7 +39,13 @@ local PlayerGui = LocalPlayer:WaitForChild("PlayerGui", 8)
 if not PlayerGui then return end
 
 do
+    local env = (getgenv and getgenv()) or _G
+    local oldIntegration = env.UNO_HUB_PRIORITY_INTEGRATION
+    if oldIntegration and type(oldIntegration.destroy) == "function" then
+        pcall(oldIntegration.destroy)
+    end
     local old = PlayerGui:FindFirstChild("UNO_HUB")
+
     if old then
         old:SetAttribute("UNO_HUB_Shutdown", true)
         old:Destroy()
@@ -71,6 +95,7 @@ local State = {
         enabled = false, phase = "DISABLED", generation = 0,
         retryDelay = 5, postRebirthDelay = 30, countdown = 0, countdownLabel = "",
         surrenderInFlight = false, declineInFlight = false,
+        coordinatorPauseReasons = {},
     },
     hotEgg = {
         enabled = false, phase = "DISABLED", generation = 0, movementMode = "Tween",
@@ -78,6 +103,7 @@ local State = {
         eventActive = false, holding = false, timeRemaining = nil, action = "—",
         meteorCount = 0, nearestImpact = nil, rewardConfirmed = false, hazards = {},
         endConfirmed = false, exitAttempts = 0,
+        coordinatorPauseReasons = {},
         -- meteor avoidance stability (movement layer only)
         evadeTarget = nil, evadeTargetTime = 0, lastEvadeDecision = 0,
         lastEvadeReason = "—", threateningCount = 0, distToEgg = nil,
@@ -91,7 +117,7 @@ local State = {
         autoFarmRebirth = false, autoKoDismiss = true, autoHatch = false, autoCollectEgg = false,
         autoIncubatorClaim = false, autoSell = false, autoFuse = false,
         autoBuyGenerator = false, autoUpgradeGenerator = false, autoExpandCoop = false, autoUpgradeRecycler = false, autoUpgradeIncubator = false,
-        antiAfk = false, autoHotEgg = false, showFloatingButton = true, reducedMotion = false,
+        antiAfk = false, autoHotEgg = false, autoArena = false, autoEventCapsule = false, autoKraken = false, showFloatingButton = true, reducedMotion = false,
     },
 }
 
@@ -1207,6 +1233,10 @@ local function isTowerActive()
     if State.tower.continue and State.tower.continue.open then return true end
     return false
 end
+local function getTowerStatus()
+    return tostring(State.tower.status)
+end
+
 local function isContinueOpen()
     return State.tower.continue ~= nil and State.tower.continue.open == true
 end
@@ -1430,9 +1460,10 @@ local function createAutoSellChickens(deps)
         status = nextStatus
         if detail then emit(nextStatus .. " — " .. tostring(detail)) else emit(nextStatus) end
     end
-    local function sleep(seconds)
-        if task and type(task.wait) == "function" then task.wait(seconds) elseif wait then wait(seconds) end
+        local function sleep(seconds)
+        task.wait(seconds)
     end
+
     local function spawn(fn)
         if task and type(task.spawn) == "function" then return task.spawn(fn) end
         return coroutine.wrap(fn)()
@@ -2398,12 +2429,11 @@ end
 local function fuseWaitFor(seconds, deps)
     if type(deps.wait) == "function" then
         deps.wait(seconds)
-    elseif task and type(task.wait) == "function" then
+        else
         task.wait(seconds)
-    elseif wait then
-        wait(seconds)
     end
 end
+
 local function fuseSpawnThread(fn)
     if task and type(task.spawn) == "function" then
         return task.spawn(fn)
@@ -4214,8 +4244,14 @@ local function heCancel()
 end
 local function heTick(token)
     local myGen = HE.generation
-    while not token.cancelled and not State.closed and HE.enabled and myGen == HE.generation do
+        while not token.cancelled and not State.closed and HE.enabled and myGen == HE.generation do
+        if next(HE.coordinatorPauseReasons) ~= nil then
+            heSetPhase("PAUSED_FOR_EVENT", "Coordinator")
+            task.wait(0.35)
+            continue
+        end
         pruneHazards()
+
         HE.holding = isLocalHolding()
         if not HE.endConfirmed then
             local ev = State.liveEvents["hotEgg"] or State.liveEvents["HotEgg"]
@@ -4432,8 +4468,14 @@ local function requestRebirth(myGen)
 end
 local function afrTick(token)
     local myGen = AFR.generation
-    while not token.cancelled and not State.closed and AFR.enabled and myGen == AFR.generation do
+        while not token.cancelled and not State.closed and AFR.enabled and myGen == AFR.generation do
+        if next(AFR.coordinatorPauseReasons) ~= nil then
+            afrSetPhase("PAUSED_FOR_EVENT", "Coordinator")
+            task.wait(0.35)
+            continue
+        end
         if State.movementOwner == "AUTO_HOT_EGG" or State.movementOwner == "METEOR_AVOIDANCE" or State.movementOwner == "PIT_EXIT" then
+
             task.wait(0.35) continue
         end
         if State.hotEgg.enabled and State.hotEgg.eventActive and not State.hotEgg.endConfirmed
@@ -4482,7 +4524,7 @@ local function afrTick(token)
                 afrSetPhase("K.O.")
                 local waitOffer = os.clock() + 2.5
                 while os.clock() < waitOffer and myGen == AFR.generation do
-                    if isContinueOpen() or State.tower.status == "RUN ENDED" then break end
+                    if isContinueOpen() or getTowerStatus() == "RUN ENDED" then break end
                     task.wait(0.2)
                 end
                 if isContinueOpen() then continue end
@@ -4502,7 +4544,7 @@ local function afrTick(token)
             if tryInvoke("TowerStart") then
                 local deadline = os.clock() + 6
                 while os.clock() < deadline and myGen == AFR.generation do
-                    if State.tower.runActive or State.tower.status == "RUNNING" then break end
+                    if State.tower.runActive or getTowerStatus() == "RUNNING" then break end
                     task.wait(0.25)
                 end
             else afrSetPhase("ERROR"); task.wait(3) end
@@ -5093,7 +5135,13 @@ local function setVisible(vis)
     else Main.Visible = false; if State.toggles.showFloatingButton then Float.Visible = true end end
 end
 local function shutdown()
+    local env = (getgenv and getgenv()) or _G
+    local integration = env.UNO_HUB_PRIORITY_INTEGRATION
+    if integration and type(integration.destroy) == "function" then
+        pcall(integration.destroy)
+    end
     State.closed = true; State.generation += 1
+
     -- 1) save config while feature getters still available
     if ConfigManager then pcall(function() ConfigManager.destroy() end) end
     -- 2) stop workers
@@ -5113,7 +5161,38 @@ local function shutdown()
     maid:Cleanup(); Gui:Destroy()
 end
 minBtn.MouseButton1Click:Connect(function() setVisible(false) end)
+local env = (getgenv and getgenv()) or _G
+env.UNO_HUB_RUNTIME = {
+    State = State,
+    Integration = Integration,
+    Services = {
+        Players = Players,
+        ReplicatedStorage = ReplicatedStorage,
+        Workspace = Workspace,
+        CollectionService = CollectionService,
+        TweenService = TweenService,
+    },
+    MovementAdapter = MovementAdapter,
+    cancelMovement = cancelMovement,
+    moveTo = moveTo,
+    setHotEggCoordinatorPaused = function(reason, value)
+        reason = tostring(reason or "COORDINATOR")
+        if value == true then HE.coordinatorPauseReasons[reason] = true else HE.coordinatorPauseReasons[reason] = nil end
+    end,
+    setNormalFarmCoordinatorPaused = function(reason, value)
+        reason = tostring(reason or "COORDINATOR")
+        if value == true then AFR.coordinatorPauseReasons[reason] = true else AFR.coordinatorPauseReasons[reason] = nil end
+    end,
+    getHotEggCoordinatorPauseReasons = function() return HE.coordinatorPauseReasons end,
+    getNormalFarmCoordinatorPauseReasons = function() return AFR.coordinatorPauseReasons end,
+    setAutoHotEgg = setAutoHotEgg,
+    setAutoFarmRebirth = setAutoFarmRebirth,
+    getHotEggState = function() return HE end,
+    getNormalFarmState = function() return AFR end,
+    shutdown = shutdown,
+}
 closeBtn.MouseButton1Click:Connect(shutdown)
+
 Float.MouseButton1Click:Connect(function() setVisible(true) end)
 maid:Connect(UserInputService.InputBegan, function(input, gp)
     if gp then return end
@@ -5752,6 +5831,44 @@ safeBuild("Events", function()
     local dist = row(heCard, 7, "Dist To Egg")
     local evade = row(heCard, 8, "Last Evade Reason")
     local action = row(heCard, 9, "Action")
+
+    local _, arenaCard = card(sc, 2, "AUTO ARENA")
+    settingRow(arenaCard, 1, "Auto Arena", nil, "autoArena", function(v)
+        State.toggles.autoArena = v == true
+        local api = ((getgenv and getgenv()) or _G).UNO_HUB_PHASE9
+        if api and type(api.setAutoArenaEnabled) == "function" then
+            api.setAutoArenaEnabled(v == true)
+        end
+        markConfigDirty()
+    end)
+    local arenaStatus = row(arenaCard, 2, "Status")
+    local arenaDecision = row(arenaCard, 3, "Decision")
+    local arenaErr = row(arenaCard, 4, "Last Error")
+
+    local _, capCard = card(sc, 3, "EVENT CAPSULE")
+    settingRow(capCard, 1, "Event Capsule", nil, "autoEventCapsule", function(v)
+        State.toggles.autoEventCapsule = v == true
+        local api = ((getgenv and getgenv()) or _G).UNO_HUB_PHASE9
+        if api and type(api.setEventCapsuleEnabled) == "function" then
+            api.setEventCapsuleEnabled(v == true)
+        end
+        markConfigDirty()
+    end)
+    local capStatus = row(capCard, 2, "Status")
+    local capCarry = row(capCard, 3, "Carry")
+    local capPending = row(capCard, 4, "Pending")
+
+    local _, krCard = card(sc, 4, "KRAKEN")
+    settingRow(krCard, 1, "Auto Kraken Eggs", nil, "autoKraken", function(v)
+        State.toggles.autoKraken = v == true
+        local api = ((getgenv and getgenv()) or _G).UNO_HUB_PHASE9
+        if api and type(api.setKrakenEnabled) == "function" then
+            api.setKrakenEnabled(v == true)
+        end
+        markConfigDirty()
+    end)
+    local krStatus = row(krCard, 2, "Status")
+
     Views.Events = { root = sc, update = function()
         setText(phase, HE.phase)
         setText(ended, HE.endConfirmed and "YES" or "NO")
@@ -5761,6 +5878,31 @@ safeBuild("Events", function()
         setText(dist, HE.distToEgg and string.format("%.1f", HE.distToEgg) or "—")
         setText(evade, HE.lastEvadeReason)
         setText(action, HE.action)
+        local api = ((getgenv and getgenv()) or _G).UNO_HUB_PHASE9
+        local backends = api and api.getBackends and api.getBackends() or {}
+        local arena = backends.AUTO_ARENA
+        if arena then
+            setText(arenaStatus, type(arena.getStatus)=="function" and arena.getStatus() or "—")
+            setText(arenaDecision, type(arena.getDecision)=="function" and arena.getDecision() or "—")
+            setText(arenaErr, type(arena.getLastError)=="function" and (arena.getLastError() or "—") or "—")
+        else
+            setText(arenaStatus, "UNAVAILABLE")
+        end
+        local cap = backends.EVENT_CAPSULE
+        if cap then
+            setText(capStatus, type(cap.getStatus)=="function" and cap.getStatus() or "—")
+            setText(capCarry, type(cap.getCarryCount)=="function" and cap.getCarryCount() or "—")
+            local pending = type(cap.getPendingCapsules)=="function" and cap.getPendingCapsules() or nil
+            setText(capPending, type(pending)=="table" and #pending or "—")
+        else
+            setText(capStatus, "UNAVAILABLE")
+        end
+        local kr = backends.KRAKEN_EGG
+        if kr then
+            setText(krStatus, type(kr.getStatus)=="function" and kr.getStatus() or "—")
+        else
+            setText(krStatus, "UNAVAILABLE")
+        end
     end }
 end)
 safeBuild("Utility", function()
@@ -6020,3 +6162,3614 @@ print("[UNO HUB] HatchFeature =", HatchFeature and "READY" or "MISSING")
 print("[UNO HUB] AutoCollectEggFeature =", AutoCollectEggFeature and "READY" or "MISSING")
 print("[UNO HUB] IncubatorClaimFeature =", IncubatorClaimFeature and "READY" or "MISSING")
 print("[UNO HUB] AutoUpgradeIncubatorFeature =", AutoUpgradeIncubatorFeature and "READY" or "MISSING")
+
+============================================================
+-- PHASE 9 FACTORIES (inlined)
+============================================================
+
+-- ========== EVENT CAPSULE ==========
+-- AUTO EVENT CAPSULE
+-- Standalone integration-ready backend for UFO/Admin Scrap-style capsules.
+-- This module intentionally excludes Kraken Rain Eggs and does not inspect or filter egg IDs.
+-- It uses only the normal world interaction path: move to a capsule or owner Recycler,
+-- then wait for authoritative replicated state/events.
+
+local function createEventCapsuleCollector(deps)
+    deps = deps or {}
+
+    local player = assert(deps.player, "player is required")
+    local workspace = assert(deps.workspace, "workspace is required")
+    local scheduler = deps.task or task
+    local logger = deps.log
+    local collectionService = deps.collectionService
+    local scrapDeposited = deps.scrapDeposited
+    local movement = deps.movement
+    local moveTo = deps.moveTo or (movement and movement.moveTo)
+    local acquireMovement = deps.acquireMovement
+    local releaseMovement = deps.releaseMovement
+
+    assert(type(moveTo) == "function", "deps.moveTo or deps.movement.moveTo is required")
+
+    local enabled = false
+    local destroyed = false
+    local pausedReasons = {}
+    local generation = 0
+    local activeWorkerGeneration = nil
+    local workerRunning = false
+    local restartRequested = false
+    local inProgress = false
+    local activeMove = nil
+    local activeTarget = nil
+    local ownerRecycler = nil
+    local pendingCapsules = {}
+    local records = {}
+    local connections = {}
+    local looseConnections = {}
+    local status = "DISABLED"
+    local maxCarry = tonumber(deps.maxCarry) or 5
+    local movementMode = deps.movementMode or "Tween"
+    local lastError = nil
+    local lastPickup = nil
+    local lastDeposit = nil
+    local lastDepositError = nil
+    local depositFailed = false
+    local depositFailureOverride = false
+    local depositAttemptActive = false
+    local lastObservedCarry = nil
+    local depositEventSerial = 0
+    local characterSerial = 0
+
+    local pickupTimeout = tonumber(deps.pickupTimeout) or 8
+    local depositTimeout = tonumber(deps.depositTimeout) or 12
+    local movementTimeout = tonumber(deps.movementTimeout) or 15
+    local capsuleRetargetInterval = tonumber(deps.capsuleRetargetInterval) or 0.35
+    local capsuleRetargetDistance = tonumber(deps.capsuleRetargetDistance) or 3
+    local capsuleFollowDistance = tonumber(deps.capsuleFollowDistance) or 3
+    local recyclerFrontDistance = tonumber(deps.recyclerFrontDistance) or 5
+    local recyclerFrontSign = tonumber(deps.recyclerFrontSign) or 1
+    local retryBackoff = tonumber(deps.retryBackoff) or 2
+    local pollInterval = tonumber(deps.pollInterval) or 0.25
+
+    local function log(level, message)
+        if type(logger) == "function" then
+            pcall(logger, level, message)
+        end
+    end
+
+    local function wait(seconds)
+        if scheduler and type(scheduler.wait) == "function" then
+            scheduler.wait(seconds)
+        end
+    end
+
+    local function spawn(fn)
+        if scheduler and type(scheduler.spawn) == "function" then
+            return scheduler.spawn(fn)
+        end
+        return nil
+    end
+
+    local function now()
+        return os.clock()
+    end
+
+    local function signalChanged(signal, callback, bucket)
+        if not signal or type(signal.Connect) ~= "function" then
+            return nil
+        end
+        local ok, connection = pcall(function()
+            return signal:Connect(callback)
+        end)
+        if ok and connection then
+            table.insert(bucket or connections, connection)
+            return connection
+        end
+        return nil
+    end
+
+    local function isCurrentWorker(workerGeneration)
+        return enabled and not destroyed and workerGeneration == generation
+    end
+
+    local function wake()
+        -- State changes are observed by the single worker on its next bounded poll.
+    end
+
+    local function setStatus(nextStatus)
+        if status ~= nextStatus then
+            status = nextStatus
+        end
+    end
+
+    local function setError(message)
+        lastError = tostring(message)
+        log("warn", "[Capsule] " .. lastError)
+    end
+
+    local function clearDepositFailureOverride(reason)
+        if depositFailureOverride then
+            depositFailureOverride = false
+            log("info", "[Capsule] deposit failure override cleared")
+        end
+        if reason == "confirmed" or reason == "manual_or_external" then
+            depositFailed = false
+        end
+    end
+
+    local function readAttribute(instance, name)
+        if not instance then
+            return nil
+        end
+        local ok, value = pcall(function()
+            return instance:GetAttribute(name)
+        end)
+        return ok and value or nil
+    end
+
+    local function carryCount()
+        local value = readAttribute(player, "scrapCarry")
+        return type(value) == "number" and value or tonumber(value)
+    end
+
+    local function getCharacterRoot()
+        local character = player.Character
+        if not character then
+            return nil
+        end
+        return character:FindFirstChild("HumanoidRootPart")
+            or character.PrimaryPart
+    end
+
+    local function getPosition(instance)
+        if not instance then
+            return nil
+        end
+        local ok, position = pcall(function()
+            if instance:IsA("BasePart") then
+                return instance.Position
+            end
+            if instance:IsA("Model") then
+                return instance:GetPivot().Position
+            end
+            if instance:IsA("Attachment") then
+                return instance.WorldPosition
+            end
+            return nil
+        end)
+        return ok and position or nil
+    end
+
+    local function isLiveCapsule(instance)
+        return instance ~= nil
+            and instance:IsA("Model")
+            and instance.Name == "Egg"
+            and instance.Parent ~= nil
+            and instance.Parent.Name == "Loose"
+            and instance.Parent.Parent ~= nil
+            and instance.Parent.Parent.Name == "PitScrap"
+    end
+
+    local function findLoose()
+        local pitScrap = workspace:FindFirstChild("PitScrap")
+        return pitScrap and pitScrap:FindFirstChild("Loose") or nil
+    end
+
+    local function resolveOwnerRecycler()
+        local plot = readAttribute(player, "Plot")
+        local recyclers = workspace:FindFirstChild("Recyclers")
+        if plot == nil or not recyclers then
+            ownerRecycler = nil
+            return nil
+        end
+        local candidate = recyclers:FindFirstChild("Recycler" .. tostring(plot))
+        ownerRecycler = candidate
+        return candidate
+    end
+
+    local function resolveRecyclerPosition(recycler)
+        if not recycler then
+            return nil
+        end
+        local preferredNames = {
+            "Origin", "DepositZone", "Deposit", "Interaction", "Interact", "PromptPart", "Hitbox"
+        }
+        for _, preferredName in ipairs(preferredNames) do
+            local candidate = recycler:FindFirstChild(preferredName, true)
+            local position = getPosition(candidate)
+            if position then
+                return position, preferredName, recycler:GetPivot()
+            end
+        end
+        for _, descendant in ipairs(recycler:GetDescendants()) do
+            if descendant:IsA("Attachment") then
+                local lowered = string.lower(descendant.Name)
+                if lowered:find("deposit", 1, true) or lowered:find("origin", 1, true)
+                    or lowered:find("interact", 1, true) then
+                    return descendant.WorldPosition, "Attachment", recycler:GetPivot()
+                end
+            end
+        end
+        local pivot = recycler:GetPivot()
+        local characterRoot = getCharacterRoot()
+        local y = characterRoot and characterRoot.Position.Y or pivot.Position.Y
+        local frontDirection = Vector3.new(pivot.LookVector.X, 0, pivot.LookVector.Z)
+        if frontDirection.Magnitude < 0.01 then
+            frontDirection = Vector3.new(0, 0, 1)
+        else
+            frontDirection = frontDirection.Unit
+        end
+        local candidatePlus = Vector3.new(
+            pivot.Position.X + frontDirection.X * recyclerFrontDistance,
+            y,
+            pivot.Position.Z + frontDirection.Z * recyclerFrontDistance
+        )
+        local candidateMinus = Vector3.new(
+            pivot.Position.X - frontDirection.X * recyclerFrontDistance,
+            y,
+            pivot.Position.Z - frontDirection.Z * recyclerFrontDistance
+        )
+        local chosenSign = recyclerFrontSign == -1 and -1 or 1
+        local fallback = chosenSign == -1 and candidateMinus or candidatePlus
+        log("info", "[Capsule] recycler LookVector=" .. tostring(pivot.LookVector))
+        log("info", "[Capsule] candidate sign +1=" .. tostring(candidatePlus))
+        log("info", "[Capsule] candidate sign -1=" .. tostring(candidateMinus))
+        log("info", "[Capsule] chosen sign=" .. tostring(chosenSign))
+        log("info", "[Capsule] chosen distance=" .. tostring(recyclerFrontDistance))
+        return fallback, "FrontOffsetFallback", pivot
+    end
+
+    local function addCapsule(instance)
+        if not isLiveCapsule(instance) or records[instance] then
+            return
+        end
+        records[instance] = {
+            instance = instance,
+            createdAt = now(),
+            invalid = false,
+            processed = false,
+            disappearanceObserved = false,
+            queuedDuringDeposit = false,
+            lastMovementTargetPosition = nil,
+            currentCapsulePosition = nil,
+        }
+        pendingCapsules[instance] = true
+        log("info", "[Capsule] detected")
+        if (status == "DEPOSITING" or status == "WAITING_FOR_DEPOSIT_CONFIRMATION")
+            and records[instance] and not records[instance].queuedDuringDeposit then
+            records[instance].queuedDuringDeposit = true
+            log("info", "[Capsule] queued during deposit")
+        end
+        wake()
+    end
+
+    local function invalidateCapsule(instance, reason)
+        local record = records[instance]
+        pendingCapsules[instance] = nil
+        if record then
+            record.invalid = true
+            record.invalidReason = reason
+        end
+        if activeTarget == instance then
+            activeTarget = nil
+        end
+        if reason then
+            log("warn", "[Capsule] target invalid: " .. tostring(reason))
+        end
+        wake()
+    end
+
+    local function removeDeadCapsules()
+        for instance, record in pairs(records) do
+            if not isLiveCapsule(instance) then
+                if pendingCapsules[instance] or activeTarget == instance then
+                    invalidateCapsule(instance, "claimed_or_removed")
+                end
+                if record.processed or record.invalid then
+                    records[instance] = nil
+                end
+            end
+        end
+    end
+
+    local function capsuleDistance(instance)
+        local root = getCharacterRoot()
+        local position = getPosition(instance)
+        if not root or not position then
+            return math.huge
+        end
+        return (root.Position - position).Magnitude
+    end
+
+    local function selectNearestCapsule()
+        removeDeadCapsules()
+        local selected = nil
+        local selectedDistance = math.huge
+        for instance in pairs(pendingCapsules) do
+            if isLiveCapsule(instance) then
+                local distance = capsuleDistance(instance)
+                if distance < selectedDistance then
+                    selected = instance
+                    selectedDistance = distance
+                end
+            else
+                invalidateCapsule(instance, "not_live_under_loose")
+            end
+        end
+        return selected
+    end
+
+    local function cancelActiveMove(reason)
+        local handle = activeMove
+        activeMove = nil
+        if handle then
+            local cancel = handle.cancel or handle.stop or handle.destroy
+            if type(cancel) == "function" then
+                pcall(cancel, handle, reason)
+            end
+        end
+    end
+
+    local function movementResult(handle, timeout, workerGeneration, characterAtStart, shouldPreempt)
+        if type(handle) == "boolean" then
+            return handle
+        end
+        if type(handle) ~= "table" then
+            return false, "movement_handle_invalid"
+        end
+        if type(handle.isComplete) ~= "function" and handle.completed ~= true and handle.done ~= true then
+            return false, "movement_handle_not_cancellable"
+        end
+        local deadline = now() + timeout
+        while isCurrentWorker(workerGeneration) and now() < deadline do
+            if characterSerial ~= characterAtStart then
+                return false, "character_reset"
+            end
+            if type(shouldPreempt) == "function" and shouldPreempt() then
+                return false, "return_preempted"
+            end
+            if type(handle.isComplete) == "function" then
+                local ok, complete = pcall(handle.isComplete, handle)
+                if ok and complete then
+                    return true
+                end
+            elseif handle.completed == true or handle.done == true then
+                return true
+            end
+            wait(0.1)
+        end
+        return false, "movement_timeout_or_cancel"
+    end
+
+    local function moveToPosition(position, purpose, workerGeneration, shouldPreempt)
+        if not position or not isCurrentWorker(workerGeneration) then
+            return false
+        end
+        local characterAtStart = characterSerial
+        cancelActiveMove("replace")
+        local cancelToken = { cancelled = false }
+        local options = {
+            mode = movementMode,
+            purpose = purpose,
+            cancelToken = cancelToken,
+            isCancelled = function()
+                return cancelToken.cancelled or not isCurrentWorker(workerGeneration)
+            end,
+        }
+        local ok, handle = pcall(moveTo, position, options)
+        if not ok then
+            setError("movement failed: " .. tostring(handle))
+            return false
+        end
+        activeMove = handle
+        local completed, movementReason = movementResult(handle, movementTimeout, workerGeneration, characterAtStart, shouldPreempt)
+        if not completed then
+            cancelToken.cancelled = true
+            cancelActiveMove(movementReason or "movement_timeout_or_cancel")
+            return false, movementReason
+        end
+        activeMove = nil
+        if characterSerial ~= characterAtStart or not isCurrentWorker(workerGeneration) then
+            return false, "worker_or_character_changed"
+        end
+        return true
+    end
+
+    local function beginMovement(position, purpose, workerGeneration)
+        if not position or not isCurrentWorker(workerGeneration) then
+            return nil, "invalid_movement_request"
+        end
+        cancelActiveMove("replace")
+        local cancelToken = { cancelled = false }
+        local options = {
+            mode = movementMode,
+            purpose = purpose,
+            cancelToken = cancelToken,
+            isCancelled = function()
+                return cancelToken.cancelled or not isCurrentWorker(workerGeneration)
+            end,
+        }
+        local ok, handle = pcall(moveTo, position, options)
+        if not ok then
+            return nil, tostring(handle)
+        end
+        if type(handle) == "boolean" then
+            return handle, nil
+        end
+        if type(handle) ~= "table" then
+            return nil, "movement_handle_invalid"
+        end
+        if type(handle.isComplete) ~= "function" and handle.completed ~= true and handle.done ~= true then
+            return nil, "movement_handle_not_cancellable"
+        end
+        activeMove = handle
+        return handle, nil
+    end
+
+    local function movementComplete(handle)
+        if type(handle) == "boolean" then
+            return handle
+        end
+        if type(handle) ~= "table" then
+            return false
+        end
+        if type(handle.isComplete) == "function" then
+            local ok, complete = pcall(handle.isComplete, handle)
+            return ok and complete == true
+        end
+        return handle.completed == true or handle.done == true
+    end
+
+    local function moveToCapsuleDynamic(instance, workerGeneration)
+        local initialPosition = getPosition(instance)
+        if not initialPosition then
+            return false, "capsule_position_unavailable"
+        end
+        local targetPosition = initialPosition
+        local lastMovementTargetPosition = targetPosition
+        local record = records[instance]
+        if record then
+            record.lastMovementTargetPosition = lastMovementTargetPosition
+            record.currentCapsulePosition = initialPosition
+        end
+        log("info", "[Capsule] moving target=" .. tostring(targetPosition))
+        local handle, movementError = beginMovement(targetPosition, "EVENT_CAPSULE", workerGeneration)
+        if not handle then
+            return false, movementError
+        end
+        if type(handle) == "boolean" then
+            return handle, nil
+        end
+        local startedAt = now()
+        local nextRetargetAt = startedAt + capsuleRetargetInterval
+        local followingLogged = false
+        while isCurrentWorker(workerGeneration) and now() - startedAt < movementTimeout do
+            if not isLiveCapsule(instance) then
+                cancelActiveMove("capsule_disappeared")
+                log("info", "[Capsule] capsule disappeared")
+                return true, "capsule_disappeared"
+            end
+
+            if now() >= nextRetargetAt then
+                nextRetargetAt = now() + capsuleRetargetInterval
+                local currentCapsulePosition = getPosition(instance)
+                local currentPlayerRoot = getCharacterRoot()
+                if record then
+                    record.currentCapsulePosition = currentCapsulePosition
+                end
+                if currentCapsulePosition and currentPlayerRoot then
+                    local playerDistance = (currentPlayerRoot.Position - currentCapsulePosition).Magnitude
+                    local delta = (currentCapsulePosition - lastMovementTargetPosition).Magnitude
+                    local completed = movementComplete(handle)
+
+                    if completed then
+                        activeMove = nil
+                        if playerDistance > capsuleFollowDistance then
+                            log("info", "[Capsule] target moved old=" .. tostring(lastMovementTargetPosition)
+                                .. " new=" .. tostring(currentCapsulePosition)
+                                .. " delta=" .. string.format("%.2f", delta))
+                            log("info", "[Capsule] retargeting")
+                            local replacement, replacementError = beginMovement(currentCapsulePosition, "EVENT_CAPSULE", workerGeneration)
+                            if not replacement then
+                                return false, replacementError
+                            end
+                            handle = replacement
+                            targetPosition = currentCapsulePosition
+                            lastMovementTargetPosition = targetPosition
+                            followingLogged = false
+                            if record then
+                                record.lastMovementTargetPosition = lastMovementTargetPosition
+                            end
+                        else
+                            if not followingLogged then
+                                log("info", "[Capsule] reached current target; capsule still live")
+                                log("info", "[Capsule] following live capsule")
+                                followingLogged = true
+                            end
+                            handle = nil
+                        end
+                    elseif delta >= capsuleRetargetDistance then
+                        log("info", "[Capsule] target moved old=" .. tostring(lastMovementTargetPosition)
+                            .. " new=" .. tostring(currentCapsulePosition)
+                            .. " delta=" .. string.format("%.2f", delta))
+                        log("info", "[Capsule] retargeting")
+                        local replacement, replacementError = beginMovement(currentCapsulePosition, "EVENT_CAPSULE", workerGeneration)
+                        if not replacement then
+                            return false, replacementError
+                        end
+                        handle = replacement
+                        targetPosition = currentCapsulePosition
+                        lastMovementTargetPosition = targetPosition
+                        followingLogged = false
+                        if record then
+                            record.lastMovementTargetPosition = lastMovementTargetPosition
+                        end
+                    elseif playerDistance <= capsuleFollowDistance then
+                        if not followingLogged then
+                            log("info", "[Capsule] following live capsule")
+                            followingLogged = true
+                        end
+                    end
+                end
+            end
+            wait(0.1)
+        end
+        cancelActiveMove("capsule_movement_timeout")
+        return false, "capsule_movement_timeout"
+    end
+
+    local function acquire(owner, priority)
+        if type(acquireMovement) ~= "function" then
+            return true
+        end
+        local ok, result = pcall(acquireMovement, owner, priority)
+        return ok and result ~= false
+    end
+
+    local function release(owner)
+        if type(releaseMovement) == "function" then
+            pcall(releaseMovement, owner)
+        end
+    end
+
+    local function waitForPickup(instance, carryBefore, workerGeneration)
+        local deadline = now() + pickupTimeout
+        while isCurrentWorker(workerGeneration) and now() < deadline do
+            local carry = carryCount()
+            local gone = records[instance] and records[instance].disappearanceObserved or not isLiveCapsule(instance)
+            if gone and carry and carry > (carryBefore or 0) then
+                return true, carry
+            end
+            -- A root can disappear one replication step before scrapCarry updates.
+            -- Keep the bounded wait open so both authoritative signals can correlate.
+            wait(pollInterval)
+        end
+        local carry = carryCount()
+        return false, carry
+    end
+
+    local function collectCapsule(instance, workerGeneration)
+        if not isLiveCapsule(instance) then
+            invalidateCapsule(instance, "not_live_before_move")
+            return false
+        end
+        local position = getPosition(instance)
+        if not position then
+            invalidateCapsule(instance, "no_root_position")
+            return false
+        end
+        local carryBefore = carryCount() or 0
+        activeTarget = instance
+        setStatus("MOVING_TO_CAPSULE")
+        log("info", "[Capsule] target selected")
+        log("info", "[Capsule] moving")
+        if not acquire("EVENT_CAPSULE", 50) then
+            setError("movement ownership unavailable")
+            return false
+        end
+        local moved, moveReason = moveToCapsuleDynamic(instance, workerGeneration)
+        release("EVENT_CAPSULE")
+        if not moved then
+            setError("capsule movement did not complete: " .. tostring(moveReason))
+            return false
+        end
+        setStatus("WAITING_FOR_PICKUP_CONFIRMATION")
+        local confirmed, carryAfter = waitForPickup(instance, carryBefore, workerGeneration)
+        if confirmed then
+            pendingCapsules[instance] = nil
+            records[instance].disappearanceObserved = true
+            records[instance].processed = true
+            activeTarget = nil
+            lastPickup = {
+                instance = instance,
+                carryBefore = carryBefore,
+                carryAfter = carryAfter,
+                delta = carryAfter - carryBefore,
+                at = now(),
+            }
+            log("info", "[Capsule] pickup confirmed")
+            log("info", "[Capsule] carry=" .. tostring(carryAfter))
+            return true
+        end
+        invalidateCapsule(instance, "removed_without_local_carry_increase")
+        return false
+    end
+
+    local function waitForDeposit(carryBefore, eventSerialAtStart, workerGeneration)
+        local deadline = now() + depositTimeout
+        local sawEvent = false
+        while isCurrentWorker(workerGeneration) and now() < deadline do
+            local carry = carryCount()
+            if depositEventSerial > eventSerialAtStart then
+                sawEvent = true
+            end
+            if sawEvent and carry ~= nil and carry <= carryBefore then
+                return true, carry, "ScrapDeposited+carry_reconciled"
+            end
+            if carry ~= nil and carry < carryBefore then
+                return true, carry, "carry_decreased"
+            end
+            wait(pollInterval)
+        end
+        return false, carryCount(), "deposit_timeout"
+    end
+
+    local function deposit(workerGeneration)
+        local carryBefore = carryCount() or 0
+        if carryBefore <= 0 then
+            return true
+        end
+        local recycler = resolveOwnerRecycler()
+        if not recycler then
+            setStatus("OWNER_RECYCLER_NOT_FOUND")
+            log("warn", "[Capsule] owner Recycler missing")
+            return false
+        end
+        local approachAttempts = 0
+        local maxApproachAttempts = 2
+        while approachAttempts < maxApproachAttempts and isCurrentWorker(workerGeneration) do
+            approachAttempts += 1
+            recycler = resolveOwnerRecycler()
+            local position, resolverSource, recyclerPivot = resolveRecyclerPosition(recycler)
+            if not position then
+                setError("owner Recycler has no verified target position")
+                return false
+            end
+            log("info", "[Capsule] recycler pivot=" .. tostring(recyclerPivot and recyclerPivot.Position))
+            log("info", "[Capsule] recycler target=" .. tostring(position))
+            log("info", "[Capsule] recycler target source=" .. tostring(resolverSource))
+            setStatus("RETURNING_TO_RECYCLER")
+            log("info", "[Capsule] returning to Recycler")
+            if not acquire("EVENT_CAPSULE", 50) then
+                setError("movement ownership unavailable")
+                return false
+            end
+            local moved, moveReason = moveToPosition(position, "EVENT_CAPSULE_RECYCLER", workerGeneration, function()
+                return (carryCount() or 0) < maxCarry and next(pendingCapsules) ~= nil
+            end)
+            if not moved then
+                release("EVENT_CAPSULE")
+                if moveReason == "return_preempted" then
+                    setStatus("RETURN_PREEMPTED")
+                    log("info", "[Capsule] return preempted")
+                    return true
+                end
+                setError("Recycler movement did not complete: " .. tostring(moveReason))
+                return false
+            end
+            log("info", "[Capsule] recycler approach reached")
+            setStatus("DEPOSITING")
+            log("info", "[Capsule] deposit started")
+            setStatus("WAITING_FOR_DEPOSIT_CONFIRMATION")
+            local eventSerialAtStart = depositEventSerial
+            depositAttemptActive = true
+            local confirmed, carryAfter, evidence = waitForDeposit(carryBefore, eventSerialAtStart, workerGeneration)
+            depositAttemptActive = false
+            release("EVENT_CAPSULE")
+            if confirmed then
+                lastDeposit = {
+                    carryBefore = carryBefore,
+                    carryAfter = carryAfter,
+                    evidence = evidence,
+                    at = now(),
+                }
+                depositFailed = false
+                lastDepositError = nil
+                clearDepositFailureOverride("confirmed")
+                log("info", "[Capsule] deposit confirmed")
+                log("info", "[Capsule] carry=" .. tostring(carryAfter))
+                removeDeadCapsules()
+                if next(pendingCapsules) ~= nil then
+                    log("info", "[Capsule] processing pending capsule")
+                end
+                return true
+            end
+            log("warn", "[Capsule] deposit confirmation timeout")
+            if approachAttempts < maxApproachAttempts then
+                log("warn", "[Capsule] recycler approach retry 1/1")
+                wait(retryBackoff)
+            end
+        end
+        local currentCarry = carryCount()
+        depositFailed = true
+        lastDepositError = "deposit confirmation timeout after bounded approach retries"
+        depositFailureOverride = true
+        log("warn", "[Capsule] DEPOSIT FAILED carry=" .. tostring(currentCarry))
+        log("warn", "[Capsule] deposit failure override enabled")
+        log("info", "[Capsule] resuming capsule collection")
+        setError(lastDepositError)
+        return false
+    end
+
+    local function reconcile(workerGeneration)
+        removeDeadCapsules()
+        ownerRecycler = resolveOwnerRecycler()
+        local carry = carryCount() or 0
+        if depositFailureOverride and carry < maxCarry then
+            clearDepositFailureOverride("below_capacity")
+        end
+        if carry >= maxCarry and not depositFailureOverride then
+            setStatus("FORCE_DEPOSIT")
+            log("info", "[Capsule] force deposit")
+            return "deposit"
+        end
+        if carry > 0 and next(pendingCapsules) == nil then
+            return "deposit"
+        end
+        if next(pendingCapsules) ~= nil and not next(pausedReasons) then
+            return "collect"
+        end
+        if carry > 0 and next(pausedReasons) == nil then
+            return "deposit"
+        end
+        return "wait"
+    end
+
+    local function runWorker(workerGeneration)
+        while isCurrentWorker(workerGeneration) do
+            inProgress = false
+            if next(pausedReasons) ~= nil and (carryCount() or 0) <= 0 then
+                setStatus("PAUSED")
+                wait(pollInterval)
+            else
+                local action = reconcile(workerGeneration)
+                if action == "collect" then
+                    local target = selectNearestCapsule()
+                    if target then
+                        inProgress = true
+                        setStatus("TARGET_READY")
+                        collectCapsule(target, workerGeneration)
+                    else
+                        wait(pollInterval)
+                    end
+                elseif action == "deposit" then
+                    inProgress = true
+                    deposit(workerGeneration)
+                else
+                    setStatus(next(pausedReasons) and "PAUSED" or "WAITING_FOR_CAPSULE")
+                    wait(pollInterval)
+                end
+            end
+            if lastError then
+                wait(retryBackoff)
+                lastError = nil
+            end
+        end
+    end
+
+    local function startWorker()
+        if destroyed or not enabled or workerRunning then
+            return
+        end
+        generation += 1
+        activeWorkerGeneration = generation
+        restartRequested = false
+        workerRunning = true
+        spawn(function()
+            local workerGeneration = activeWorkerGeneration
+            runWorker(workerGeneration)
+            if activeWorkerGeneration == workerGeneration then
+                workerRunning = false
+            end
+            if enabled and not destroyed and restartRequested then
+                restartRequested = false
+                startWorker()
+            end
+        end)
+    end
+
+    local function requestRestart(reason)
+        if destroyed then
+            return
+        end
+        restartRequested = true
+        generation += 1
+        cancelActiveMove(reason or "restart")
+        wake()
+        if enabled and not workerRunning then
+            startWorker()
+        end
+    end
+
+    local function setEnabled(value)
+        if destroyed then
+            return
+        end
+        local nextEnabled = value == true
+        if enabled == nextEnabled then
+            if nextEnabled then startWorker() end
+            return
+        end
+        clearDepositFailureOverride("enabled_changed")
+        enabled = nextEnabled
+        generation += 1
+        cancelActiveMove("enabled_changed")
+        if enabled then
+            restartRequested = workerRunning
+            log("info", "[Capsule] enabled")
+            setStatus("WAITING_FOR_CAPSULE")
+            startWorker()
+        else
+            log("info", "[Capsule] disabled")
+            setStatus("DISABLED")
+        end
+    end
+
+    local function setPaused(reason, value)
+        if type(reason) ~= "string" or reason == "" then
+            reason = "external"
+        end
+        if value == true then
+            pausedReasons[reason] = true
+            log("info", "[Capsule] paused: " .. reason)
+        else
+            pausedReasons[reason] = nil
+            log("info", "[Capsule] resumed: " .. reason)
+        end
+        wake()
+        if enabled then startWorker() end
+    end
+
+    local function watchLoose(container)
+        for _, connection in ipairs(looseConnections) do
+            pcall(function() connection:Disconnect() end)
+        end
+        table.clear(looseConnections)
+        if not container then
+            return
+        end
+        for _, child in ipairs(container:GetChildren()) do
+            addCapsule(child)
+        end
+        signalChanged(container.ChildAdded, function(child)
+            addCapsule(child)
+        end, looseConnections)
+        signalChanged(container.ChildRemoved, function(child)
+            local record = records[child]
+            if not record then
+                return
+            end
+            if child == activeTarget and status == "WAITING_FOR_PICKUP_CONFIRMATION" then
+                record.disappearanceObserved = true
+                wake()
+                return
+            end
+            if pendingCapsules[child] or activeTarget == child then
+                invalidateCapsule(child, "removed_from_loose")
+            end
+        end, looseConnections)
+    end
+
+    local function watchPitScrap()
+        local pitScrap = workspace:FindFirstChild("PitScrap")
+        if not pitScrap then
+            watchLoose(nil)
+            return
+        end
+        watchLoose(pitScrap:FindFirstChild("Loose"))
+        signalChanged(pitScrap.ChildAdded, function(child)
+            if child.Name == "Loose" then
+                watchLoose(child)
+            end
+        end)
+    end
+
+    local function watchCharacter()
+        signalChanged(player.CharacterAdded, function()
+            characterSerial += 1
+            cancelActiveMove("character_reset")
+            requestRestart("character_reset")
+        end)
+    end
+
+    local function watchPlayerState()
+        signalChanged(player:GetAttributeChangedSignal("Plot"), function()
+            ownerRecycler = nil
+            wake()
+        end)
+        lastObservedCarry = carryCount()
+        signalChanged(player:GetAttributeChangedSignal("scrapCarry"), function()
+            local previousCarry = lastObservedCarry
+            local currentCarry = carryCount()
+            lastObservedCarry = currentCarry
+            if previousCarry ~= nil and currentCarry ~= nil and currentCarry < previousCarry then
+                if not depositAttemptActive then
+                    log("info", "[Capsule] external/manual deposit detected carry "
+                        .. tostring(previousCarry) .. " -> " .. tostring(currentCarry))
+                    clearDepositFailureOverride("manual_or_external")
+                end
+            end
+            wake()
+        end)
+    end
+
+    local function watchDeposit()
+        if scrapDeposited then
+            signalChanged(scrapDeposited, function()
+                depositEventSerial += 1
+                clearDepositFailureOverride("confirmed")
+                wake()
+            end)
+        end
+    end
+
+    local function getPending()
+        local result = {}
+        for instance in pairs(pendingCapsules) do
+            if isLiveCapsule(instance) then
+                table.insert(result, instance)
+            end
+        end
+        return result
+    end
+
+    local function getDebugState()
+        local pending = getPending()
+        return {
+            status = status,
+            carry = carryCount(),
+            maxCarry = maxCarry,
+            pendingCount = #pending,
+            activeTarget = activeTarget,
+            isReturning = status == "RETURNING_TO_RECYCLER",
+            isDepositing = status == "DEPOSITING" or status == "WAITING_FOR_DEPOSIT_CONFIRMATION",
+            depositFailed = depositFailed,
+            depositFailureOverride = depositFailureOverride,
+        }
+    end
+
+    local function destroy()
+        if destroyed then
+            return
+        end
+        destroyed = true
+        enabled = false
+        generation += 1
+        cancelActiveMove("destroy")
+        release("EVENT_CAPSULE")
+        for _, connection in ipairs(connections) do
+            pcall(function() connection:Disconnect() end)
+        end
+        for _, connection in ipairs(looseConnections) do
+            pcall(function() connection:Disconnect() end)
+        end
+        table.clear(connections)
+        table.clear(looseConnections)
+        table.clear(pendingCapsules)
+        activeTarget = nil
+        setStatus("DISABLED")
+    end
+
+    watchPitScrap()
+    signalChanged(workspace.ChildAdded, function(child)
+        if child.Name == "PitScrap" then
+            watchPitScrap()
+        end
+    end)
+    signalChanged(workspace.ChildRemoved, function(child)
+        if child.Name == "PitScrap" then
+            watchLoose(nil)
+        end
+    end)
+    watchCharacter()
+    watchPlayerState()
+    watchDeposit()
+
+    return {
+        setEnabled = setEnabled,
+        isEnabled = function() return enabled end,
+        setPaused = setPaused,
+        isPaused = function() return next(pausedReasons) ~= nil end,
+        getPauseReasons = function()
+            local result = {}
+            for reason in pairs(pausedReasons) do result[reason] = true end
+            return result
+        end,
+        setMaxCarry = function(value)
+            local parsed = tonumber(value)
+            if parsed and parsed > 0 then maxCarry = parsed end
+        end,
+        getMaxCarry = function() return maxCarry end,
+        getStatus = function() return status end,
+        getCarryCount = carryCount,
+        getActiveTarget = function() return activeTarget end,
+        getPendingCapsules = getPending,
+        getOwnerRecycler = function() return resolveOwnerRecycler() end,
+        isReturning = function() return status == "RETURNING_TO_RECYCLER" end,
+        isDepositing = function()
+            return status == "DEPOSITING" or status == "WAITING_FOR_DEPOSIT_CONFIRMATION"
+        end,
+        getDebugState = getDebugState,
+        getLastPickup = function() return lastPickup end,
+        getLastDeposit = function() return lastDeposit end,
+        getLastDepositError = function() return lastDepositError end,
+        isDepositFailed = function() return depositFailed end,
+        isDepositFailureOverride = function() return depositFailureOverride end,
+        getLastError = function() return lastError end,
+        resolveOwnerRecycler = resolveOwnerRecycler,
+        cancelMovement = function(reason)
+            cancelActiveMove(reason or "coordinator_preempt")
+            return true
+        end,
+        destroy = destroy,
+        -- Integration hooks for the future coordinator; no coordinator is installed here.
+        acquireMovement = function(owner, priority) return acquire(owner, priority) end,
+        releaseMovement = release,
+    }
+end
+
+local globalEnv = (getgenv and getgenv()) or _G
+
+
+-- ========== AUTO ARENA ==========
+-- AUTO ARENA
+-- Standalone integration-ready backend.
+-- This module automates only the outer Arena loop through injected normal game APIs.
+-- It does not build teams, claim rewards, control abilities, click UI, or use coordinates.
+
+local function createAutoArena(deps)
+    deps = deps or {}
+
+    local ArenaClient = assert(deps.ArenaClient, "ArenaClient is required")
+    local ArenaState = assert(deps.ArenaState, "ArenaState is required")
+    local ArenaRankSettings = deps.ArenaRankSettings
+    local Remotes = deps.Remotes
+    local Charm = deps.Charm
+    local scheduler = deps.task or task
+    local logger = deps.log
+
+    local function log(level, message)
+        if type(logger) == "function" then
+            pcall(logger, level, message)
+        end
+    end
+
+    local function wait(seconds)
+        if scheduler and type(scheduler.wait) == "function" then
+            scheduler.wait(seconds)
+        end
+    end
+
+    local function spawn(fn)
+        if scheduler and type(scheduler.spawn) == "function" then
+            return scheduler.spawn(fn)
+        end
+        return nil
+    end
+
+    local function defer(fn)
+        if scheduler and type(scheduler.defer) == "function" then
+            return scheduler.defer(fn)
+        end
+        return spawn(fn)
+    end
+
+    local function now()
+        return os.clock()
+    end
+
+    local suffixMultiplier = {
+        [""] = 1,
+        K = 1e3,
+        M = 1e6,
+        B = 1e9,
+        T = 1e12,
+        Qa = 1e15,
+        Qi = 1e18,
+        Sx = 1e21,
+        Sp = 1e24,
+        Oc = 1e27,
+        No = 1e30,
+        Dc = 1e33,
+    }
+
+    local function parsePower(value)
+        if type(value) == "number" then
+            if value == value and value ~= math.huge and value ~= -math.huge then
+                return value
+            end
+            return nil
+        end
+        if type(value) ~= "string" then
+            return nil
+        end
+
+        local numberText, suffix = string.match(value, "^%s*([%+%-]?[%d,]*%.?%d+)%s*([%a]*)%s*$")
+        if not numberText then
+            return nil
+        end
+
+        numberText = string.gsub(numberText, ",", "")
+        local coefficient = tonumber(numberText)
+        local multiplier = suffixMultiplier[suffix]
+        if not coefficient or not multiplier then
+            return nil
+        end
+
+        local normalized = coefficient * multiplier
+        if normalized ~= normalized or normalized == math.huge or normalized == -math.huge then
+            return nil
+        end
+        return normalized
+    end
+
+    local enabled = false
+    local destroyed = false
+    local generation = 0
+    local workerRunning = false
+    local activeWorkerGeneration = nil
+    local restartRequested = false
+    local processQueued = false
+    local requestInProgress = false
+    local requestKind = nil
+    local pauseReasons = {}
+    local eventPending = false
+    local status = "DISABLED"
+    local decision = "WAIT_FOR_ARENA"
+    local lastError = nil
+    local lastResult = nil
+    local lastTrophyChange = nil
+    local resultHandled = false
+    local lastRefreshAt = 0
+    local nextAllowedAt = 0
+    local lastOpponentFingerprint = nil
+    local lastSkipFingerprint = nil
+    local refreshInterval = tonumber(deps.refreshInterval) or 10
+    local refillPollInterval = tonumber(deps.refillPollInterval) or 10
+    local startTimeout = tonumber(deps.startTimeout) or 12
+    local reconcileTimeout = tonumber(deps.reconcileTimeout) or 8
+    local failureBackoff = tonumber(deps.failureBackoff) or 3
+    local connections = {}
+
+    local function isCurrentWorker(workerGeneration)
+        return enabled and not destroyed and workerGeneration == generation
+    end
+
+    local function readAtom(atom)
+        if type(atom) ~= "function" then
+            return nil
+        end
+        local ok, value = pcall(atom)
+        return ok and value or nil
+    end
+
+    local function clone(value, depth)
+        if type(value) ~= "table" or (depth or 0) > 4 then
+            return value
+        end
+        local result = {}
+        for key, item in pairs(value) do
+            result[key] = clone(item, (depth or 0) + 1)
+        end
+        return result
+    end
+
+    local function getView()
+        return readAtom(ArenaState.view)
+    end
+
+    local function getBattle()
+        return readAtom(ArenaState.battle)
+    end
+
+    local function isBattling()
+        if readAtom(ArenaState.battling) == true then
+            return true
+        end
+        local battle = getBattle()
+        return type(battle) == "table" and battle.phase == "started"
+    end
+
+    local function currentOpponent(view)
+        if type(view) ~= "table" or type(view.opponents) ~= "table" then
+            return nil, nil
+        end
+        local count = #view.opponents
+        if count == 0 then
+            return nil, nil
+        end
+        local cursor = tonumber(view.cursor) or 0
+        local index = math.min(cursor + 1, count)
+        return view.opponents[index], index
+    end
+
+    local function opponentId(opponent)
+        if type(opponent) ~= "table" then
+            return nil
+        end
+        return opponent.id or opponent.userId or opponent.name
+    end
+
+    local function opponentFingerprint(view)
+        local opponent, index = currentOpponent(view)
+        if not opponent then
+            return nil
+        end
+        return table.concat({
+            tostring(tonumber(view.cursor) or 0),
+            tostring(index or 0),
+            tostring(opponentId(opponent) or ""),
+            tostring(opponent.power or ""),
+        }, "|")
+    end
+
+    local function viewReady(view)
+        if type(view) ~= "table" then
+            return false
+        end
+        if view.available ~= true or view.unlocked ~= true then
+            return false
+        end
+        local opponent = currentOpponent(view)
+        if not opponent then
+            return false
+        end
+        if readAtom(ArenaState.busy) == true or isBattling() then
+            return false
+        end
+        if readAtom(ArenaState.result) ~= nil then
+            return false
+        end
+        return true
+    end
+
+    local function safeRequest(kind, fn, ...)
+        if requestInProgress then
+            return false, nil, "request_in_progress"
+        end
+        requestInProgress = true
+        requestKind = kind
+        local ok, response = pcall(fn, ...)
+        requestInProgress = false
+        requestKind = nil
+        if not ok then
+            return false, nil, tostring(response)
+        end
+        if type(response) ~= "table" then
+            return false, response, "invalid_response"
+        end
+        if response.ok ~= true then
+            return false, response, tostring(response.error or "request_failed")
+        end
+        return true, response, nil
+    end
+
+    local function recordError(message)
+        lastError = tostring(message)
+        log("warn", "[Arena] " .. lastError)
+        nextAllowedAt = now() + failureBackoff
+    end
+
+    local function refresh(force, ownerGeneration)
+        if ownerGeneration and not isCurrentWorker(ownerGeneration) then
+            return false
+        end
+        if requestInProgress then
+            return false
+        end
+        if not force and now() - lastRefreshAt < refreshInterval then
+            return true
+        end
+        local ok, response, errorMessage = safeRequest("refresh", ArenaClient.refresh)
+        if ok then
+            lastRefreshAt = now()
+            lastError = nil
+            return true, response
+        end
+        if errorMessage ~= "request_in_progress" then
+            recordError("refresh failed: " .. tostring(errorMessage))
+        end
+        return false, response
+    end
+
+    local function ensureOfficialAuto()
+        if not ArenaRankSettings or type(ArenaRankSettings.autoAbility) ~= "function" or type(ArenaRankSettings.setAutoAbility) ~= "function" then
+            return true
+        end
+        local ok, current = pcall(ArenaRankSettings.autoAbility)
+        if not ok or current == true then
+            return ok
+        end
+        local setOk, setError = pcall(ArenaRankSettings.setAutoAbility, true)
+        if not setOk then
+            recordError("official Arena AUTO enable failed: " .. tostring(setError))
+            return false
+        end
+        log("info", "[Arena] official AUTO enabled")
+        return true
+    end
+
+    local function scheduleProcess()
+        if not enabled or destroyed or processQueued then
+            return
+        end
+        processQueued = true
+        defer(function()
+            processQueued = false
+            if enabled and not destroyed then
+                -- The worker owns all actions. This callback only wakes it by leaving
+                -- the next loop iteration to observe authoritative state.
+            end
+        end)
+    end
+
+    local function waitForViewChange(oldFingerprint, timeout)
+        local deadline = now() + timeout
+        while enabled and not destroyed and now() < deadline do
+            local view = getView()
+            local fingerprint = opponentFingerprint(view)
+            if fingerprint and fingerprint ~= oldFingerprint then
+                return true
+            end
+            wait(0.25)
+        end
+        return false
+    end
+
+    local function reconcileAfterSkip(oldFingerprint, oldSkips, workerGeneration)
+        local function changed(view)
+            local fingerprint = opponentFingerprint(view)
+            local skips = tonumber(view and view.skips) or 0
+            return fingerprint and fingerprint ~= oldFingerprint or skips < oldSkips
+        end
+
+        local deadline = now() + reconcileTimeout
+        while isCurrentWorker(workerGeneration) and now() < deadline do
+            if changed(getView()) then
+                log("info", "[Arena] opponent reconciled after Skip")
+                return true
+            end
+            wait(0.25)
+        end
+
+        local refreshed = refresh(true, workerGeneration)
+        if refreshed then
+            deadline = now() + reconcileTimeout
+            while isCurrentWorker(workerGeneration) and now() < deadline do
+                if changed(getView()) then
+                    log("info", "[Arena] opponent reconciled after refresh")
+                    return true
+                end
+                wait(0.25)
+            end
+        end
+        return false
+    end
+
+    local function waitForBattleStart(timeout, workerGeneration)
+        local deadline = now() + timeout
+        while isCurrentWorker(workerGeneration) and now() < deadline do
+            if isBattling() then
+                return true
+            end
+            local battle = getBattle()
+            if type(battle) == "table" and battle.phase == "started" then
+                return true
+            end
+            wait(0.25)
+        end
+        return false
+    end
+
+    local function handleResultReconciliation(workerGeneration)
+        status = "RECONCILE"
+        decision = "WAIT_FOR_ARENA"
+        refresh(true, workerGeneration)
+        if eventPending or next(pauseReasons) ~= nil then
+            status = "PAUSED FOR EVENT"
+            decision = "PAUSED_FOR_EVENT"
+        else
+            status = "RESULT"
+        end
+    end
+
+    local function processCycle(workerGeneration)
+        if not isCurrentWorker(workerGeneration) then
+            return
+        end
+        if now() < nextAllowedAt then
+            wait(math.min(0.5, math.max(0, nextAllowedAt - now())))
+            return
+        end
+
+        if next(pauseReasons) ~= nil then
+            if isBattling() then
+                eventPending = true
+                status = "EVENT PENDING"
+                decision = "BATTLE_IN_PROGRESS"
+            else
+                status = "PAUSED FOR EVENT"
+                decision = "PAUSED_FOR_EVENT"
+            end
+            wait(0.25)
+            return
+        end
+
+        if eventPending and not isBattling() then
+            if next(pauseReasons) == nil and readAtom(ArenaState.result) == nil then
+                eventPending = false
+            else
+                status = "PAUSED FOR EVENT"
+                decision = "PAUSED_FOR_EVENT"
+                wait(0.25)
+                return
+            end
+        end
+
+        if isBattling() then
+            status = "BATTLE"
+            decision = "BATTLE_IN_PROGRESS"
+            wait(0.25)
+            return
+        end
+
+        if readAtom(ArenaState.result) ~= nil then
+            if not resultHandled then
+                resultHandled = true
+                handleResultReconciliation(workerGeneration)
+            end
+            wait(0.5)
+            return
+        else
+            resultHandled = false
+        end
+
+        local view = getView()
+        if type(view) ~= "table" then
+            status = "WAITING FOR ARENA"
+            decision = "WAIT_FOR_ARENA"
+            refresh(true, workerGeneration)
+            wait(1)
+            return
+        end
+
+        if view.available ~= true then
+            status = "ARENA UNAVAILABLE"
+            decision = "WAIT_FOR_ARENA"
+            refresh(false, workerGeneration)
+            wait(refreshInterval)
+            return
+        end
+        if view.unlocked ~= true then
+            status = "ARENA LOCKED"
+            decision = "WAIT_FOR_ARENA"
+            wait(refreshInterval)
+            return
+        end
+
+        if not viewReady(view) then
+            status = "WAITING FOR ARENA"
+            decision = "WAIT_FOR_OPPONENT"
+            refresh(false, workerGeneration)
+            wait(1)
+            return
+        end
+
+        local opponent, index = currentOpponent(view)
+        local myPowerRaw = view.teamPower
+        local opponentPowerRaw = opponent and opponent.power
+        local myPower = parsePower(myPowerRaw)
+        local opponentPower = parsePower(opponentPowerRaw)
+        if not myPower or not opponentPower then
+            status = "POWER UNAVAILABLE"
+            decision = "POWER_UNAVAILABLE"
+            recordError("power parse failed; my=" .. tostring(myPowerRaw) .. " opponent=" .. tostring(opponentPowerRaw))
+            refresh(true, workerGeneration)
+            wait(failureBackoff)
+            return
+        end
+
+        local fingerprint = opponentFingerprint(view)
+        if fingerprint ~= lastOpponentFingerprint then
+            lastOpponentFingerprint = fingerprint
+            log("info", "[Arena] opponent ready index=" .. tostring(index) .. " id=" .. tostring(opponentId(opponent)))
+        end
+
+        if opponentPower > myPower then
+            if (tonumber(view.skips) or 0) <= 0 then
+                status = "WAITING FOR SKIP REFILL"
+                decision = "WAIT_FOR_SKIP_REFILL"
+                log("info", "[Arena] waiting for skip refill; skips=" .. tostring(view.skips) .. "/" .. tostring(view.maxSkips))
+                refresh(false, workerGeneration)
+                wait(refillPollInterval)
+                return
+            end
+
+            status = "SKIPPING"
+            decision = "SKIP"
+            local oldFingerprint = fingerprint
+            local oldSkips = tonumber(view.skips) or 0
+            if oldFingerprint == lastSkipFingerprint then
+                wait(0.25)
+                return
+            end
+            lastSkipFingerprint = oldFingerprint
+            if not isCurrentWorker(workerGeneration) then
+                return
+            end
+            local ok, _, errorMessage = safeRequest("skip", ArenaClient.skip)
+            if not ok then
+                lastSkipFingerprint = nil
+                recordError("Skip failed: " .. tostring(errorMessage))
+                refresh(true, workerGeneration)
+                wait(failureBackoff)
+                return
+            end
+            log("info", "[Arena] skip success")
+            if not reconcileAfterSkip(oldFingerprint, oldSkips, workerGeneration) then
+                recordError("Skip succeeded but opponent reconciliation timed out")
+                -- Keep the old fingerprint locked. A later worker pass may observe
+                -- the authoritative change; it must not send a duplicate Skip first.
+                wait(failureBackoff)
+                return
+            end
+            lastSkipFingerprint = nil
+            return
+        end
+
+        decision = "BATTLE"
+        if not isCurrentWorker(workerGeneration) then
+            return
+        end
+        if not ensureOfficialAuto() then
+            status = "ERROR / RETRY"
+            wait(failureBackoff)
+            return
+        end
+
+        status = "STARTING BATTLE"
+        if not isCurrentWorker(workerGeneration) then
+            return
+        end
+        local ok, _, errorMessage = safeRequest("fight", ArenaClient.fight)
+        if not ok then
+            recordError("Fight failed: " .. tostring(errorMessage))
+            refresh(true, workerGeneration)
+            wait(failureBackoff)
+            return
+        end
+        log("info", "[Arena] fight requested")
+        status = "BATTLE"
+        if not waitForBattleStart(startTimeout, workerGeneration) then
+            recordError("Fight returned success but battle start was not confirmed")
+            refresh(true, workerGeneration)
+            wait(failureBackoff)
+            return
+        end
+        log("info", "[Arena] battle started")
+    end
+
+    local function worker(workerGeneration)
+        if workerRunning then
+            restartRequested = true
+            return
+        end
+        workerRunning = true
+        activeWorkerGeneration = workerGeneration
+        while isCurrentWorker(workerGeneration) do
+            local ok, errorMessage = pcall(processCycle, workerGeneration)
+            if not ok then
+                recordError("worker error: " .. tostring(errorMessage))
+                wait(failureBackoff)
+            end
+            wait(0.1)
+        end
+        if activeWorkerGeneration == workerGeneration then
+            activeWorkerGeneration = nil
+        end
+        workerRunning = false
+        if restartRequested then
+            restartRequested = false
+            if enabled and not destroyed then
+                local newestGeneration = generation
+                spawn(function()
+                    worker(newestGeneration)
+                end)
+            end
+        end
+    end
+
+    local function startWorker()
+        if not enabled or destroyed then
+            return
+        end
+        if workerRunning then
+            restartRequested = true
+            return
+        end
+        local workerGeneration = generation
+        spawn(function()
+            worker(workerGeneration)
+        end)
+    end
+
+    local function onBattleState(payload)
+        if type(payload) ~= "table" then
+            return
+        end
+        if payload.phase == "started" then
+            status = "BATTLE"
+            decision = "BATTLE_IN_PROGRESS"
+            log("info", "[Arena] battle phase started")
+        elseif payload.phase == "finished" then
+            status = "WAITING FOR RESULT"
+            decision = "BATTLE_IN_PROGRESS"
+            log("info", "[Arena] battle phase finished; waiting for result")
+        end
+    end
+
+    local function onBattleResult(payload)
+        if type(payload) ~= "table" then
+            return
+        end
+        lastResult = clone(payload)
+        lastTrophyChange = payload.delta
+        resultHandled = false
+        status = "RESULT"
+        decision = "WAIT_FOR_ARENA"
+        log("info", "[Arena] battle result " .. (payload.won == true and "WIN" or "LOSS") .. " delta=" .. tostring(payload.delta))
+        if eventPending or next(pauseReasons) ~= nil then
+            status = "PAUSED FOR EVENT"
+            decision = "PAUSED_FOR_EVENT"
+        end
+    end
+
+    local function addConnection(connection)
+        if connection then
+            table.insert(connections, connection)
+        end
+        return connection
+    end
+
+    local function subscribeAtom(atom)
+        if not Charm or type(Charm.subscribe) ~= "function" or type(atom) ~= "function" then
+            return nil
+        end
+        local ok, connection = pcall(function()
+            return Charm.subscribe(atom, scheduleProcess)
+        end)
+        return ok and connection or nil
+    end
+
+    local function subscribeRemote(definition, callback)
+        if not Remotes or type(Remotes.onClient) ~= "function" or not definition then
+            return nil
+        end
+        local ok, connection = pcall(function()
+            return Remotes.onClient(definition, callback)
+        end)
+        if not ok then
+            log("warn", "[Arena] event subscription failed: " .. tostring(connection))
+            return nil
+        end
+        return connection
+    end
+
+    local function disconnectAll()
+        for i = #connections, 1, -1 do
+            local connection = connections[i]
+            if typeof(connection) == "RBXScriptConnection" then
+                pcall(function() connection:Disconnect() end)
+            elseif type(connection) == "function" then
+                pcall(connection)
+            end
+            connections[i] = nil
+        end
+    end
+
+    local API = {}
+
+    function API.setAutoArena(value)
+        if destroyed then return false end
+        local nextValue = value == true
+        enabled = nextValue
+        generation += 1
+        if not enabled then
+            status = "DISABLED"
+            decision = "WAIT_FOR_ARENA"
+            log("info", "[Arena] Auto Arena disabled; active battle is not cancelled")
+            return true
+        end
+        if not ensureOfficialAuto() then
+            enabled = false
+            status = "ERROR / RETRY"
+            return false
+        end
+        status = "WAITING FOR ARENA"
+        decision = "WAIT_FOR_ARENA"
+        nextAllowedAt = 0
+        startWorker()
+        log("info", "[Arena] Auto Arena enabled")
+        return true
+    end
+
+    function API.isEnabled()
+        return enabled
+    end
+
+    function API.setPaused(value, reason)
+        reason = tostring(reason or "EXTERNAL_EVENT")
+        if value == true then
+            pauseReasons[reason] = true
+            if isBattling() then
+                eventPending = true
+                status = "EVENT PENDING"
+                decision = "BATTLE_IN_PROGRESS"
+            elseif requestInProgress then
+                status = "PAUSED FOR EVENT"
+                decision = "PAUSED_FOR_EVENT"
+            else
+                status = "PAUSED FOR EVENT"
+                decision = "PAUSED_FOR_EVENT"
+            end
+            log("info", "[Arena] paused " .. reason)
+            return true
+        end
+
+        pauseReasons[reason] = nil
+        if next(pauseReasons) == nil and not isBattling() and readAtom(ArenaState.result) == nil then
+            eventPending = false
+            status = enabled and "RECONCILE" or "DISABLED"
+            decision = enabled and "WAIT_FOR_ARENA" or "WAIT_FOR_ARENA"
+            nextAllowedAt = 0
+            if enabled then
+                -- The worker owns Arena requests. If another request is active,
+                -- leave reconciliation to that worker after it returns.
+                if not requestInProgress then
+                    refresh(true)
+                end
+                startWorker()
+            end
+        end
+        return true
+    end
+
+    function API.isPaused()
+        return next(pauseReasons) ~= nil
+    end
+
+    function API.getPauseReasons()
+        return clone(pauseReasons)
+    end
+
+    function API.isBattling()
+        return isBattling()
+    end
+
+    function API.isEventPending()
+        return eventPending
+    end
+
+    function API.getStatus()
+        return status
+    end
+
+    function API.getMyPower()
+        local view = getView()
+        return view and view.teamPower or nil
+    end
+
+    function API.getOpponentPower()
+        local view = getView()
+        local opponent = currentOpponent(view)
+        return opponent and opponent.power or nil
+    end
+
+    function API.getOpponent()
+        local view = getView()
+        local opponent = currentOpponent(view)
+        return clone(opponent)
+    end
+
+    function API.getSkips()
+        local view = getView()
+        return view and view.skips or nil
+    end
+
+    function API.getMaxSkips()
+        local view = getView()
+        return view and view.maxSkips or nil
+    end
+
+    function API.getDecision()
+        return decision
+    end
+
+    function API.getCurrentRank()
+        local view = getView()
+        return view and (view.rankId or view.rank) or nil
+    end
+
+    function API.getTrophies()
+        local view = getView()
+        return view and view.trophies or nil
+    end
+
+    function API.getSeasonWins()
+        local view = getView()
+        return view and view.wins or nil
+    end
+
+    function API.getLastResult()
+        return clone(lastResult)
+    end
+
+    function API.getLastTrophyChange()
+        return lastTrophyChange
+    end
+
+    function API.getLastError()
+        return lastError
+    end
+
+    function API.refreshNow()
+        return refresh(true)
+    end
+
+    function API.destroy()
+        if destroyed then return end
+        destroyed = true
+        enabled = false
+        generation += 1
+        disconnectAll()
+        status = "DISABLED"
+        decision = "WAIT_FOR_ARENA"
+        log("info", "[Arena] Auto Arena destroyed; no active battle was cancelled")
+    end
+
+    if Remotes and Remotes.defs then
+        addConnection(subscribeRemote(Remotes.defs.ArenaBattleState, onBattleState))
+        addConnection(subscribeRemote(Remotes.defs.ArenaBattleResult, onBattleResult))
+    end
+    for _, name in ipairs({ "view", "loading", "busy", "picking", "battling", "result", "battle" }) do
+        addConnection(subscribeAtom(ArenaState[name]))
+    end
+
+    return API
+end
+
+-- Integration example:
+-- local AutoArenaFeature = createAutoArena({
+--     ArenaClient = Integration.modules.ArenaClient,
+--     ArenaState = Integration.modules.ArenaState,
+--     ArenaRankSettings = Integration.modules.ArenaRankSettings,
+--     Remotes = Integration.modules.Remotes,
+--     Charm = Integration.modules.Charm,
+--     log = log,
+-- })
+-- AutoArenaFeature.setAutoArena(true)
+
+local globalEnv = (getgenv and getgenv()) or _G
+
+-- ========== KRAKEN ==========
+-- KRAKEN EGG COLLECTOR
+-- EXPERIMENTAL — SOURCE VERIFIED, RUNTIME UNVALIDATED
+-- Standalone integration-ready backend. No UI, Config Manager, Auto Arena, or golden-egg fight integration.
+-- The injected fireClientSignal dependency must map to the verified Event contract:
+-- LiveEventClientSignal({ eventName = "kraken", action = action, args = { eggId } })
+
+local function createKrakenEggCollector(deps)
+    assert(type(deps) == "table", "createKrakenEggCollector requires deps")
+
+    local taskWait = deps.taskWait or task.wait
+    local now = deps.now or os.clock
+    local log = deps.log or function(message) print("[Kraken] " .. tostring(message)) end
+
+    local getEventState = deps.getKrakenEventState
+    local isEventActive = deps.isKrakenActive
+    local getLandedEggs = deps.getLandedEggs
+    local getEggId = deps.getEggId
+    local getEggPosition = deps.getEggPosition
+    local getEggExpiry = deps.getEggExpiry
+    local isEggReady = deps.isEggReady
+    local moveTo = deps.moveTo
+    local fireClientSignal = deps.fireClientSignal
+    local onLiveEventSignal = deps.onLiveEventSignal
+
+    local enabled = false
+    local destroyed = false
+    local workerRunning = false
+    local requestInProgress = false
+    local generation = 0
+    local restartRequested = false
+    local signalDirty = true
+    local signalDisconnect = nil
+    local target = nil
+    local pending = {}
+    local attempted = {}
+    local completed = {}
+    local lastSuccess = nil
+    local lastError = nil
+    local status = "DISABLED"
+    local eventState = nil
+    local retryAt = 0
+    local openDeadline = 0
+    local claimDeadline = 0
+    local targetReward = nil
+    local pauseReasons = {}
+
+    local function setStatus(nextStatus, detail)
+        if status == nextStatus and detail == nil then return end
+        status = nextStatus
+        if detail then
+            log("[Kraken] " .. tostring(nextStatus) .. " " .. tostring(detail))
+        else
+            log("[Kraken] " .. tostring(nextStatus))
+        end
+    end
+
+    local function safeCall(callback, ...)
+        if type(callback) ~= "function" then
+            return false, "dependency unavailable"
+        end
+        local args = table.pack(...)
+        return pcall(function()
+            return callback(table.unpack(args, 1, args.n))
+        end)
+    end
+
+    local function currentWorker(myGeneration)
+        return enabled and not destroyed and myGeneration == generation
+    end
+
+    local function clearTarget()
+        target = nil
+        targetReward = nil
+        openDeadline = 0
+        claimDeadline = 0
+        requestInProgress = false
+    end
+
+    local function eventActive()
+        local ok, value = safeCall(isEventActive)
+        if ok and type(value) == "boolean" then
+            return value
+        end
+        if type(getEventState) == "function" then
+            local stateOk, state = safeCall(getEventState)
+            if stateOk and type(state) == "table" then
+                eventState = state
+                return state.active == true or state.id == "kraken" or state.eventName == "kraken"
+            end
+        end
+        return false
+    end
+
+    local function snapshotEventState()
+        if type(getEventState) == "function" then
+            local ok, value = safeCall(getEventState)
+            if ok then eventState = value end
+        end
+        return eventState
+    end
+
+    local function modelValid(item, expectedId)
+        if not item or not item.Parent then return false end
+        local ok, id = safeCall(getEggId, item)
+        if not ok or id == nil or tostring(id) ~= tostring(expectedId) then return false end
+        local expiryOk, expiresAt = safeCall(getEggExpiry, item)
+        if expiryOk and type(expiresAt) == "number" and expiresAt <= os.time() then return false end
+        if type(isEggReady) == "function" then
+            local readyOk, ready = safeCall(isEggReady, item)
+            if readyOk and ready == false then return false end
+        end
+        return true
+    end
+
+    local function scanTargets()
+        local found = {}
+        local ok, eggs = safeCall(getLandedEggs)
+        if not ok or type(eggs) ~= "table" then
+            return found
+        end
+        local characterPosition = nil
+        if type(deps.getPlayerPosition) == "function" then
+            local positionOk, position = safeCall(deps.getPlayerPosition)
+            if positionOk then characterPosition = position end
+        end
+        for _, item in pairs(eggs) do
+            if item and item.Parent then
+                local idOk, id = safeCall(getEggId, item)
+                if idOk and id ~= nil then
+                    id = tostring(id)
+                    local expiryOk, expiresAt = safeCall(getEggExpiry, item)
+                    if not (expiryOk and type(expiresAt) == "number" and expiresAt <= os.time()) then
+                        local positionOk, position = safeCall(getEggPosition, item)
+                        local distance = math.huge
+                        if positionOk and characterPosition and position then
+                            local delta = position - characterPosition
+                            distance = delta.Magnitude
+                        end
+                        found[id] = {
+                            id = id,
+                            instance = item,
+                            position = positionOk and position or nil,
+                            distance = distance,
+                            expiresAt = expiryOk and expiresAt or nil,
+                        }
+                    end
+                end
+            end
+        end
+        pending = found
+        return found
+    end
+
+    local function chooseTarget(found)
+        local best = nil
+        for id, item in pairs(found) do
+            if not completed[id] and not attempted[id] then
+                if not best or item.distance < best.distance then
+                    best = item
+                end
+            end
+        end
+        return best
+    end
+
+    local function fireAction(action, eggId)
+        if requestInProgress then
+            return false, "request already in progress"
+        end
+        if type(fireClientSignal) ~= "function" then
+            return false, "fireClientSignal dependency unavailable"
+        end
+        requestInProgress = true
+        local ok, result = safeCall(fireClientSignal, {
+            eventName = "kraken",
+            action = action,
+            args = { eggId },
+        })
+        requestInProgress = false
+        if not ok then
+            return false, result
+        end
+        if result == false then
+            return false, "action dependency rejected request"
+        end
+        return true
+    end
+
+    local function invalidate(reason)
+        if target then
+            log("[Kraken] target invalid id=" .. tostring(target.id) .. " reason=" .. tostring(reason))
+        end
+        clearTarget()
+        retryAt = now() + 1
+        setStatus("TARGET_INVALID", reason)
+        signalDirty = true
+    end
+
+    local function handleEggRoll(data)
+        if type(data) ~= "table" or data.id == nil then return end
+        local id = tostring(data.id)
+        if not target or tostring(target.id) ~= id then
+            return
+        end
+        if status ~= "WAITING_FOR_EGG_ROLL" then return end
+        targetReward = data.reward
+        local ok, result = fireAction("claimEgg", id)
+        if not ok then
+            lastError = "claimEgg: " .. tostring(result)
+            clearTarget()
+            retryAt = now() + 3
+            setStatus("ERROR_RETRY", lastError)
+            return
+        end
+        attempted[id] = true
+        claimDeadline = now() + 12
+        setStatus("WAITING_FOR_CONFIRMATION", "id=" .. id)
+        log("[Kraken] interaction accepted id=" .. id .. " reward=" .. tostring(data.reward))
+    end
+
+    local function onSignal(payload)
+        if type(payload) ~= "table" or payload.eventName ~= "kraken" then return end
+        signalDirty = true
+        local action = payload.action
+        local args = payload.args
+        local data = type(args) == "table" and args[1] or nil
+        if action == "eggRoll" then
+            handleEggRoll(data)
+        end
+    end
+
+    local function attachSignalObserver()
+        if signalDisconnect or type(onLiveEventSignal) ~= "function" then return end
+        local ok, disconnect = safeCall(onLiveEventSignal, onSignal)
+        if ok and type(disconnect) == "function" then
+            signalDisconnect = disconnect
+        elseif ok and disconnect == nil then
+            signalDisconnect = function() end
+        end
+    end
+
+    local function detachSignalObserver()
+        if signalDisconnect then
+            pcall(signalDisconnect)
+            signalDisconnect = nil
+        end
+    end
+
+    local function finishIfRemoved(myGeneration)
+        if not target or not currentWorker(myGeneration) then return false end
+        if target.instance and target.instance.Parent then
+            local idOk, currentId = safeCall(getEggId, target.instance)
+            if idOk and currentId ~= nil and tostring(currentId) == tostring(target.id) then
+                return false
+            end
+        end
+        completed[target.id] = true
+        lastSuccess = {
+            eggId = target.id,
+            reward = targetReward,
+            at = now(),
+        }
+        log("[Kraken] success id=" .. tostring(target.id))
+        clearTarget()
+        signalDirty = true
+        setStatus("SEARCH_NEXT")
+        return true
+    end
+
+    local function waitForMove(myGeneration, item)
+        if type(moveTo) ~= "function" then
+            return false, "moveTo dependency unavailable"
+        end
+        if not item.position then
+            return false, "egg position unavailable"
+        end
+        local ok, result = safeCall(moveTo, item.position, {
+            mode = "Tween",
+            stopDistance = 12,
+            maxInteractionDistance = 13,
+            target = item.instance,
+            eggId = item.id,
+            isCurrent = function() return currentWorker(myGeneration) and modelValid(item.instance, item.id) end,
+        })
+        if not currentWorker(myGeneration) then
+            return false, "worker superseded"
+        end
+        if not ok then return false, result end
+        if result == false then return false, "movement rejected" end
+        return true
+    end
+
+    local function work(myGeneration)
+        while currentWorker(myGeneration) do
+            if next(pauseReasons) ~= nil then
+                setStatus("PAUSED_FOR_EVENT")
+                taskWait(0.35)
+                continue
+            end
+            snapshotEventState()
+            if not eventActive() then
+                clearTarget()
+                setStatus("WAITING_FOR_KRAKEN")
+                taskWait(1)
+            elseif now() < retryAt then
+                taskWait(math.min(1, retryAt - now()))
+            elseif target and status == "WAITING_FOR_EGG_ROLL" then
+                if finishIfRemoved(myGeneration) then
+                    continue
+                end
+                if now() >= openDeadline then
+                    lastError = "eggRoll timeout for " .. tostring(target.id)
+                    attempted[target.id] = true
+                    clearTarget()
+                    retryAt = now() + 4
+                    setStatus("ERROR_RETRY", lastError)
+                else
+                    taskWait(0.25)
+                end
+            elseif target and status == "WAITING_FOR_CONFIRMATION" then
+                if finishIfRemoved(myGeneration) then
+                    continue
+                end
+                if now() >= claimDeadline then
+                    lastError = "claim confirmation timeout for " .. tostring(target.id)
+                    clearTarget()
+                    retryAt = now() + 5
+                    setStatus("ERROR_RETRY", lastError)
+                else
+                    taskWait(0.25)
+                end
+            else
+                local found = scanTargets()
+                if target and not modelValid(target.instance, target.id) then
+                    invalidate("despawned, expired, or no longer landed")
+                elseif not target then
+                    local selected = chooseTarget(found)
+                    if selected then
+                        target = selected
+                        setStatus("TARGET_READY", "id=" .. selected.id)
+                        log("[Kraken] target selected id=" .. selected.id)
+                        setStatus("MOVING_TO_EGG", "id=" .. selected.id)
+                        local moved, moveError = waitForMove(myGeneration, selected)
+                        if not moved then
+                            lastError = tostring(moveError)
+                            clearTarget()
+                            retryAt = now() + 3
+                            setStatus("ERROR_RETRY", lastError)
+                        elseif modelValid(selected.instance, selected.id) and eventActive() then
+                            local actionOk, actionError = fireAction("openEgg", selected.id)
+                            if actionOk then
+                                openDeadline = now() + 8
+                                setStatus("WAITING_FOR_EGG_ROLL", "id=" .. selected.id)
+                                log("[Kraken] interaction started id=" .. selected.id)
+                            else
+                                lastError = "openEgg: " .. tostring(actionError)
+                                attempted[selected.id] = true
+                                clearTarget()
+                                retryAt = now() + 3
+                                setStatus("ERROR_RETRY", lastError)
+                            end
+                        else
+                            invalidate("target invalid after movement")
+                        end
+                    else
+                        setStatus("WAITING_FOR_LANDED_EGG")
+                        taskWait(signalDirty and 0.25 or 1)
+                    end
+                end
+            end
+            signalDirty = false
+        end
+        workerRunning = false
+        if enabled and not destroyed and generation ~= myGeneration then
+            restartRequested = false
+            task.spawn(function()
+                local currentGeneration = generation
+                if enabled and not workerRunning then
+                    workerRunning = true
+                    work(currentGeneration)
+                end
+            end)
+        end
+    end
+
+    local api = {}
+
+    function api.setEnabled(value)
+        if destroyed then return false end
+        value = value == true
+        if enabled == value then
+            if value and not workerRunning then restartRequested = true end
+            return true
+        end
+        enabled = value
+        generation += 1
+        restartRequested = value
+        if enabled then
+            lastError = nil
+            attachSignalObserver()
+            if not workerRunning then
+                workerRunning = true
+                local myGeneration = generation
+                task.spawn(function() work(myGeneration) end)
+            end
+        else
+            detachSignalObserver()
+            clearTarget()
+            setStatus("DISABLED")
+        end
+        return true
+    end
+
+    function api.isEnabled()
+        return enabled and not destroyed
+    end
+    function api.setPaused(reason, value)
+        reason = tostring(reason or "EXTERNAL_EVENT")
+        if value == true then
+            pauseReasons[reason] = true
+        else
+            pauseReasons[reason] = nil
+        end
+        generation += 1
+        restartRequested = enabled
+        return true
+    end
+    function api.isPaused()
+        return next(pauseReasons) ~= nil
+    end
+    function api.getPauseReasons()
+        local result = {}
+        for reason in pairs(pauseReasons) do result[reason] = true end
+        return result
+    end
+    function api.cancelMovement()
+        generation += 1
+        restartRequested = enabled
+        return true
+    end
+
+    function api.getStatus()
+        return status
+    end
+
+    function api.getKrakenEventState()
+        snapshotEventState()
+        return eventState
+    end
+
+    function api.getActiveTarget()
+        if not target then return nil end
+        return {
+            eggId = target.id,
+            instance = target.instance,
+            position = target.position,
+            status = status,
+        }
+    end
+
+    function api.getPendingEggs()
+        local result = {}
+        for id, item in pairs(pending) do
+            result[id] = {
+                eggId = id,
+                instance = item.instance,
+                position = item.position,
+                distance = item.distance,
+                completed = completed[id] == true,
+                attempted = attempted[id] == true,
+            }
+        end
+        return result
+    end
+
+    function api.getLastEggId()
+        return lastSuccess and lastSuccess.eggId or nil
+    end
+
+    function api.getLastSuccess()
+        return lastSuccess
+    end
+
+    function api.getLastError()
+        return lastError
+    end
+
+    function api.destroy()
+        if destroyed then return end
+        destroyed = true
+        enabled = false
+        generation += 1
+        table.clear(pauseReasons)
+        detachSignalObserver()
+        clearTarget()
+        setStatus("DISABLED")
+    end
+
+    api.isWorkerRunning = function() return workerRunning end
+    api.isRequestInProgress = function() return requestInProgress end
+    api.getGeneration = function() return generation end
+    api.getAttempted = function() return attempted end
+    api.getCompleted = function() return completed end
+    api.isRestartRequested = function() return restartRequested end
+
+    return api
+end
+
+local globalEnv = (getgenv and getgenv()) or _G
+
+-- ========== PRIORITY COORDINATOR ==========
+-- EVENT PRIORITY COORDINATOR
+-- Standalone Phase 7 arbitration module.
+-- This file coordinates injected feature adapters only; it does not implement feature logic.
+
+local PRIORITY = {
+    HOT_EGG = 100,
+    EVENT_CAPSULE = 80,
+    KRAKEN_EGG = 70,
+    AUTO_ARENA = 40,
+    NORMAL_FARM = 10,
+}
+
+local DEFAULT_FEATURES = {
+    "HOT_EGG",
+    "EVENT_CAPSULE",
+    "KRAKEN_EGG",
+    "AUTO_ARENA",
+    "NORMAL_FARM",
+}
+
+local function createEventPriorityCoordinator(deps)
+    deps = type(deps) == "table" and deps or {}
+    local logger = deps.log or deps.logger
+    local features = deps.features or {}
+    local featureState = {}
+    local currentMovementOwner = nil
+    local currentPriority = nil
+    local lastPreemption = nil
+    local lastRelease = nil
+    local lastError = nil
+    local destroyed = false
+
+    local function log(level, message)
+        if type(logger) == "function" then
+            pcall(logger, level, message)
+        end
+    end
+
+    local function now()
+        return os.clock()
+    end
+
+    local function adapter(owner)
+        local feature = features[owner]
+        return type(feature) == "table" and feature or {}
+    end
+
+    local function ensureFeature(owner, priority)
+        if type(owner) ~= "string" or owner == "" then
+            return nil
+        end
+        local state = featureState[owner]
+        if not state then
+            state = {
+                owner = owner,
+                priority = tonumber(priority) or tonumber(PRIORITY[owner]) or 0,
+                requested = false,
+                enabled = true,
+                critical = false,
+                pauseReasons = {},
+                eventPending = false,
+                requestOptions = {},
+            }
+            featureState[owner] = state
+        elseif priority ~= nil then
+            state.priority = tonumber(priority) or state.priority
+        end
+        return state
+    end
+
+    for _, owner in ipairs(DEFAULT_FEATURES) do
+        ensureFeature(owner, PRIORITY[owner])
+    end
+    for owner, feature in pairs(features) do
+        ensureFeature(owner, type(feature) == "table" and feature.priority or nil)
+    end
+
+    local function isCriticalInternal(owner)
+        local state = ensureFeature(owner)
+        if not state then
+            return false
+        end
+        if state.critical then
+            return true
+        end
+        local feature = adapter(owner)
+        if type(feature.isCritical) == "function" then
+            local ok, result = pcall(feature.isCritical)
+            return ok and result == true
+        end
+        return false
+    end
+
+    local function setFeaturePaused(owner, reason, value)
+        local state = ensureFeature(owner)
+        if not state then
+            return false
+        end
+        reason = tostring(reason or "COORDINATOR")
+        if value == true then
+            if state.pauseReasons[reason] then
+                return true
+            end
+            state.pauseReasons[reason] = true
+            local feature = adapter(owner)
+            if type(feature.setPaused) == "function" then
+                local ok, result = pcall(feature.setPaused, reason, true)
+                if not ok then
+                    lastError = "pause failed for " .. owner .. ": " .. tostring(result)
+                    log("warn", "[Coordinator] " .. lastError)
+                    return false
+                end
+            end
+            log("info", "[Coordinator] paused " .. owner .. " reason=" .. reason)
+            return true
+        end
+        if not state.pauseReasons[reason] then
+            return true
+        end
+        state.pauseReasons[reason] = nil
+        local feature = adapter(owner)
+        if type(feature.setPaused) == "function" then
+            local ok, result = pcall(feature.setPaused, reason, false)
+            if not ok then
+                lastError = "resume failed for " .. owner .. ": " .. tostring(result)
+                log("warn", "[Coordinator] " .. lastError)
+                return false
+            end
+        end
+        log("info", "[Coordinator] resumed " .. owner)
+        return true
+    end
+
+    local function setArenaEventPending(value, reason)
+        local state = ensureFeature("AUTO_ARENA", PRIORITY.AUTO_ARENA)
+        if not state then
+            return
+        end
+        state.eventPending = value == true
+        local feature = adapter("AUTO_ARENA")
+        if type(feature.setEventPending) == "function" then
+            pcall(feature.setEventPending, state.eventPending, reason)
+        elseif type(feature.markEventPending) == "function" then
+            pcall(feature.markEventPending, state.eventPending, reason)
+        end
+    end
+
+    local function clearOwner(reason)
+        local oldOwner = currentMovementOwner
+        if not oldOwner then
+            return
+        end
+        currentMovementOwner = nil
+        currentPriority = nil
+        lastRelease = {
+            owner = oldOwner,
+            reason = reason,
+            at = now(),
+        }
+        if oldOwner == "AUTO_ARENA" then
+            setArenaEventPending(false, reason)
+        end
+        log("info", "[Coordinator] released " .. oldOwner)
+    end
+
+    local function cancelForPreemption(owner, byOwner)
+        local feature = adapter(owner)
+        if type(feature.cancelMovement) == "function" then
+            local ok, result = pcall(feature.cancelMovement, byOwner)
+            if not ok then
+                lastError = "cancel failed for " .. owner .. ": " .. tostring(result)
+                log("warn", "[Coordinator] " .. lastError)
+                return false
+            end
+        end
+        return true
+    end
+
+    local arbitrate
+
+    local function syncPauses()
+        if not currentMovementOwner then
+            for owner, state in pairs(featureState) do
+                for reason in pairs(state.pauseReasons) do
+                    if string.sub(reason, 1, 17) == "COORDINATOR_OWNER:" then
+                        setFeaturePaused(owner, reason, false)
+                    end
+                end
+            end
+            return
+        end
+        local ownerState = ensureFeature(currentMovementOwner, currentPriority)
+        for owner, state in pairs(featureState) do
+            if owner ~= currentMovementOwner then
+                local desiredReason = "COORDINATOR_OWNER:" .. currentMovementOwner
+                local staleReasons = {}
+                for reason in pairs(state.pauseReasons) do
+                    if string.sub(reason, 1, 18) == "COORDINATOR_OWNER:" and reason ~= desiredReason then
+                        table.insert(staleReasons, reason)
+                    end
+                end
+                for _, reason in ipairs(staleReasons) do
+                    setFeaturePaused(owner, reason, false)
+                end
+                if state.priority < ownerState.priority then
+                    setFeaturePaused(owner, desiredReason, true)
+                else
+                    setFeaturePaused(owner, desiredReason, false)
+                end
+            end
+        end
+    end
+
+    local function transferTo(owner, reason)
+        local state = ensureFeature(owner)
+        if not state then
+            return false
+        end
+        currentMovementOwner = owner
+        currentPriority = state.priority
+        if owner == "AUTO_ARENA" then
+            setArenaEventPending(false, reason)
+        end
+        local stateForOwner = ensureFeature(owner)
+        if stateForOwner then
+            stateForOwner.eventPending = false
+        end
+        syncPauses()
+        log("info", "[Coordinator] owner " .. tostring(reason and reason.oldOwner or "NONE")
+            .. " -> " .. owner)
+        return true
+    end
+
+    arbitrate = function()
+        if destroyed then
+            return false
+        end
+        local bestOwner = nil
+        local bestPriority = -math.huge
+        for owner, state in pairs(featureState) do
+            if state.requested and state.enabled and state.priority > bestPriority then
+                bestOwner = owner
+                bestPriority = state.priority
+            end
+        end
+        if currentMovementOwner then
+            local currentState = ensureFeature(currentMovementOwner)
+            if currentState and currentState.requested and currentState.enabled then
+                if bestOwner == currentMovementOwner or bestPriority <= (currentPriority or -math.huge) then
+                    syncPauses()
+                    return true
+                end
+                if isCriticalInternal(currentMovementOwner) then
+                    if bestOwner then
+                        currentState.eventPending = true
+                        if currentMovementOwner == "AUTO_ARENA" then
+                            setArenaEventPending(true, bestOwner)
+                        end
+                        log("info", "[Coordinator] current owner critical; " .. bestOwner .. " pending")
+                    end
+                    syncPauses()
+                    return true
+                end
+                local oldOwner = currentMovementOwner
+                lastPreemption = {
+                    from = oldOwner,
+                    to = bestOwner,
+                    at = now(),
+                }
+                log("info", "[Coordinator] preempt requested " .. bestOwner)
+                cancelForPreemption(oldOwner, bestOwner)
+                setFeaturePaused(oldOwner, "COORDINATOR_OWNER:" .. bestOwner, true)
+                clearOwner({ oldOwner = oldOwner, reason = "preempted_by_" .. bestOwner })
+            else
+                clearOwner("stale_owner")
+            end
+        end
+        if bestOwner then
+            return transferTo(bestOwner, { oldOwner = lastRelease and lastRelease.owner or "NONE" })
+        end
+        syncPauses()
+        return true
+    end
+
+    local function requestPriority(owner, priority, options)
+        if destroyed then
+            return false
+        end
+        local state = ensureFeature(owner, priority)
+        if not state then
+            return false
+        end
+        options = type(options) == "table" and options or {}
+        state.requested = true
+        state.enabled = options.enabled ~= false
+        state.requestOptions = options
+        if options.critical ~= nil then
+            state.critical = options.critical == true
+        end
+        log("info", "[Coordinator] request " .. owner .. " priority=" .. tostring(state.priority))
+        return arbitrate()
+    end
+
+    local function releasePriority(owner)
+        local state = ensureFeature(owner)
+        if not state then
+            return false
+        end
+        state.requested = false
+        state.requestOptions = {}
+        if owner == "AUTO_ARENA" then
+            setArenaEventPending(false, "release")
+        end
+        if currentMovementOwner == owner then
+            clearOwner("releasePriority")
+        end
+        return arbitrate()
+    end
+
+    local function acquireMovement(owner, priority)
+        return requestPriority(owner, priority)
+    end
+
+    local function releaseMovement(owner)
+        return releasePriority(owner)
+    end
+
+    local function setFeatureEnabled(owner, value)
+        local state = ensureFeature(owner)
+        if not state then
+            return false
+        end
+        state.enabled = value == true
+        if not state.enabled and currentMovementOwner == owner then
+            clearOwner("feature_disabled")
+        end
+        return arbitrate()
+    end
+
+    local function setCritical(owner, value)
+        local state = ensureFeature(owner)
+        if not state then
+            return false
+        end
+        state.critical = value == true
+        if not state.critical then
+            if owner == "AUTO_ARENA" then
+                setArenaEventPending(false, "critical_ended")
+            end
+            log("info", "[Coordinator] critical ended " .. owner)
+        end
+        return arbitrate()
+    end
+
+    local function isOwnerActive(owner)
+        return currentMovementOwner == owner
+    end
+
+    local function getCurrentOwner()
+        return currentMovementOwner
+    end
+
+    local function getCurrentPriority()
+        return currentPriority
+    end
+
+    local function getPendingRequests()
+        local result = {}
+        for owner, state in pairs(featureState) do
+            result[owner] = {
+                requested = state.requested,
+                priority = state.priority,
+                critical = isCriticalInternal(owner),
+                eventPending = state.eventPending,
+            }
+        end
+        return result
+    end
+
+    local function getPausedFeatures()
+        local result = {}
+        for owner, state in pairs(featureState) do
+            local reasons = {}
+            for reason in pairs(state.pauseReasons) do
+                table.insert(reasons, reason)
+            end
+            result[owner] = reasons
+        end
+        return result
+    end
+
+    local function getDebugState()
+        return {
+            owner = currentMovementOwner,
+            priority = currentPriority,
+            pending = getPendingRequests(),
+            critical = (function()
+                local result = {}
+                for owner in pairs(featureState) do result[owner] = isCriticalInternal(owner) end
+                return result
+            end)(),
+            paused = getPausedFeatures(),
+            eventPending = (function()
+                local result = {}
+                for owner, state in pairs(featureState) do result[owner] = state.eventPending end
+                return result
+            end)(),
+            lastPreemption = lastPreemption,
+            lastRelease = lastRelease,
+            lastError = lastError,
+        }
+    end
+
+    local function destroy()
+        if destroyed then
+            return
+        end
+        destroyed = true
+        for owner, state in pairs(featureState) do
+            for reason in pairs(state.pauseReasons) do
+                local feature = adapter(owner)
+                if type(feature.setPaused) == "function" then
+                    pcall(feature.setPaused, reason, false)
+                end
+            end
+            state.pauseReasons = {}
+        end
+        setArenaEventPending(false, "destroy")
+        currentMovementOwner = nil
+        currentPriority = nil
+        log("info", "[Coordinator] destroyed")
+    end
+
+    return {
+        PRIORITY = PRIORITY,
+        requestPriority = requestPriority,
+        releasePriority = releasePriority,
+        acquireMovement = acquireMovement,
+        releaseMovement = releaseMovement,
+        setFeatureEnabled = setFeatureEnabled,
+        setCritical = setCritical,
+        isCritical = isCriticalInternal,
+        isOwnerActive = isOwnerActive,
+        getCurrentOwner = getCurrentOwner,
+        getCurrentPriority = getCurrentPriority,
+        getPendingRequests = getPendingRequests,
+        getPausedFeatures = getPausedFeatures,
+        getStatus = getDebugState,
+        getDebugState = getDebugState,
+        destroy = destroy,
+    }
+end
+
+local globalEnv = (getgenv and getgenv()) or _G
+
+-- PRIORITY kept local
+
+
+-- ========== PRIORITY INTEGRATION ==========
+-- UNO HUB PRIORITY INTEGRATION
+-- Phase 8 thin compatibility bridge. It does not duplicate feature logic.
+
+local function createUNOHubPriorityIntegration(deps)
+    deps = type(deps) == "table" and deps or {}
+    local env = (getgenv and getgenv()) or _G
+    local runtime = deps.runtime or env.UNO_HUB_RUNTIME
+    local coordinatorFactory = deps.coordinatorFactory or env.UNO_EVENT_PRIORITY_COORDINATOR_FACTORY
+    local scheduler = deps.task or task
+    local logger = deps.log or function(level, message)
+        if runtime and runtime.State and runtime.State.log then
+            table.insert(runtime.State.log, 1, {
+                t = os.clock(),
+                level = level,
+                text = tostring(message),
+            })
+        end
+    end
+
+    assert(type(runtime) == "table", "UNOHUB runtime bridge is required")
+    assert(type(coordinatorFactory) == "function", "priority coordinator factory is required")
+
+    local backends = deps.backends or {}
+    local destroyed = false
+    local running = false
+    local workerToken = { cancelled = false }
+    local connections = {}
+    local requestCache = {}
+    local criticalCache = {}
+
+    local function log(level, message)
+        pcall(logger, level, message)
+    end
+
+    local function safeCall(fn, ...)
+        if type(fn) ~= "function" then
+            return false, nil
+        end
+        local ok, result = pcall(fn, ...)
+        return ok, result
+    end
+
+    local function wait(seconds)
+        if scheduler and type(scheduler.wait) == "function" then
+            scheduler.wait(seconds)
+        end
+    end
+
+    local function spawn(fn)
+        if scheduler and type(scheduler.spawn) == "function" then
+            return scheduler.spawn(fn)
+        end
+        return nil
+    end
+
+    local function setMainPause(kind, reason, value)
+        local fn = kind == "HOT_EGG"
+            and runtime.setHotEggCoordinatorPaused
+            or runtime.setNormalFarmCoordinatorPaused
+        if type(fn) == "function" then
+            return pcall(fn, reason, value)
+        end
+        return false
+    end
+
+    local function makeHotEggAdapter()
+        return {
+            setPaused = function(reason, value)
+                setMainPause("HOT_EGG", reason, value)
+            end,
+            cancelMovement = function(byOwner)
+                if type(runtime.cancelMovement) == "function" then
+                    return runtime.cancelMovement(byOwner)
+                end
+                return true
+            end,
+            isCritical = function()
+                return false
+            end,
+        }
+    end
+
+    local function makeNormalFarmAdapter()
+        return {
+            setPaused = function(reason, value)
+                setMainPause("NORMAL_FARM", reason, value)
+            end,
+            cancelMovement = function(byOwner)
+                if type(runtime.cancelMovement) == "function" then
+                    return runtime.cancelMovement(byOwner)
+                end
+                return true
+            end,
+            isCritical = function()
+                return false
+            end,
+        }
+    end
+
+    local function makeEventAdapter()
+        local backend = backends.EVENT_CAPSULE
+        assert(type(backend) == "table", "EVENT_CAPSULE backend is required")
+        return {
+            setPaused = function(reason, value)
+                if type(backend.setPaused) == "function" then
+                    return backend.setPaused(reason, value)
+                end
+                return false
+            end,
+            cancelMovement = function(byOwner)
+                if type(backend.cancelMovement) == "function" then
+                    return backend.cancelMovement("coordinator_preempt:" .. tostring(byOwner))
+                end
+                return false
+            end,
+            isCritical = function()
+                if type(backend.isDepositing) == "function" then
+                    return backend.isDepositing() == true
+                end
+                local status = type(backend.getStatus) == "function" and backend.getStatus() or nil
+                return status == "DEPOSITING" or status == "WAITING_FOR_DEPOSIT_CONFIRMATION"
+            end,
+        }
+    end
+
+    local function makeArenaAdapter()
+        local backend = backends.AUTO_ARENA
+        if type(backend) ~= "table" then
+            return {}
+        end
+        return {
+            setPaused = function(reason, value)
+                if type(backend.setPaused) == "function" then
+                    return backend.setPaused(value == true, reason)
+                end
+                return false
+            end,
+            cancelMovement = function(byOwner)
+                -- Arena cancellation is deliberately not requested for a critical battle.
+                if type(backend.cancelMovement) == "function" then
+                    return backend.cancelMovement(byOwner)
+                end
+                return true
+            end,
+            isCritical = function()
+                if type(backend.isBattling) == "function" then
+                    return backend.isBattling() == true
+                end
+                return false
+            end,
+            setEventPending = function(value, reason)
+                if type(backend.setEventPending) == "function" then
+                    return backend.setEventPending(value == true, reason)
+                end
+                return true
+            end,
+        }
+    end
+
+    local function makeKrakenAdapter()
+        local backend = backends.KRAKEN_EGG
+        if type(backend) ~= "table" then
+            return {}
+        end
+        return {
+            setPaused = function(reason, value)
+                if type(backend.setPaused) == "function" then
+                    return backend.setPaused(reason, value)
+                end
+                return false
+            end,
+            isCritical = function()
+                return false
+            end,
+            cancelMovement = function(byOwner)
+                if type(backend.cancelMovement) == "function" then
+                    return backend.cancelMovement(byOwner)
+                end
+                return true
+            end,
+        }
+    end
+
+    local features = {
+        HOT_EGG = makeHotEggAdapter(),
+        EVENT_CAPSULE = makeEventAdapter(),
+        KRAKEN_EGG = makeKrakenAdapter(),
+        AUTO_ARENA = makeArenaAdapter(),
+        NORMAL_FARM = makeNormalFarmAdapter(),
+    }
+    for _, owner in ipairs({ "HOT_EGG", "EVENT_CAPSULE", "KRAKEN_EGG", "AUTO_ARENA", "NORMAL_FARM" }) do
+        requestCache[owner] = false
+        criticalCache[owner] = false
+    end
+
+    local coordinator = coordinatorFactory({
+        features = features,
+        log = function(level, message)
+            log(level, message)
+        end,
+    })
+
+    local function hotEggRequested()
+        local state = runtime.getHotEggState and runtime.getHotEggState() or runtime.State.hotEgg
+        if type(state) ~= "table" or state.enabled ~= true then
+            return false
+        end
+        if state.eventActive == true or state.holding == true then
+            return true
+        end
+        local phase = state.phase
+        return phase == "EVENT_STARTED" or phase == "SEARCHING_HOT_EGG"
+            or phase == "MOVING_TO_HOT_EGG" or phase == "VERIFYING_PICKUP"
+            or phase == "HOLDING_HOT_EGG" or phase == "EVADING_METEOR"
+            or phase == "METEOR_WARNING" or phase == "EXITING_PIT"
+    end
+
+    local function eventRequested()
+        local backend = backends.EVENT_CAPSULE
+        if type(backend) ~= "table" then return false end
+        local ok, pending = safeCall(backend.getPendingCapsules)
+        if ok and type(pending) == "table" and #pending > 0 then
+            return true
+        end
+        local carryOk, carry = safeCall(backend.getCarryCount)
+        if carryOk and tonumber(carry) and tonumber(carry) > 0 then
+            return true
+        end
+        local statusOk, status = safeCall(backend.getStatus)
+        return statusOk and (status == "RETURNING_TO_RECYCLER"
+            or status == "DEPOSITING"
+            or status == "WAITING_FOR_DEPOSIT_CONFIRMATION")
+    end
+
+    local function krakenRequested()
+        local backend = backends.KRAKEN_EGG
+        if type(backend) ~= "table" then return false end
+        local stateOk, state = safeCall(backend.getKrakenEventState)
+        if not stateOk or type(state) ~= "table" or state.active ~= true then
+            return false
+        end
+        local pendingOk, pending = safeCall(backend.getPendingEggs)
+        return pendingOk and type(pending) == "table" and next(pending) ~= nil
+    end
+
+    local function arenaRequested()
+        local backend = backends.AUTO_ARENA
+        return type(backend) == "table"
+            and type(backend.isEnabled) == "function"
+            and backend.isEnabled() == true
+            and (type(backend.isPaused) ~= "function" or backend.isPaused() == false)
+    end
+
+    local function normalFarmRequested()
+        local state = runtime.getNormalFarmState and runtime.getNormalFarmState() or runtime.State.autoFarmRebirth
+        return type(state) == "table" and state.enabled == true
+    end
+
+    local function syncFeature(owner, requested, critical)
+        requested = requested == true
+        critical = critical == true
+        if requestCache[owner] ~= requested then
+            requestCache[owner] = requested
+            if requested then
+                log("info", "[UNO Integration] request " .. owner)
+                coordinator.requestPriority(owner, nil, { critical = critical })
+            else
+                coordinator.releasePriority(owner)
+            end
+        end
+        if criticalCache[owner] ~= critical then
+            criticalCache[owner] = critical
+            coordinator.setCritical(owner, critical)
+            if owner == "EVENT_CAPSULE" and critical then
+                log("info", "[UNO Integration] EVENT_CAPSULE critical=true deposit")
+            elseif owner == "EVENT_CAPSULE" and not critical then
+                log("info", "[UNO Integration] EVENT_CAPSULE critical=false")
+            elseif owner == "AUTO_ARENA" and critical then
+                log("info", "[UNO Integration] AUTO_ARENA critical=true battle")
+            end
+        end
+    end
+
+    local function sync()
+        syncFeature("HOT_EGG", hotEggRequested(), false)
+        syncFeature("EVENT_CAPSULE", eventRequested(), features.EVENT_CAPSULE.isCritical())
+        syncFeature("KRAKEN_EGG", krakenRequested(), false)
+        local arenaCritical = features.AUTO_ARENA.isCritical()
+        syncFeature("AUTO_ARENA", arenaRequested(), arenaCritical)
+        syncFeature("NORMAL_FARM", normalFarmRequested(), false)
+    end
+
+    local function run()
+        if running then return end
+        running = true
+        spawn(function()
+            while not workerToken.cancelled and not destroyed do
+                local ok, err = pcall(sync)
+                if not ok then
+                    log("warn", "[UNO Integration] sync error: " .. tostring(err))
+                end
+                wait(0.25)
+            end
+            running = false
+        end)
+    end
+
+    local function getState()
+        return coordinator.getDebugState()
+    end
+
+    local function destroy()
+        if destroyed then return end
+        destroyed = true
+        workerToken.cancelled = true
+        for _, connection in ipairs(connections) do
+            pcall(function() connection:Disconnect() end)
+        end
+        table.clear(connections)
+        if coordinator then coordinator.destroy() end
+        if deps.destroyBackends == true then
+            for _, backend in pairs(backends) do
+                if type(backend.destroy) == "function" then pcall(backend.destroy) end
+            end
+        end
+        if env.UNO_HUB_PRIORITY_INTEGRATION == api then
+            env.UNO_HUB_PRIORITY_INTEGRATION = nil
+        end
+    end
+
+    local api = {
+        coordinator = coordinator,
+        backends = backends,
+        run = run,
+        sync = sync,
+        getState = getState,
+        getCoordinator = function() return coordinator end,
+        destroy = destroy,
+    }
+    env.UNO_HUB_PRIORITY_INTEGRATION = api
+    return api
+end
+
+local globalEnv = (getgenv and getgenv()) or _G
+
+-- ========== BOOTSTRAP ==========
+-- UNO HUB PHASE 9 AUTOMATIC RUNTIME BOOTSTRAP
+-- Constructs real backend instances from source-backed game modules.
+-- It never fabricates Arena/Kraken dependencies and never claims runtime PASS.
+
+local env = (getgenv and getgenv()) or _G
+local old = env.UNO_HUB_PHASE9
+if old and type(old.destroy) == "function" then
+    pcall(old.destroy)
+end
+
+local status = "BOOTSTRAPPING"
+local lastError = nil
+local backends = {}
+local integration = nil
+local destroyed = false
+local ownedBackends = {}
+local movementBroker = { integration = nil }
+
+local function log(message)
+    print("[UNO Bootstrap] " .. tostring(message))
+end
+
+local function block(reason)
+    status = "BLOCKED"
+    lastError = tostring(reason)
+    for key, backend in pairs(ownedBackends) do
+        if backend and type(backend.destroy) == "function" then pcall(backend.destroy) end
+        ownedBackends[key] = nil
+    end
+    backends = {}
+    env.UNO_HUB_BACKENDS = nil
+    env.UNO_REAL_BACKENDS = nil
+    log("BLOCKED " .. lastError)
+    print("PHASE 9 BOOTSTRAP: BLOCKED — " .. lastError)
+end
+
+local function safeRequire(instance)
+    if not instance then return nil end
+    local ok, result = pcall(require, instance)
+    return ok and result or nil
+end
+
+local function child(root, name)
+    return root and root:FindFirstChild(name) or nil
+end
+
+local function getRoot()
+    local runtime = env.UNO_HUB_RUNTIME
+    if type(runtime) ~= "table" then
+        return nil, "UNOHUB_PHASE9.lua runtime bridge unavailable"
+    end
+    local services = runtime.Services
+    if type(services) ~= "table" then
+        return nil, "UNOHUB_PHASE9.lua runtime services unavailable"
+    end
+    return {
+        runtime = runtime,
+        Players = services.Players,
+        ReplicatedStorage = services.ReplicatedStorage,
+        Workspace = services.Workspace,
+        CollectionService = services.CollectionService,
+        TweenService = services.TweenService,
+        player = services.Players and services.Players.LocalPlayer,
+    }
+end
+
+local function createTweenMovement(root)
+    local active = nil
+    local serial = 0
+    local function getRootPart()
+        local character = root.player and root.player.Character
+        return character and character:FindFirstChild("HumanoidRootPart")
+    end
+    local function cancel(reason)
+        serial += 1
+        local current = active
+        active = nil
+        if current and current.tween then
+            pcall(function() current.tween:Cancel() end)
+        end
+        return true
+    end
+    local function moveTo(position, options)
+        if typeof(position) ~= "Vector3" then return false end
+        options = type(options) == "table" and options or {}
+        cancel("replace")
+        serial += 1
+        local mySerial = serial
+        local hrp = getRootPart()
+        if not hrp then return false end
+        local distance = (hrp.Position - position).Magnitude
+        local speed = tonumber(options.speed) or 45
+        local duration = math.max(0.05, distance / math.max(1, speed))
+        local tween = root.TweenService:Create(
+            hrp,
+            TweenInfo.new(duration, Enum.EasingStyle.Linear, Enum.EasingDirection.Out),
+            { CFrame = CFrame.new(position + Vector3.new(0, 3, 0)) }
+        )
+        local handle = {
+            completed = false,
+            cancelled = false,
+            done = false,
+            cancel = function(self)
+                if self.cancelled or self.done then return end
+                self.cancelled = true
+                cancel("handle_cancel")
+            end,
+            stop = function(self) self:cancel() end,
+            destroy = function(self) self:cancel() end,
+            isComplete = function(self) return self.completed or self.done end,
+        }
+        active = { tween = tween, handle = handle, serial = mySerial }
+        tween.Completed:Connect(function()
+            if mySerial ~= serial then return end
+            handle.completed = true
+            handle.done = true
+            if active and active.serial == mySerial then active = nil end
+        end)
+        tween:Play()
+        task.spawn(function()
+            while mySerial == serial and not handle.done do
+                if type(options.isCancelled) == "function" then
+                    local ok, cancelled = pcall(options.isCancelled)
+                    if ok and cancelled == true then
+                        handle:cancel()
+                        break
+                    end
+                end
+                task.wait(0.1)
+            end
+        end)
+        return handle
+    end
+    return {
+        moveTo = moveTo,
+        cancelMovement = cancel,
+    }
+end
+
+local function resolveArena(root, modules, remotes, charm)
+    local scripts = root.player and root.player:FindFirstChild("PlayerScripts")
+    local ui = scripts and scripts:FindFirstChild("UI")
+    local ui2d = ui and ui:FindFirstChild("2d")
+    local arenaFolder = ui2d and ui2d:FindFirstChild("Arena")
+    local settingsFolder = ui2d and ui2d:FindFirstChild("Settings")
+    local arenaClient = safeRequire(arenaFolder and arenaFolder:FindFirstChild("ArenaClient"))
+    local arenaState = safeRequire(arenaFolder and arenaFolder:FindFirstChild("ArenaState"))
+    local rankSettings = safeRequire(settingsFolder and settingsFolder:FindFirstChild("ArenaRankSettings"))
+    if not arenaClient then return nil, "ArenaClient source path unresolved" end
+    if not arenaState then return nil, "ArenaState source path unresolved" end
+    if not rankSettings then return nil, "ArenaRankSettings source path unresolved" end
+    if not remotes then return nil, "ReplicatedStorage.Core.Remotes unresolved" end
+    if not charm then return nil, "ReplicatedStorage.Packages.Charm unresolved" end
+    return {
+        ArenaClient = arenaClient,
+        ArenaState = arenaState,
+        ArenaRankSettings = rankSettings,
+        Remotes = remotes,
+        Charm = charm,
+    }
+end
+
+local function resolveKraken(root, modules, remotes)
+    if not remotes or type(remotes.fire) ~= "function" or type(remotes.onClient) ~= "function" then
+        return nil, "ReplicatedStorage.Core.Remotes fire/onClient API unresolved"
+    end
+    if type(remotes.defs) ~= "table" or not remotes.defs.LiveEventClientSignal or not remotes.defs.LiveEventSignal then
+        return nil, "Core.Remotes LiveEventClientSignal/LiveEventSignal definitions unresolved"
+    end
+    local scripts = root.player and root.player:FindFirstChild("PlayerScripts")
+    local features = scripts and scripts:FindFirstChild("Features")
+    local admin = features and features:FindFirstChild("Admin")
+    local controllers = admin and admin:FindFirstChild("controllers")
+    local liveEventController = safeRequire(controllers and controllers:FindFirstChild("LiveEventController"))
+    if not liveEventController then
+        return nil, "PlayerScripts.Features.Admin.controllers.LiveEventController unresolved"
+    end
+    if type(liveEventController.isEventActive) ~= "function" or type(liveEventController.getEventState) ~= "function" then
+        return nil, "LiveEventController isEventActive/getEventState API unresolved"
+    end
+    local function getLandedEggs()
+        local folder = root.Workspace:FindFirstChild("KrakenEggs")
+        local result = {}
+        if not folder then return result end
+        for _, instance in ipairs(folder:GetChildren()) do
+            if instance:IsA("Model") then table.insert(result, instance) end
+        end
+        return result
+    end
+    local function getEggId(instance)
+        return instance and instance:GetAttribute("eggId")
+    end
+    local function getEggPosition(instance)
+        return instance and instance:GetPivot().Position
+    end
+    local function getEggExpiry(instance)
+        -- The official controller keeps expiresAt in the event record and
+        -- schedules despawn there; it does not replicate an expiry attribute
+        -- onto the visual Model. The backend therefore receives nil.
+        return nil
+    end
+    local function isEggReady(instance)
+        local prompt = instance and instance:FindFirstChildWhichIsA("ProximityPrompt", true)
+        return prompt ~= nil and prompt.Enabled == true
+    end
+    local function onLiveEventSignal(callback)
+        return remotes.onClient(remotes.defs.LiveEventSignal, callback)
+    end
+    local function fireClientSignal(payload)
+        return remotes.fire(remotes.defs.LiveEventClientSignal, payload)
+    end
+    local function getPlayerPosition()
+        local character = root.player and root.player.Character
+        local hrp = character and character:FindFirstChild("HumanoidRootPart")
+        return hrp and hrp.Position
+    end
+    return {
+        getKrakenEventState = function()
+            return liveEventController:getEventState("kraken")
+        end,
+        isKrakenActive = function()
+            return liveEventController:isEventActive("kraken")
+        end,
+        getLandedEggs = getLandedEggs,
+        getEggId = getEggId,
+        getEggPosition = getEggPosition,
+        getEggExpiry = getEggExpiry,
+        isEggReady = isEggReady,
+        fireClientSignal = fireClientSignal,
+        onLiveEventSignal = onLiveEventSignal,
+        getPlayerPosition = getPlayerPosition,
+        moveTo = createTweenMovement(root).moveTo,
+    }
+end
+
+local function createBootstrap()
+    local root, rootError = getRoot()
+    if not root then block(rootError) return end
+    status = "RESOLVING_DEPENDENCIES"
+    local integrationModules = root.runtime.Integration and root.runtime.Integration.modules or {}
+    local remotes = integrationModules.Remotes
+        or safeRequire(child(child(root.ReplicatedStorage, "Core"), "Remotes"))
+    local charm = integrationModules.Charm
+        or safeRequire(child(child(root.ReplicatedStorage, "Packages"), "Charm"))
+    local eventFactory = createEventCapsuleCollector
+    local arenaFactory = createAutoArena
+    local krakenFactory = createKrakenEggCollector
+    local integrationFactory = createUNOHubPriorityIntegration
+    if type(eventFactory) ~= "function" then block("Event Capsule factory unavailable") return end
+    if type(arenaFactory) ~= "function" then block("Auto Arena factory unavailable") return end
+    if type(krakenFactory) ~= "function" then block("Kraken factory unavailable") return end
+    if type(integrationFactory) ~= "function" then block("Priority integration factory unavailable") return end
+    status = "CONSTRUCTING_BACKENDS"
+    local tween = createTweenMovement(root)
+    local looseRemotes = child(root.ReplicatedStorage, "Remotes")
+    local scrapDepositedRemote = looseRemotes and looseRemotes:FindFirstChild("ScrapDeposited")
+    local scrapDeposited = scrapDepositedRemote
+    if scrapDepositedRemote and scrapDepositedRemote:IsA("RemoteEvent") then
+        scrapDeposited = scrapDepositedRemote.OnClientEvent
+    end
+    if not scrapDeposited or type(scrapDeposited.Connect) ~= "function" then
+        block("ScrapDeposited client signal unresolved")
+        return
+    end
+    local eventOk, eventBackend = pcall(eventFactory, {
+        player = root.player,
+        workspace = root.Workspace,
+        collectionService = root.CollectionService,
+        scrapDeposited = scrapDeposited,
+        task = task,
+        log = function(level, message) log(message) end,
+        movement = tween,
+        moveTo = tween.moveTo,
+        acquireMovement = function(owner, priority)
+            -- Canonical EVENT_CAPSULE priority is 80. Never accept a lower override (e.g. 50).
+            if not movementBroker.integration then return false end
+            return movementBroker.integration.getCoordinator().acquireMovement("EVENT_CAPSULE", nil)
+        end,
+        releaseMovement = function(owner)
+            if movementBroker.integration then
+                return movementBroker.integration.getCoordinator().releaseMovement("EVENT_CAPSULE")
+            end
+            return false
+        end,
+        maxCarry = 5,
+        movementMode = "Tween",
+        capsuleRetargetInterval = 0.35,
+        capsuleRetargetDistance = 3,
+        capsuleFollowDistance = 3,
+        recyclerFrontDistance = 5,
+        recyclerFrontSign = 1,
+    })
+    if not eventOk or type(eventBackend) ~= "table" then block("Event Capsule construction failed: " .. tostring(eventBackend)) return end
+    backends.EVENT_CAPSULE = eventBackend
+    ownedBackends.EVENT_CAPSULE = eventBackend
+    log("Event Capsule dependencies READY")
+    local arenaDeps, arenaError = resolveArena(root, integrationModules, remotes, charm)
+    if not arenaDeps then block(arenaError) return end
+    local arenaOk, arenaBackend = pcall(arenaFactory, {
+        ArenaClient = arenaDeps.ArenaClient,
+        ArenaState = arenaDeps.ArenaState,
+        ArenaRankSettings = arenaDeps.ArenaRankSettings,
+        Remotes = arenaDeps.Remotes,
+        Charm = arenaDeps.Charm,
+        task = task,
+        log = function(level, message) log(message) end,
+    })
+    if not arenaOk or type(arenaBackend) ~= "table" then block("Auto Arena construction failed: " .. tostring(arenaBackend)) return end
+    backends.AUTO_ARENA = arenaBackend
+    ownedBackends.AUTO_ARENA = arenaBackend
+    log("Arena dependencies READY")
+    local krakenDeps, krakenError = resolveKraken(root, integrationModules, remotes)
+    if not krakenDeps then block(krakenError) return end
+    local krakenOk, krakenBackend = pcall(krakenFactory, krakenDeps)
+    if not krakenOk or type(krakenBackend) ~= "table" then block("Kraken construction failed: " .. tostring(krakenBackend)) return end
+    backends.KRAKEN_EGG = krakenBackend
+    ownedBackends.KRAKEN_EGG = krakenBackend
+    log("Kraken dependencies READY")
+    status = "CONNECTING_PRIORITY"
+    env.UNO_HUB_BACKENDS = backends
+    env.UNO_REAL_BACKENDS = backends
+    local integrationOk, createdIntegration = pcall(integrationFactory, {
+        runtime = root.runtime,
+        backends = backends,
+        coordinatorFactory = createEventPriorityCoordinator,
+        log = function(level, message) log(message) end,
+        destroyBackends = false,
+    })
+    if not integrationOk or type(createdIntegration) ~= "table" then block("Priority integration construction failed: " .. tostring(createdIntegration)) return end
+    integration = createdIntegration
+    movementBroker.integration = integration
+    log("Priority integration READY")
+    integration.run()
+    status = "READY"
+    log("READY")
+    print("[UNO HUB] Core READY")
+    print("[UNO HUB] Event Capsule READY")
+    print("[UNO HUB] Auto Arena READY")
+    print("[UNO HUB] Kraken READY")
+    print("[UNO HUB] Priority Coordinator READY")
+    print("[UNO HUB] Priority Integration READY")
+    print("[UNO HUB] Phase 9 merge READY")
+end
+
+local function destroy()
+    if destroyed then return end
+    destroyed = true
+    if integration and type(integration.destroy) == "function" then pcall(integration.destroy) end
+    integration = nil
+    movementBroker.integration = nil
+    for key, backend in pairs(ownedBackends) do
+        if backend and type(backend.destroy) == "function" then pcall(backend.destroy) end
+        ownedBackends[key] = nil
+    end
+    env.UNO_HUB_BACKENDS = nil
+    env.UNO_REAL_BACKENDS = nil
+    if env.UNO_HUB_PHASE9 == api then env.UNO_HUB_PHASE9 = nil end
+end
+
+local function getBackends()
+    local result = {}
+    for key, backend in pairs(backends) do result[key] = backend end
+    return result
+end
+
+local api = {
+    getStatus = function() return status end,
+    getBackends = getBackends,
+    getIntegration = function() return integration end,
+    getCoordinatorState = function()
+        return integration and integration.getState() or nil
+    end,
+    getLastError = function() return lastError end,
+    setEventCapsuleEnabled = function(value)
+        local backend = backends.EVENT_CAPSULE
+        if not backend or type(backend.setEnabled) ~= "function" then return false end
+        return backend.setEnabled(value == true)
+    end,
+    setAutoArenaEnabled = function(value)
+        local backend = backends.AUTO_ARENA
+        if not backend or type(backend.setAutoArena) ~= "function" then return false end
+        return backend.setAutoArena(value == true)
+    end,
+    setKrakenEnabled = function(value)
+        local backend = backends.KRAKEN_EGG
+        if not backend or type(backend.setEnabled) ~= "function" then return false end
+        return backend.setEnabled(value == true)
+    end,
+    destroy = destroy,
+}
+
+env.UNO_HUB_PHASE9 = api
+env.UNO_HUB = api
+createBootstrap()
+return api
+

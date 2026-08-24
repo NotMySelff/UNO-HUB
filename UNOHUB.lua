@@ -1,5 +1,13 @@
 --[[
-    UNO HUB11
+    UNO HUB FINAL - Phase 9
+    Safe single-file consolidation from the supplied working 01-07 sources.
+
+    IMPORTANT:
+    - One executable file.
+    - Original Phase 9 source order is preserved.
+    - Each former file is isolated in its own lexical function scope.
+    - Factories/APIs communicate through the same getgenv() contracts used by 01-07.
+    - The core publishes UNO_HUB_RUNTIME before Phase 9 bootstrap runs.
 ]]
 
 
@@ -71,52 +79,15 @@ local Theme = {
     Danger = Color3.fromRGB(225, 80, 80),
 }
 
-local function unoAsyncGuard(name, fn, ...)
-    if type(fn) ~= "function" then
-        warn("[UNO ASYNC ERROR] " .. tostring(name) .. " :: callback is nil/non-function")
-        return false, "callback is nil/non-function"
-    end
-
-    local args = table.pack(...)
-    local ok, result = xpcall(function()
-        return fn(table.unpack(args, 1, args.n))
-    end, function(message)
-        local trace = tostring(message)
-        if debug and type(debug.traceback) == "function" then
-            local traceOk, traceValue = pcall(debug.traceback, tostring(message), 2)
-            if traceOk and traceValue then
-                trace = tostring(traceValue)
-            end
-        end
-        return trace
-    end)
-
-    if not ok then
-        warn("[UNO ASYNC ERROR] " .. tostring(name) .. " :: " .. tostring(result))
-    end
-    return ok, result
-end
-
 local Maid = {}
 Maid.__index = Maid
 function Maid.new() return setmetatable({ items = {} }, Maid) end
 function Maid:Give(item) table.insert(self.items, item) return item end
-function Maid:Connect(signal, fn, name)
-    if not signal or type(signal.Connect) ~= "function" then
-        warn("[UNO ASYNC ERROR] " .. tostring(name or "Maid:Connect") .. " :: invalid signal")
-        return nil
-    end
-    local c = signal:Connect(function(...)
-        unoAsyncGuard(name or "Maid:Connect", fn, ...)
-    end)
-    return self:Give(c)
-end
-function Maid:Task(fn, name)
+function Maid:Connect(signal, fn) local c = signal:Connect(fn) return self:Give(c) end
+function Maid:Task(fn)
     local token = { cancelled = false }
     self:Give(function() token.cancelled = true end)
-    task.spawn(function()
-        unoAsyncGuard(name or "Maid:Task", fn, token)
-    end)
+    task.spawn(function() fn(token) end)
     return token
 end
 function Maid:Cleanup()
@@ -227,13 +198,10 @@ local DEFAULT_PROTECTED_NAME = {
 }
 
 local function spawnThread(fn)
-    local wrapped = function()
-        unoAsyncGuard("Performance.spawnThread", fn)
-    end
     if task and type(task.spawn) == "function" then
-        return task.spawn(wrapped)
+        return task.spawn(fn)
     end
-    local co = coroutine.create(wrapped)
+    local co = coroutine.create(fn)
     coroutine.resume(co)
     return co
 end
@@ -768,14 +736,11 @@ local function safeCall(fn, ...)
 end
 
 local function delay(seconds, callback, deps)
-    local wrapped = function(...)
-        unoAsyncGuard("Config.delay", callback, ...)
-    end
-    if deps and type(deps.delay) == "function" then
-        return deps.delay(seconds, wrapped)
+    if type(deps.delay) == "function" then
+        return deps.delay(seconds, callback)
     end
     if task and type(task.delay) == "function" then
-        return task.delay(seconds, wrapped)
+        return task.delay(seconds, callback)
     end
     return nil
 end
@@ -3502,7 +3467,7 @@ local function createAutoHatch(deps)
             feature.selectAllMode = true
         end
         feature.status = "RUNNING"
-        maid:Task(function(token) worker(token, myGen) end, "AutoHatch")
+        maid:Task(function(token) worker(token, myGen) end)
     end
     function feature.getStatus()
         return {
@@ -3568,7 +3533,7 @@ local function createAutoIncubatorClaim(deps)
         local myGen = feature.generation
         if not feature.enabled then feature.status = "DISABLED" return end
         feature.status = "WAITING"
-        maid:Task(function(token) worker(token, myGen) end, "IncubatorClaim")
+        maid:Task(function(token) worker(token, myGen) end)
     end
     function feature.getStatus()
         local inc = getIncubator()
@@ -3786,7 +3751,7 @@ do
         feature.status = "SCANNING"
         maid:Task(function(token)
             worker(token, myGen)
-        end, "IncubatorUpgrade")
+        end)
     end
 
     function feature.getStatus()
@@ -4483,7 +4448,7 @@ local function setAutoHotEgg(on)
     if on then
         HE.generation += 1; HE.endConfirmed = false
         heSetPhase("WAITING_EVENT", "Idle")
-        maid:Task(heTick, "HotEgg")
+        maid:Task(heTick)
     else heSetPhase("DISABLED", "—") end
 end
 
@@ -4642,7 +4607,7 @@ local function setAutoFarmRebirth(on)
         AFR.generation += 1
         afrSetPhase("CHECKING_REBIRTH")
         log("INFO", "Auto Farm Rebirth enabled")
-        maid:Task(afrTick, "AutoFarmRebirth")
+        maid:Task(afrTick)
     else
         afrSetPhase("DISABLED")
         log("INFO", "Auto Farm Rebirth disabled")
@@ -4651,30 +4616,11 @@ end
 
 
 local autoRebirthGeneration = 0
-local AutoRebirthState = {
-    status = "DISABLED",
-    lastError = nil,
-}
-
-local function setAutoRebirthStatus(value, err)
-    AutoRebirthState.status = tostring(value or "IDLE")
-    AutoRebirthState.lastError = err ~= nil and tostring(err) or nil
-end
-
 local function setAutoRebirth(on)
-    on = on == true
-    State.toggles.autoRebirth = on
+    State.toggles.autoRebirth = on == true
     autoRebirthGeneration += 1
     local myGeneration = autoRebirthGeneration
-
-    if not on then
-        setAutoRebirthStatus("DISABLED")
-        log("INFO", "Auto Rebirth disabled")
-        return
-    end
-
-    setAutoRebirthStatus("WAITING READY")
-    log("INFO", "Auto Rebirth enabled")
+    if not State.toggles.autoRebirth then return end
 
     maid:Task(function(token)
         while not token.cancelled
@@ -4682,66 +4628,32 @@ local function setAutoRebirth(on)
             and State.toggles.autoRebirth
             and myGeneration == autoRebirthGeneration do
 
-            -- Auto Farm Rebirth already owns the complete tower/rebirth cycle.
-            if AFR.enabled then
-                setAutoRebirthStatus("MANAGED BY AUTO FARM")
-                task.wait(0.5)
-                continue
-            end
-
-            if next(AFR.coordinatorPauseReasons) ~= nil then
-                setAutoRebirthStatus("PAUSED FOR EVENT")
-                task.wait(0.35)
-                continue
-            end
-
-            refreshData()
-            local before, _, ready = getRebirthInfo()
-
-            if not ready then
-                setAutoRebirthStatus("WAITING READY")
-                task.wait(0.5)
-                continue
-            end
-
-            -- Standalone Auto Rebirth intentionally does NOTHING to Tower.
-            -- It only sends Rebirth when the game reports Rebirth Ready.
-            setAutoRebirthStatus("REBIRTHING")
-            local ok, result = tryInvoke("Rebirth")
-            if not ok then
-                setAutoRebirthStatus("ERROR", result or "Rebirth invoke failed")
-                task.wait(1.5)
-                continue
-            end
-
-            setAutoRebirthStatus("WAITING CONFIRMATION")
-            local beforeCount = tonumber(before) or 0
-            local deadline = os.clock() + 8
-            local confirmed = false
-
-            while os.clock() < deadline
-                and not token.cancelled
-                and State.toggles.autoRebirth
-                and myGeneration == autoRebirthGeneration do
+            -- Auto Farm Rebirth already handles rebirth as part of its own lifecycle.
+            if not AFR.enabled and next(AFR.coordinatorPauseReasons) == nil then
                 refreshData()
-                local after = select(1, getRebirthInfo())
-                if (tonumber(after) or 0) > beforeCount then
-                    State.successfulRebirths += 1
-                    confirmed = true
-                    break
+                local ready = select(3, getRebirthInfo())
+                if ready and not isTowerActive() and not isContinueOpen() then
+                    local before = select(1, getRebirthInfo())
+                    local ok = tryInvoke("Rebirth")
+                    if ok then
+                        local deadline = os.clock() + 7
+                        while os.clock() < deadline
+                            and State.toggles.autoRebirth
+                            and myGeneration == autoRebirthGeneration do
+                            refreshData()
+                            local after = select(1, getRebirthInfo())
+                            if after > before then
+                                State.successfulRebirths += 1
+                                break
+                            end
+                            task.wait(0.35)
+                        end
+                    end
                 end
-                task.wait(0.35)
             end
-
-            if confirmed then
-                setAutoRebirthStatus("REBIRTH CONFIRMED")
-                task.wait(0.8)
-            else
-                setAutoRebirthStatus("ERROR", "Rebirth confirmation timeout")
-                task.wait(1.5)
-            end
+            task.wait(0.8)
         end
-    end, "AutoRebirth")
+    end)
 end
 
 local antiAfkGen = 0
@@ -4755,7 +4667,7 @@ local function setAntiAfk(on)
                 pcall(function() VirtualUser:CaptureController(); VirtualUser:ClickButton2(Vector2.new()) end)
                 task.wait(60)
             end
-        end, "AntiAFK")
+        end)
     end
 end
 
@@ -5757,7 +5669,6 @@ safeBuild("Auto Farm", function()
         end)
     end
     local farmPhaseLabel = row(farmCard, 5, "Farm Status")
-    local autoRebirthStatusLabel = row(farmCard, 6, "Auto Rebirth Status")
 
     -- EVENTS
     local events = tabs.Events
@@ -6004,8 +5915,6 @@ safeBuild("Auto Farm", function()
                 phase = phase .. " (" .. tostring(AFR.countdown) .. "s)"
             end
             setText(farmPhaseLabel, phase)
-            local rebirthStatus = AutoRebirthState and AutoRebirthState.status or "DISABLED"
-            setText(autoRebirthStatusLabel, rebirthStatus)
         end,
     }
 end)
@@ -6958,37 +6867,15 @@ end
 
 maid:Task(function(token)
     while not token.cancelled and not State.closed do
-        local okRefresh, refreshErr = pcall(refreshData)
-        if not okRefresh then
-            warn("[UNO UI ERROR] refreshData :: " .. tostring(refreshErr))
-        end
-
-        local okHazards, hazardErr = pcall(pruneHazards)
-        if not okHazards then
-            warn("[UNO UI ERROR] pruneHazards :: " .. tostring(hazardErr))
-        end
-
-        local okHolding, holding = pcall(isLocalHolding)
-        if okHolding then
-            HE.holding = holding
-        else
-            warn("[UNO UI ERROR] isLocalHolding :: " .. tostring(holding))
-        end
-
-        connDot.BackgroundColor3 = (Integration.modules.DataController or Integration.modules.Remotes)
-            and Theme.Success or Theme.Warning
-
+        refreshData()
+        pruneHazards()
+        HE.holding = isLocalHolding()
+        connDot.BackgroundColor3 = (Integration.modules.DataController or Integration.modules.Remotes) and Theme.Success or Theme.Warning
         local view = Views[State.page]
-        if view and type(view.update) == "function" then
-            local okView, viewErr = pcall(view.update)
-            if not okView then
-                warn("[UNO UI ERROR] page=" .. tostring(State.page) .. " :: " .. tostring(viewErr))
-            end
-        end
-
+        if view and view.update then pcall(view.update) end
         task.wait(0.45)
     end
-end, "UIRefresh")
+end)
 
 
 refreshData()
@@ -10723,7 +10610,6 @@ local __status = __unoEnv.UNO_HUB_PHASE9
 print("[UNO HUB] FINAL MERGE STATUS =", tostring(__status))
 if __status == "READY" then
     print("[UNO HUB] FINAL MERGE READY")
-    print("[UNO HUB] ERROR TRACE SAFE BUILD READY")
 else
     warn("[UNO HUB] FINAL MERGE NOT READY; check [UNO Bootstrap] BLOCKED reason above")
 end

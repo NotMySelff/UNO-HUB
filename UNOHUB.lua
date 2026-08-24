@@ -1,5 +1,13 @@
 --[[
-    UNO HUB0
+    UNO HUB FINAL - Phase 9
+    Safe single-file consolidation from the supplied working 01-07 sources.
+
+    IMPORTANT:
+    - One executable file.
+    - Original Phase 9 source order is preserved.
+    - Each former file is isolated in its own lexical function scope.
+    - Factories/APIs communicate through the same getgenv() contracts used by 01-07.
+    - The core publishes UNO_HUB_RUNTIME before Phase 9 bootstrap runs.
 ]]
 
 

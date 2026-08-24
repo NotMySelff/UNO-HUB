@@ -39,128 +39,32 @@ local PlayerGui = LocalPlayer:WaitForChild("PlayerGui", 8)
 if not PlayerGui then return end
 
 --------------------------------------------------------------------
--- BACKEND ANTI-AFK (getconnections / LocalPlayer.Idled)
--- Hidden from production UI. Not persisted in config.
+-- EXTERNAL ANTI-AFK
+-- Loaded independently from GitHub so a failure here cannot stop UNO HUB.
 --------------------------------------------------------------------
-local AntiAFK = {
-    enabled = false,
-    destroyed = false,
-    generation = 0,
-    disabledConnections = {},
-    tracked = setmetatable({}, { __mode = "k" }),
-    status = "DISABLED",
-    disabledCount = 0,
-}
+task.spawn(function()
+    local ok, err = pcall(function()
+        local source = game:HttpGet("https://raw.githubusercontent.com/NotMySelff/UNO-HUB/refs/heads/main/uno-anti-afik.lua")
+        local chunk, compileErr = loadstring(source)
 
-local function resolveGetConnections()
-    if type(getconnections) == "function" then return getconnections end
-    local env = (getgenv and getgenv()) or _G
-    if type(env) == "table" and type(env.getconnections) == "function" then
-        return env.getconnections
-    end
-    return nil
-end
-
-local function antiAfkScan()
-    if not AntiAFK.enabled or AntiAFK.destroyed then return false end
-    local getConnections = resolveGetConnections()
-    if type(getConnections) ~= "function" then
-        AntiAFK.status = "GETCONNECTIONS UNAVAILABLE"
-        return false
-    end
-    local ok, connections = pcall(getConnections, LocalPlayer.Idled)
-    if not ok or type(connections) ~= "table" then
-        AntiAFK.status = "SCAN FAILED"
-        return false
-    end
-    local disabledThisScan = 0
-    for _, connection in ipairs(connections) do
-        if connection ~= nil and not AntiAFK.tracked[connection] then
-            local disabled = false
-            local okDisable = pcall(function()
-                connection:Disable()
-                disabled = true
-            end)
-            if okDisable and disabled then
-                AntiAFK.tracked[connection] = true
-                table.insert(AntiAFK.disabledConnections, connection)
-                AntiAFK.disabledCount += 1
-                disabledThisScan += 1
-            end
+        if type(chunk) ~= "function" then
+            error("Anti-AFK compile failed: " .. tostring(compileErr))
         end
-    end
-    AntiAFK.status = "ACTIVE"
-    return true, disabledThisScan
-end
 
-local function antiAfkRestoreConnections()
-    for _, connection in ipairs(AntiAFK.disabledConnections) do
-        pcall(function() connection:Enable() end)
-    end
-    table.clear(AntiAFK.disabledConnections)
-    AntiAFK.tracked = setmetatable({}, { __mode = "k" })
-    AntiAFK.disabledCount = 0
-end
+        local result = chunk()
 
-function AntiAFK.enable()
-    if AntiAFK.destroyed then return false, "DESTROYED" end
-    if AntiAFK.enabled then
-        antiAfkScan()
-        return true
-    end
-    AntiAFK.enabled = true
-    AntiAFK.generation += 1
-    local myGeneration = AntiAFK.generation
-    local ok = antiAfkScan()
-    task.spawn(function()
-        while AntiAFK.enabled and not AntiAFK.destroyed and AntiAFK.generation == myGeneration do
-            task.wait(10)
-            if AntiAFK.enabled and not AntiAFK.destroyed and AntiAFK.generation == myGeneration then
-                antiAfkScan()
-            end
+        local env = (getgenv and getgenv()) or _G
+        if type(result) == "table" then
+            env.UNO_ANTI_AFK = result
         end
     end)
-    return ok ~= false
-end
 
-function AntiAFK.disable()
-    if AntiAFK.destroyed then return false end
-    AntiAFK.enabled = false
-    AntiAFK.generation += 1
-    antiAfkRestoreConnections()
-    AntiAFK.status = "DISABLED"
-    return true
-end
-
-function AntiAFK.getStatus()
-    return {
-        enabled = AntiAFK.enabled == true,
-        status = AntiAFK.status,
-        disabledConnections = AntiAFK.disabledCount,
-        getconnectionsAvailable = type(resolveGetConnections()) == "function",
-    }
-end
-
-function AntiAFK.destroy()
-    if AntiAFK.destroyed then return end
-    AntiAFK.disable()
-    AntiAFK.destroyed = true
-    AntiAFK.status = "DESTROYED"
-end
-
-local function setAntiAfk(enabled)
-    if enabled == false then return AntiAFK.disable() end
-    return AntiAFK.enable()
-end
-
-do
-    local env = (getgenv and getgenv()) or _G
-    local oldAntiAFK = env.UNO_HUB_ANTI_AFK
-    if oldAntiAFK and oldAntiAFK ~= AntiAFK and type(oldAntiAFK.destroy) == "function" then
-        pcall(oldAntiAFK.destroy)
+    if ok then
+        print("[UNO HUB] External Anti-AFK loaded")
+    else
+        warn("[UNO HUB] External Anti-AFK failed: " .. tostring(err))
     end
-    env.UNO_HUB_ANTI_AFK = AntiAFK
-end
+end)
 
 do
     local env = (getgenv and getgenv()) or _G
@@ -5507,7 +5411,7 @@ local function shutdown()
     HatchFeature.setAutoHatch(false)
     IncubatorClaimFeature.setAutoIncubatorClaim(false)
     if AutoUpgradeIncubatorFeature then pcall(function() AutoUpgradeIncubatorFeature.setAutoUpgradeIncubator(false) end) end
-    afrCancel(); heCancel(); pcall(function() AntiAFK.destroy() end)
+    afrCancel(); heCancel(); antiAfkGen += 1
     for name in pairs(Economy.generations) do stopEconomy(name) end
     for k in pairs(State.toggles) do State.toggles[k] = false end
     -- 3) restore visuals
@@ -5518,10 +5422,6 @@ local function shutdown()
 end
 minBtn.MouseButton1Click:Connect(function() setVisible(false) end)
 local env = (getgenv and getgenv()) or _G
--- Anti-AFK is backend-only and always enabled for this build.
-State.toggles.antiAfk = true
-pcall(function() AntiAFK.enable() end)
-
 env.UNO_HUB_RUNTIME = {
     State = State,
     Integration = Integration,
@@ -5533,8 +5433,6 @@ env.UNO_HUB_RUNTIME = {
         TweenService = TweenService,
     },
     MovementAdapter = MovementAdapter,
-    AntiAFK = AntiAFK,
-    getAntiAFKStatus = function() return AntiAFK.getStatus() end,
     cancelMovement = cancelMovement,
     moveTo = moveTo,
     setHotEggCoordinatorPaused = function(reason, value)

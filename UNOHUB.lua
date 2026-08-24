@@ -28,7 +28,6 @@ local Players           = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService  = game:GetService("UserInputService")
 local TweenService      = game:GetService("TweenService")
-local VirtualUser       = game:GetService("VirtualUser")
 local Workspace         = game:GetService("Workspace")
 local CollectionService = game:GetService("CollectionService")
 local Lighting          = game:GetService("Lighting")
@@ -4691,22 +4690,6 @@ local function setAutoRebirth(on)
         end
     end)
 end
-
-local antiAfkGen = 0
-local function setAntiAfk(on)
-    State.toggles.antiAfk = on
-    antiAfkGen += 1
-    local my = antiAfkGen
-    if on then
-        maid:Task(function(token)
-            while not token.cancelled and not State.closed and State.toggles.antiAfk and my == antiAfkGen do
-                pcall(function() VirtualUser:CaptureController(); VirtualUser:ClickButton2(Vector2.new()) end)
-                task.wait(60)
-            end
-        end)
-    end
-end
-
 --------------------------------------------------------------------
 -- UI
 --------------------------------------------------------------------
@@ -5052,7 +5035,6 @@ end
 
 -- UNO HUB V2: Anti-AFK is always active and intentionally hidden from UI.
 State.toggles.antiAfk = true
-setAntiAfk(true)
 
 local Gui = Instance.new("ScreenGui")
 Gui.Name = "UNO_HUB"; Gui.ResetOnSpawn = false; Gui.IgnoreGuiInset = true; Gui.DisplayOrder = 50

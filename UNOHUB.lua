@@ -1,5 +1,13 @@
 --[[
-    UNO HUB
+    UNO HUB FINAL - Phase 9
+    Safe single-file consolidation from the supplied working 01-07 sources.
+
+    IMPORTANT:
+    - One executable file.
+    - Original Phase 9 source order is preserved.
+    - Each former file is isolated in its own lexical function scope.
+    - Factories/APIs communicate through the same getgenv() contracts used by 01-07.
+    - The core publishes UNO_HUB_RUNTIME before Phase 9 bootstrap runs.
 ]]
 
 
@@ -4591,23 +4599,151 @@ local function afrTick(token)
     if not AFR.enabled then afrSetPhase("DISABLED") end
 end
 local function setAutoFarmRebirth(on)
+    on = on == true
     State.toggles.autoFarmRebirth = on
     AFR.enabled = on
     afrCancel()
     if on then
         AFR.generation += 1
         afrSetPhase("CHECKING_REBIRTH")
+        log("INFO", "Auto Farm Rebirth enabled")
         maid:Task(afrTick)
-    else afrSetPhase("DISABLED") end
+    else
+        afrSetPhase("DISABLED")
+        log("INFO", "Auto Farm Rebirth disabled")
+    end
 end
 
 
 local autoRebirthGeneration = 0
+local AutoRebirthState = {
+    status = "DISABLED",
+    lastError = nil,
+}
+
+local function setAutoRebirthStatus(value, err)
+    AutoRebirthState.status = tostring(value or "IDLE")
+    if err ~= nil then
+        AutoRebirthState.lastError = tostring(err)
+    end
+end
+
+local function waitStandaloneTowerEnd(myGeneration, timeout)
+    local deadline = os.clock() + (timeout or 10)
+    while os.clock() < deadline
+        and not State.closed
+        and State.toggles.autoRebirth
+        and myGeneration == autoRebirthGeneration do
+        refreshData()
+        if not isTowerActive() then
+            return true
+        end
+        task.wait(0.25)
+    end
+    return not isTowerActive()
+end
+
+local function waitStandaloneContinueClosed(myGeneration, timeout)
+    local deadline = os.clock() + (timeout or 8)
+    while os.clock() < deadline
+        and not State.closed
+        and State.toggles.autoRebirth
+        and myGeneration == autoRebirthGeneration do
+        refreshData()
+        if not isContinueOpen() then
+            return true
+        end
+        task.wait(0.25)
+    end
+    return not isContinueOpen()
+end
+
+local function performStandaloneRebirth(myGeneration)
+    refreshData()
+    local before, _, ready = getRebirthInfo()
+    if not ready then
+        setAutoRebirthStatus("WAITING READY")
+        return false
+    end
+
+    -- Rebirth-ready can happen while Tower is still active.
+    -- Clear Tower/Continue state first, then send the rebirth request.
+    if isTowerActive() then
+        setAutoRebirthStatus("SURRENDERING TOWER")
+        local surrendered = tryInvoke("TowerSurrender")
+        if not surrendered then
+            setAutoRebirthStatus("ERROR", "TowerSurrender failed")
+            return false
+        end
+        setAutoRebirthStatus("WAITING TOWER END")
+        if not waitStandaloneTowerEnd(myGeneration, 10) then
+            setAutoRebirthStatus("ERROR", "Tower did not end")
+            return false
+        end
+    end
+
+    refreshData()
+    if isContinueOpen() then
+        setAutoRebirthStatus("DISMISSING CONTINUE")
+        local declined = tryInvoke("TowerContinueDecline")
+        if not declined then
+            setAutoRebirthStatus("ERROR", "TowerContinueDecline failed")
+            return false
+        end
+        if not waitStandaloneContinueClosed(myGeneration, 8) then
+            setAutoRebirthStatus("ERROR", "Continue offer did not close")
+            return false
+        end
+    end
+
+    refreshData()
+    local current, _, stillReady = getRebirthInfo()
+    if not stillReady then
+        setAutoRebirthStatus("WAITING READY")
+        return false
+    end
+    before = tonumber(current) or tonumber(before) or 0
+
+    setAutoRebirthStatus("REBIRTHING")
+    if not tryInvoke("Rebirth") then
+        setAutoRebirthStatus("ERROR", "Rebirth invoke failed")
+        return false
+    end
+
+    setAutoRebirthStatus("WAITING CONFIRMATION")
+    local deadline = os.clock() + 8
+    while os.clock() < deadline
+        and not State.closed
+        and State.toggles.autoRebirth
+        and myGeneration == autoRebirthGeneration do
+        refreshData()
+        local after = select(1, getRebirthInfo())
+        if (tonumber(after) or 0) > before then
+            State.successfulRebirths += 1
+            setAutoRebirthStatus("REBIRTH CONFIRMED")
+            return true
+        end
+        task.wait(0.35)
+    end
+
+    setAutoRebirthStatus("ERROR", "Rebirth confirmation timeout")
+    return false
+end
+
 local function setAutoRebirth(on)
-    State.toggles.autoRebirth = on == true
+    on = on == true
+    State.toggles.autoRebirth = on
     autoRebirthGeneration += 1
     local myGeneration = autoRebirthGeneration
-    if not State.toggles.autoRebirth then return end
+
+    if not on then
+        setAutoRebirthStatus("DISABLED")
+        log("INFO", "Auto Rebirth disabled")
+        return
+    end
+
+    setAutoRebirthStatus("WAITING READY")
+    log("INFO", "Auto Rebirth enabled")
 
     maid:Task(function(token)
         while not token.cancelled
@@ -4615,30 +4751,30 @@ local function setAutoRebirth(on)
             and State.toggles.autoRebirth
             and myGeneration == autoRebirthGeneration do
 
-            -- Auto Farm Rebirth already handles rebirth as part of its own lifecycle.
-            if not AFR.enabled and next(AFR.coordinatorPauseReasons) == nil then
-                refreshData()
-                local ready = select(3, getRebirthInfo())
-                if ready and not isTowerActive() and not isContinueOpen() then
-                    local before = select(1, getRebirthInfo())
-                    local ok = tryInvoke("Rebirth")
-                    if ok then
-                        local deadline = os.clock() + 7
-                        while os.clock() < deadline
-                            and State.toggles.autoRebirth
-                            and myGeneration == autoRebirthGeneration do
-                            refreshData()
-                            local after = select(1, getRebirthInfo())
-                            if after > before then
-                                State.successfulRebirths += 1
-                                break
-                            end
-                            task.wait(0.35)
-                        end
-                    end
-                end
+            -- Auto Farm Rebirth already contains its own rebirth lifecycle,
+            -- so standalone Auto Rebirth only takes over when AFR is off.
+            if AFR.enabled then
+                setAutoRebirthStatus("MANAGED BY AUTO FARM")
+                task.wait(0.5)
+                continue
             end
-            task.wait(0.8)
+
+            -- Respect higher-priority world events, then retry automatically.
+            if next(AFR.coordinatorPauseReasons) ~= nil then
+                setAutoRebirthStatus("PAUSED FOR EVENT")
+                task.wait(0.35)
+                continue
+            end
+
+            refreshData()
+            local ready = select(3, getRebirthInfo())
+            if ready then
+                performStandaloneRebirth(myGeneration)
+                task.wait(0.8)
+            else
+                setAutoRebirthStatus("WAITING READY")
+                task.wait(0.5)
+            end
         end
     end)
 end
@@ -5655,6 +5791,8 @@ safeBuild("Auto Farm", function()
             AutoCollectEggFeature.setAutoCollectEggs(v)
         end)
     end
+    local farmPhaseLabel = row(farmCard, 5, "Farm Status")
+    local autoRebirthStatusLabel = row(farmCard, 6, "Auto Rebirth Status")
 
     -- EVENTS
     local events = tabs.Events
@@ -5895,8 +6033,14 @@ safeBuild("Auto Farm", function()
     Views["Auto Farm"] = {
         root = root,
         update = function()
-            -- Keep this page intentionally quiet; backend status remains available in logs.
             local _ = getActiveTab()
+            local phase = tostring(AFR.phase or "IDLE")
+            if AFR.countdown and AFR.countdown > 0 then
+                phase = phase .. " (" .. tostring(AFR.countdown) .. "s)"
+            end
+            setText(farmPhaseLabel, phase)
+            local rebirthStatus = AutoRebirthState and AutoRebirthState.status or "DISABLED"
+            setText(autoRebirthStatusLabel, rebirthStatus)
         end,
     }
 end)
@@ -10060,10 +10204,32 @@ local function createUNOHubPriorityIntegration(deps)
 
     local function arenaRequested()
         local backend = backends.AUTO_ARENA
-        return type(backend) == "table"
-            and type(backend.isEnabled) == "function"
-            and backend.isEnabled() == true
-            and (type(backend.isPaused) ~= "function" or backend.isPaused() == false)
+        if type(backend) ~= "table"
+            or type(backend.isEnabled) ~= "function"
+            or backend.isEnabled() ~= true
+            or (type(backend.isPaused) == "function" and backend.isPaused() == true) then
+            return false
+        end
+
+        -- IMPORTANT:
+        -- Auto Arena must NOT permanently starve NORMAL_FARM simply because
+        -- its toggle is enabled. It owns priority only while an Arena action
+        -- is actually in progress / critical.
+        if type(backend.isBattling) == "function" and backend.isBattling() == true then
+            return true
+        end
+
+        local status = type(backend.getStatus) == "function" and tostring(backend.getStatus()) or ""
+        local activeStatus = {
+            ["STARTING BATTLE"] = true,
+            ["BATTLE"] = true,
+            ["WAITING FOR RESULT"] = true,
+            ["SKIPPING"] = true,
+            ["RESULT"] = true,
+            ["RECONCILE"] = true,
+            ["EVENT PENDING"] = true,
+        }
+        return activeStatus[status] == true
     end
 
     local function normalFarmRequested()

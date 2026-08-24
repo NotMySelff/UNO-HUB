@@ -2548,7 +2548,7 @@ local function createAutoFuseChickens(deps)
         protectFavorites = true,
         protectMutated = true,
         abilityWhitelist = fuseCopyMap(DEFAULT_FUSE_ABILITIES),
-        keepCopies = 1,
+        keepCopies = 0,
     }
     local lifecycle = {
         destroyed = false,

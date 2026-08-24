@@ -2543,7 +2543,7 @@ local function createAutoFuseChickens(deps)
     local config = {
         enabled = false,
         dryRun = true,
-        matchMode = "Same Chicken",
+        matchMode = nil,
         selectedRarities = {},
         protectFavorites = true,
         protectMutated = true,
@@ -2755,7 +2755,7 @@ local function createAutoFuseChickens(deps)
                 end
             end
         end
-        local keep = math.max(0, tonumber(config.keepCopies) or 1)
+        local keep = math.max(0, tonumber(config.keepCopies) or 0)
         local candidates = {}
         local reservedThisEvaluation = 0
         for typeId, eligible in pairs(eligibleByType) do
@@ -2807,7 +2807,7 @@ local function createAutoFuseChickens(deps)
         return count
     end
     local function canConsumePairWithKeepCopies(roster, parentA, parentB)
-        local keep = math.max(0, tonumber(config.keepCopies) or 1)
+        local keep = math.max(0, tonumber(config.keepCopies) or 0)
         local counts = {}
         for _, chicken in ipairs(roster.chickens or {}) do
             if chicken and chicken.typeId ~= nil then
@@ -3045,7 +3045,11 @@ local function createAutoFuseChickens(deps)
     end
     local function worker(generation)
         while config.enabled and not lifecycle.destroyed and lifecycle.generation == generation do
-            if selectedRarityCount() == 0 then
+            if config.matchMode ~= "Same Chicken" and config.matchMode ~= "Same Rarity" then
+                stats.reservedKeepCopies = 0
+                setStatus("NO MATCH MODE")
+                fuseWaitFor(0.9, deps)
+            elseif selectedRarityCount() == 0 then
                 stats.reservedKeepCopies = 0
                 setStatus("NO RARITY SELECTED")
                 fuseWaitFor(0.9, deps)
@@ -3116,6 +3120,11 @@ local function createAutoFuseChickens(deps)
     end
     function api.isEnabled() return config.enabled == true end
     function api.setMatchMode(mode)
+        if mode == nil then
+            config.matchMode = nil
+            invalidate()
+            return true
+        end
         if mode ~= "Same Chicken" and mode ~= "Same Rarity" then
             return false, "INVALID MATCH MODE"
         end
@@ -4628,29 +4637,43 @@ local function setAutoRebirth(on)
             and State.toggles.autoRebirth
             and myGeneration == autoRebirthGeneration do
 
-            -- Auto Farm Rebirth already handles rebirth as part of its own lifecycle.
+            -- Standalone Auto Rebirth is intentionally simple:
+            -- when Rebirth is READY, invoke Rebirth directly.
+            -- It NEVER starts Tower, NEVER surrenders Tower,
+            -- and NEVER touches the Continue prompt.
+            --
+            -- If Auto Farm Rebirth is enabled, that feature owns
+            -- the complete Tower/Rebirth lifecycle instead.
             if not AFR.enabled and next(AFR.coordinatorPauseReasons) == nil then
                 refreshData()
-                local ready = select(3, getRebirthInfo())
-                if ready and not isTowerActive() and not isContinueOpen() then
-                    local before = select(1, getRebirthInfo())
+
+                local before, _, ready = getRebirthInfo()
+                if ready then
+                    before = tonumber(before) or 0
+
                     local ok = tryInvoke("Rebirth")
                     if ok then
                         local deadline = os.clock() + 7
                         while os.clock() < deadline
+                            and not token.cancelled
                             and State.toggles.autoRebirth
                             and myGeneration == autoRebirthGeneration do
+
                             refreshData()
                             local after = select(1, getRebirthInfo())
+                            after = tonumber(after) or 0
+
                             if after > before then
                                 State.successfulRebirths += 1
                                 break
                             end
+
                             task.wait(0.35)
                         end
                     end
                 end
             end
+
             task.wait(0.8)
         end
     end)
@@ -4926,19 +4949,25 @@ do
         end, { defaults = { enabled = false, dryRun = true, rarities = {}, protectFavorites = true, protectMutated = true } })
 
         ConfigManager.registerSection("fuse", function()
-            if not AutoFuseFeature then return { enabled = false, dryRun = true, matchMode = "Same Chicken", keepCopies = 1 } end
+            if not AutoFuseFeature then return { enabled = false, dryRun = true, keepCopies = 0 } end
             return {
                 enabled = (AutoFuseFeature.isEnabled and AutoFuseFeature.isEnabled()) or false,
                 dryRun = (AutoFuseFeature.getDryRun and AutoFuseFeature.getDryRun()) ~= false,
-                matchMode = (AutoFuseFeature.getMatchMode and AutoFuseFeature.getMatchMode()) or "Same Chicken",
+                matchMode = (AutoFuseFeature.getMatchMode and AutoFuseFeature.getMatchMode()) or nil,
                 rarities = (AutoFuseFeature.getSelectedRarities and AutoFuseFeature.getSelectedRarities()) or {},
-                keepCopies = (AutoFuseFeature.getKeepCopies and AutoFuseFeature.getKeepCopies()) or 1,
+                keepCopies = (AutoFuseFeature.getKeepCopies and AutoFuseFeature.getKeepCopies()) or 0,
                 protectFavorites = (AutoFuseFeature.getProtectFavorites and AutoFuseFeature.getProtectFavorites()) ~= false,
                 protectMutated = (AutoFuseFeature.getProtectMutated and AutoFuseFeature.getProtectMutated()) ~= false,
             }
         end, function(data)
             if type(data) ~= "table" or not AutoFuseFeature then return end
-            if type(data.matchMode) == "string" and AutoFuseFeature.setMatchMode then pcall(AutoFuseFeature.setMatchMode, data.matchMode) end
+            if AutoFuseFeature.setMatchMode then
+                if data.matchMode == "Same Chicken" or data.matchMode == "Same Rarity" then
+                    pcall(AutoFuseFeature.setMatchMode, data.matchMode)
+                else
+                    pcall(AutoFuseFeature.setMatchMode, nil)
+                end
+            end
             if data.keepCopies ~= nil and AutoFuseFeature.setKeepCopies then pcall(AutoFuseFeature.setKeepCopies, data.keepCopies) end
             if type(data.rarities) == "table" then
                 if AutoFuseFeature.clearRaritySelection then pcall(AutoFuseFeature.clearRaritySelection) end
@@ -4954,7 +4983,7 @@ do
             end
             if data.dryRun ~= nil and AutoFuseFeature.setDryRun then pcall(AutoFuseFeature.setDryRun, data.dryRun == true) end
             if data.enabled ~= nil and AutoFuseFeature.setAutoFuse then pcall(AutoFuseFeature.setAutoFuse, data.enabled == true) end
-        end, { defaults = { enabled = false, dryRun = true, matchMode = "Same Chicken", keepCopies = 1, rarities = {}, protectFavorites = true, protectMutated = true } })
+        end, { defaults = { enabled = false, dryRun = true, keepCopies = 0, rarities = {}, protectFavorites = true, protectMutated = true } })
 
         ConfigManager.registerSection("performance", function()
             if not PerformanceManager then return {} end
@@ -5757,6 +5786,11 @@ safeBuild("Auto Farm", function()
     local fuse = tabs.Fuse
     local _, fuseCard = card(fuse, 1, "Fuse")
     if AutoFuseFeature then
+        pcall(AutoFuseFeature.setAutoFuse, false)
+        pcall(AutoFuseFeature.setMatchMode, nil)
+        pcall(AutoFuseFeature.setKeepCopies, 0)
+        State.toggles.autoFuse = false
+
         -- V2 rule:
         -- Auto Fuse may only be enabled after exactly one match mode is selected.
         -- Same Chicken and Same Rarity behave like an exclusive radio pair.
@@ -5832,6 +5866,7 @@ safeBuild("Auto Farm", function()
                 end
             elseif selectedFuseMode == mode then
                 selectedFuseMode = nil
+                pcall(AutoFuseFeature.setMatchMode, nil)
                 if mode == "Same Chicken" then
                     if setSameChickenVisual then setSameChickenVisual(false, true) end
                 else

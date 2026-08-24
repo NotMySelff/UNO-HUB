@@ -1,16 +1,7 @@
 local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
 
 local LocalPlayer = Players.LocalPlayer
-if not LocalPlayer then
-    return
-end
-
-local env = (getgenv and getgenv()) or _G
-
--- Cleanup versi lama jika re-execute.
-if env.UNO_ANTI_AFK and type(env.UNO_ANTI_AFK.disable) == "function" then
-    pcall(env.UNO_ANTI_AFK.disable)
-end
 
 local AntiAFK = {
     disabledConnections = {},
@@ -19,18 +10,20 @@ local AntiAFK = {
 
 local function disableConnections(signal)
     if type(getconnections) ~= "function" then
-        return false, "getconnections unavailable"
+        return false
     end
 
     local ok, connections = pcall(getconnections, signal)
     if not ok or type(connections) ~= "table" then
-        return false, "failed to read connections"
+        return false
     end
 
     for _, connection in ipairs(connections) do
         pcall(function()
-            connection:Disable()
-            table.insert(AntiAFK.disabledConnections, connection)
+            if connection.Enabled ~= false then
+                connection:Disable()
+                table.insert(AntiAFK.disabledConnections, connection)
+            end
         end)
     end
 
@@ -44,20 +37,16 @@ function AntiAFK.enable()
 
     AntiAFK.enabled = true
 
-    local ok, err = disableConnections(LocalPlayer.Idled)
+    -- Main idle signal
+    disableConnections(LocalPlayer.Idled)
 
-    if ok then
-        print("[UNO AntiAFK] ENABLED")
-    else
-        warn("[UNO AntiAFK] FAILED:", err)
-    end
-
-    return ok
+    print("[UNO HUB] Anti-AFK ENABLED")
+    return true
 end
 
 function AntiAFK.disable()
     if not AntiAFK.enabled then
-        return true
+        return
     end
 
     AntiAFK.enabled = false
@@ -70,20 +59,7 @@ function AntiAFK.disable()
 
     table.clear(AntiAFK.disabledConnections)
 
-    print("[UNO AntiAFK] DISABLED")
-
-    return true
+    print("[UNO HUB] Anti-AFK DISABLED")
 end
-
-function AntiAFK.getStatus()
-    return {
-        enabled = AntiAFK.enabled,
-        disabledConnections = #AntiAFK.disabledConnections,
-    }
-end
-
-env.UNO_ANTI_AFK = AntiAFK
 
 AntiAFK.enable()
-
-return AntiAFK

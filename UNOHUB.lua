@@ -4863,6 +4863,9 @@ do
                 autoUpgradeGenerator = State.toggles.autoUpgradeGenerator == true,
                 autoExpandCoop = State.toggles.autoExpandCoop == true,
                 autoUpgradeRecycler = State.toggles.autoUpgradeRecycler == true,
+                autoEventCapsule = State.toggles.autoEventCapsule == true,
+                autoArena = State.toggles.autoArena == true,
+                autoKraken = State.toggles.autoKraken == true,
             }
         end, function(data)
             if type(data) ~= "table" then return end
@@ -4884,7 +4887,29 @@ do
             applyToggle("autoUpgradeGenerator", setAutoUpgradeGenerator)
             applyToggle("autoExpandCoop", setAutoExpandCoop)
             applyToggle("autoUpgradeRecycler", setAutoUpgradeRecycler)
-        end, { defaults = {} })
+
+            -- Phase 9 backends are constructed later (Stage 07), so restore their
+            -- desired toggle state now and apply it after bootstrap becomes READY.
+            applyToggle("autoEventCapsule")
+            applyToggle("autoArena")
+            applyToggle("autoKraken")
+        end, { defaults = {
+            autoFarmRebirth = false,
+            autoRebirth = false,
+            autoKoDismiss = true,
+            autoCollectEgg = false,
+            autoHotEgg = false,
+            autoHatch = false,
+            autoIncubatorClaim = false,
+            autoUpgradeIncubator = false,
+            autoBuyGenerator = false,
+            autoUpgradeGenerator = false,
+            autoExpandCoop = false,
+            autoUpgradeRecycler = false,
+            autoEventCapsule = false,
+            autoArena = false,
+            autoKraken = false,
+        } })
 
         ConfigManager.registerSection("hotEgg", function()
             return {
@@ -4924,6 +4949,8 @@ do
                 rarities = (AutoSellFeature.getSelectedRarities and AutoSellFeature.getSelectedRarities()) or {},
                 protectFavorites = (AutoSellFeature.getProtectFavorites and AutoSellFeature.getProtectFavorites()) ~= false,
                 protectMutated = (AutoSellFeature.getProtectMutated and AutoSellFeature.getProtectMutated()) ~= false,
+                abilities = (AutoSellFeature.getAbilityWhitelist and AutoSellFeature.getAbilityWhitelist()) or {},
+                maxBatchSize = (AutoSellFeature.getMaxBatchSize and AutoSellFeature.getMaxBatchSize()) or 10,
             }
         end, function(data)
             if type(data) ~= "table" or not AutoSellFeature then return end
@@ -4939,10 +4966,30 @@ do
             if data.protectMutated ~= nil and AutoSellFeature.setProtectMutated then
                 pcall(AutoSellFeature.setProtectMutated, data.protectMutated == true)
             end
+            if type(data.abilities) == "table" then
+                if AutoSellFeature.clearAbilityWhitelist then pcall(AutoSellFeature.clearAbilityWhitelist) end
+                if AutoSellFeature.setAbilityWhitelisted then
+                    for abilityId, enabled in pairs(data.abilities) do
+                        if enabled == true then
+                            pcall(AutoSellFeature.setAbilityWhitelisted, abilityId, true)
+                        end
+                    end
+                end
+            end
+            if data.maxBatchSize ~= nil and AutoSellFeature.setMaxBatchSize then
+                pcall(AutoSellFeature.setMaxBatchSize, data.maxBatchSize)
+            end
             -- Dry run / enabled: ConfigManager.applyDocument already forces safe values when restoreDestructive=false
             if data.dryRun ~= nil and AutoSellFeature.setDryRun then pcall(AutoSellFeature.setDryRun, data.dryRun == true) end
-            if data.enabled ~= nil and AutoSellFeature.setAutoSell then pcall(AutoSellFeature.setAutoSell, data.enabled == true) end
-        end, { defaults = { enabled = false, dryRun = true, rarities = {}, protectFavorites = true, protectMutated = true } })
+            if data.enabled ~= nil and AutoSellFeature.setAutoSell then
+                State.toggles.autoSell = data.enabled == true
+                pcall(AutoSellFeature.setAutoSell, data.enabled == true)
+            end
+        end, { defaults = {
+            enabled = false, dryRun = true, rarities = {},
+            protectFavorites = true, protectMutated = true,
+            abilities = {}, maxBatchSize = 10,
+        } })
 
         ConfigManager.registerSection("fuse", function()
             if not AutoFuseFeature then return { enabled = false, dryRun = true, keepCopies = 0 } end
@@ -4954,6 +5001,7 @@ do
                 keepCopies = (AutoFuseFeature.getKeepCopies and AutoFuseFeature.getKeepCopies()) or 0,
                 protectFavorites = (AutoFuseFeature.getProtectFavorites and AutoFuseFeature.getProtectFavorites()) ~= false,
                 protectMutated = (AutoFuseFeature.getProtectMutated and AutoFuseFeature.getProtectMutated()) ~= false,
+                abilities = (AutoFuseFeature.getAbilityWhitelist and AutoFuseFeature.getAbilityWhitelist()) or {},
             }
         end, function(data)
             if type(data) ~= "table" or not AutoFuseFeature then return end
@@ -4977,9 +5025,26 @@ do
             if data.protectMutated ~= nil and AutoFuseFeature.setProtectMutated then
                 pcall(AutoFuseFeature.setProtectMutated, data.protectMutated == true)
             end
+            if type(data.abilities) == "table" then
+                if AutoFuseFeature.clearAbilityWhitelist then pcall(AutoFuseFeature.clearAbilityWhitelist) end
+                if AutoFuseFeature.setAbilityWhitelisted then
+                    for abilityId, enabled in pairs(data.abilities) do
+                        if enabled == true then
+                            pcall(AutoFuseFeature.setAbilityWhitelisted, abilityId, true)
+                        end
+                    end
+                end
+            end
             if data.dryRun ~= nil and AutoFuseFeature.setDryRun then pcall(AutoFuseFeature.setDryRun, data.dryRun == true) end
-            if data.enabled ~= nil and AutoFuseFeature.setAutoFuse then pcall(AutoFuseFeature.setAutoFuse, data.enabled == true) end
-        end, { defaults = { enabled = false, dryRun = true, keepCopies = 0, rarities = {}, protectFavorites = true, protectMutated = true } })
+            if data.enabled ~= nil and AutoFuseFeature.setAutoFuse then
+                State.toggles.autoFuse = data.enabled == true
+                pcall(AutoFuseFeature.setAutoFuse, data.enabled == true)
+            end
+        end, { defaults = {
+            enabled = false, dryRun = true, keepCopies = 0, rarities = {},
+            protectFavorites = true, protectMutated = true, abilities = {},
+            matchMode = nil,
+        } })
 
         ConfigManager.registerSection("performance", function()
             if not PerformanceManager then return {} end
@@ -5005,6 +5070,55 @@ do
             boostFPS = false, disableVFX = false, disableShadows = false,
             hideOtherPlayers = false, hideOtherChickens = false, whiteScreen = false, ultraPerformance = false,
         } })
+
+
+        -- CONFIG DIRTY HOOKS
+        -- Custom controls (rarity filters, ability filters, fuse mode, keep copies,
+        -- dry-run, etc.) do not all go through settingRow(), so wrap their public
+        -- setters once. During ConfigManager.load(), isApplyingConfig suppresses
+        -- dirty marking to avoid immediately re-saving the file.
+        local function wrapConfigDirty(api, methodName)
+            if type(api) ~= "table" or type(api[methodName]) ~= "function" then return end
+            local marker = "__UNO_CFG_WRAPPED_" .. methodName
+            if api[marker] == true then return end
+            local original = api[methodName]
+            api[methodName] = function(...)
+                local results = table.pack(original(...))
+                markConfigDirty()
+                return table.unpack(results, 1, results.n)
+            end
+            api[marker] = true
+        end
+
+        if AutoSellFeature then
+            for _, methodName in ipairs({
+                "setAutoSell", "setDryRun", "setMaxBatchSize",
+                "setProtectFavorites", "setProtectMutated",
+                "setRaritySelected", "clearRaritySelection", "selectAllRarities",
+                "setAbilityWhitelisted", "clearAbilityWhitelist",
+            }) do
+                wrapConfigDirty(AutoSellFeature, methodName)
+            end
+        end
+
+        if AutoFuseFeature then
+            for _, methodName in ipairs({
+                "setAutoFuse", "setDryRun", "setMatchMode", "setKeepCopies",
+                "setProtectFavorites", "setProtectMutated",
+                "setRaritySelected", "clearRaritySelection", "selectAllRarities",
+                "setAbilityWhitelisted", "clearAbilityWhitelist",
+            }) do
+                wrapConfigDirty(AutoFuseFeature, methodName)
+            end
+        end
+
+        if HatchFeature then
+            for _, methodName in ipairs({
+                "setAutoHatch", "setEggSelected", "clearEggSelection",
+            }) do
+                wrapConfigDirty(HatchFeature, methodName)
+            end
+        end
 
         ConfigManager.registerSection("ui", function()
             return {
@@ -5032,9 +5146,6 @@ if ConfigManager then
     pcall(function() ConfigManager.load() end)
     isApplyingConfig = false
 end
-
--- UNO HUB V2: Anti-AFK is always active and intentionally hidden from UI.
-State.toggles.antiAfk = true
 
 local Gui = Instance.new("ScreenGui")
 Gui.Name = "UNO_HUB"; Gui.ResetOnSpawn = false; Gui.IgnoreGuiInset = true; Gui.DisplayOrder = 50
@@ -10667,6 +10778,27 @@ end
 
 
 local __unoFinalApi = __unoRunStage("07 07_UNO_HUB_PHASE9_BOOTSTRAP(1).lua", __unoStage07)
+
+-- Restore Phase 9 event toggles only after the Phase 9 backends exist.
+do
+    local env = (getgenv and getgenv()) or _G
+    local runtime = env.UNO_HUB_RUNTIME
+    local phase9 = env.UNO_HUB_PHASE9
+    local toggles = runtime and runtime.State and runtime.State.toggles
+
+    if type(phase9) == "table" and type(toggles) == "table" then
+        if toggles.autoEventCapsule == true and type(phase9.setEventCapsuleEnabled) == "function" then
+            pcall(phase9.setEventCapsuleEnabled, true)
+        end
+        if toggles.autoArena == true and type(phase9.setAutoArenaEnabled) == "function" then
+            pcall(phase9.setAutoArenaEnabled, true)
+        end
+        if toggles.autoKraken == true and type(phase9.setKrakenEnabled) == "function" then
+            pcall(phase9.setKrakenEnabled, true)
+        end
+    end
+end
+
 
 
 local __unoEnv = (getgenv and getgenv()) or _G

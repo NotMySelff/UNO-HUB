@@ -1,5 +1,5 @@
 --[[
-    UNO HUB1
+    UNO HUB
 ]]
 
 
@@ -10275,20 +10275,14 @@ end
 __unoRunStage("06 06_UNO_HUB_PRIORITY_INTEGRATION_PHASE9(1).lua", __unoStage06)
 
 
-local function __unoStage07()
--- Embedded Auto UFO factory (no extra runtime stage)
--- UNO HUB — AUTO UFO ASCENSION
--- Dependency-injected backend. No module requiring, broad scanning, product purchase,
--- eligibility bypass, or UI clicking is performed here.
-
-local PRIORITY = 75
-local GENE_KEYS = { "vigor", "furia", "velocidad", "impetu", "fertility" }
-local DEFAULT_CAPS = {
-    common = 8, uncommon = 12, rare = 16, epic = 20, legendary = 24,
-    mythic = 27, divine = 29, celestial = 30, cosmic = 31, secret = 31,
-}
-
+-- AUTO UFO ASCENSION FACTORY (split out of Stage 07 to avoid Luau local-register overflow)
 local function createAutoUFOAscension(deps)
+    local PRIORITY = 75
+    local GENE_KEYS = { "vigor", "furia", "velocidad", "impetu", "fertility" }
+    local DEFAULT_CAPS = {
+        common = 8, uncommon = 12, rare = 16, epic = 20, legendary = 24,
+        mythic = 27, divine = 29, celestial = 30, cosmic = 31, secret = 31,
+    }
     deps = type(deps) == "table" and deps or {}
     local schedule = deps.task or task
     local logger = deps.log
@@ -10535,6 +10529,7 @@ local function createAutoUFOAscension(deps)
     }
 end
 
+local function __unoStage07()
 -- UNO HUB PHASE 9 AUTOMATIC RUNTIME BOOTSTRAP
 -- Constructs real backend instances from source-backed game modules.
 -- It never fabricates Arena/Kraken dependencies and never claims runtime PASS.

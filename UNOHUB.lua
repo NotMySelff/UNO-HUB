@@ -1,13 +1,5 @@
 --[[
-    UNO HUB FINAL - Phase 9
-    Safe single-file consolidation from the supplied working 01-07 sources.
-
-    IMPORTANT:
-    - One executable file.
-    - Original Phase 9 source order is preserved.
-    - Each former file is isolated in its own lexical function scope.
-    - Factories/APIs communicate through the same getgenv() contracts used by 01-07.
-    - The core publishes UNO_HUB_RUNTIME before Phase 9 bootstrap runs.
+    UNO HUB
 ]]
 
 
@@ -4506,6 +4498,11 @@ local function requestDecline(myGen)
     AFR.declineInFlight = false
     return not isContinueOpen()
 end
+local function isLocalPlayerInsidePit()
+    local hrp = getHRP()
+    return hrp ~= nil and isInsidePit(hrp.Position)
+end
+
 local function requestRebirth(myGen)
     afrSetPhase("REBIRTH_REQUESTED")
     refreshData()
@@ -4524,19 +4521,21 @@ end
 local function afrTick(token)
     local myGen = AFR.generation
         while not token.cancelled and not State.closed and AFR.enabled and myGen == AFR.generation do
+        -- These event collectors only need PLAYER movement priority.
+        -- They must not pause pet-side NORMAL_FARM.
+        AFR.coordinatorPauseReasons["COORDINATOR_OWNER:HOT_EGG"] = nil
+        AFR.coordinatorPauseReasons["COORDINATOR_OWNER:EVENT_CAPSULE"] = nil
+        AFR.coordinatorPauseReasons["COORDINATOR_OWNER:KRAKEN_EGG"] = nil
+
         if next(AFR.coordinatorPauseReasons) ~= nil then
             afrSetPhase("PAUSED_FOR_EVENT", "Coordinator")
             task.wait(0.35)
             continue
+        elseif AFR.phase == "PAUSED_FOR_EVENT" then
+            afrSetPhase("CHECKING_REBIRTH")
         end
-        if State.movementOwner == "AUTO_HOT_EGG" or State.movementOwner == "METEOR_AVOIDANCE" or State.movementOwner == "PIT_EXIT" then
-
-            task.wait(0.35) continue
-        end
-        if State.hotEgg.enabled and State.hotEgg.eventActive and not State.hotEgg.endConfirmed
-            and State.hotEgg.phase ~= "COMPLETE" and State.hotEgg.phase ~= "DISABLED" and State.hotEgg.phase ~= "WAITING_EVENT" then
-            task.wait(0.35) continue
-        end
+        -- World events may move the player, but pet-side farm/tower logic
+        -- continues. Only the actual Rebirth action is deferred while in Pit.
         refreshData()
         local ready = select(3, getRebirthInfo())
         if isContinueOpen() then
@@ -4560,6 +4559,16 @@ local function afrTick(token)
         end
         if ready then
             afrSetPhase("REBIRTH_READY")
+
+            -- Rebirth cannot complete while the player is inside the event Pit.
+            -- Do NOT stop pet farming; just defer the rebirth transaction until
+            -- Hot Egg / Event Capsule returns the player outside.
+            if isLocalPlayerInsidePit() then
+                afrSetPhase("WAITING_EXIT_PIT_FOR_REBIRTH")
+                task.wait(0.35)
+                continue
+            end
+
             if isTowerActive() then requestSurrender(myGen) end
             if isContinueOpen() and State.toggles.autoKoDismiss then requestDecline(myGen) end
             if isTowerActive() then waitTowerEnd(myGen, 8) end
@@ -4649,8 +4658,12 @@ local function setAutoRebirth(on)
 
                 local before, _, ready = getRebirthInfo()
                 if ready then
-                    before = tonumber(before) or 0
+                    if isLocalPlayerInsidePit() then
+                        task.wait(0.35)
+                        continue
+                    end
 
+                    before = tonumber(before) or 0
                     local ok = tryInvoke("Rebirth")
                     if ok then
                         local deadline = os.clock() + 7
@@ -9581,29 +9594,44 @@ local function createEventPriorityCoordinator(deps)
     local arbitrate
 
     local function syncPauses()
+        local coordinatorPrefix = "COORDINATOR_OWNER:"
+
         if not currentMovementOwner then
             for owner, state in pairs(featureState) do
-                for reason in pairs(state.pauseReasons) do
-                    if string.sub(reason, 1, 17) == "COORDINATOR_OWNER:" then
-                        setFeaturePaused(owner, reason, false)
-                    end
-                end
-            end
-            return
-        end
-        local ownerState = ensureFeature(currentMovementOwner, currentPriority)
-        for owner, state in pairs(featureState) do
-            if owner ~= currentMovementOwner then
-                local desiredReason = "COORDINATOR_OWNER:" .. currentMovementOwner
                 local staleReasons = {}
                 for reason in pairs(state.pauseReasons) do
-                    if string.sub(reason, 1, 18) == "COORDINATOR_OWNER:" and reason ~= desiredReason then
+                    if string.sub(reason, 1, #coordinatorPrefix) == coordinatorPrefix then
                         table.insert(staleReasons, reason)
                     end
                 end
                 for _, reason in ipairs(staleReasons) do
                     setFeaturePaused(owner, reason, false)
                 end
+            end
+            return
+        end
+
+        local ownerState = ensureFeature(currentMovementOwner, currentPriority)
+
+        for owner, state in pairs(featureState) do
+            local desiredReason = owner ~= currentMovementOwner
+                and (coordinatorPrefix .. currentMovementOwner)
+                or nil
+
+            -- Clear stale coordinator pauses from ALL features, including
+            -- the feature that just became the current owner.
+            local staleReasons = {}
+            for reason in pairs(state.pauseReasons) do
+                if string.sub(reason, 1, #coordinatorPrefix) == coordinatorPrefix
+                    and reason ~= desiredReason then
+                    table.insert(staleReasons, reason)
+                end
+            end
+            for _, reason in ipairs(staleReasons) do
+                setFeaturePaused(owner, reason, false)
+            end
+
+            if owner ~= currentMovementOwner then
                 if state.priority < ownerState.priority then
                     setFeaturePaused(owner, desiredReason, true)
                 else
@@ -9951,9 +9979,27 @@ local function createUNOHubPriorityIntegration(deps)
     local function makeNormalFarmAdapter()
         return {
             setPaused = function(reason, value)
-                setMainPause("NORMAL_FARM", reason, value)
+                local reasonText = tostring(reason or "")
+
+                -- NORMAL_FARM is pet-side automation. These world-event owners
+                -- move the PLAYER, so they may coexist with pet farming.
+                if reasonText == "COORDINATOR_OWNER:HOT_EGG"
+                    or reasonText == "COORDINATOR_OWNER:EVENT_CAPSULE"
+                    or reasonText == "COORDINATOR_OWNER:KRAKEN_EGG" then
+                    setMainPause("NORMAL_FARM", reasonText, false)
+                    return true
+                end
+
+                return setMainPause("NORMAL_FARM", reasonText, value)
             end,
             cancelMovement = function(byOwner)
+                -- Do not cancel NORMAL_FARM just because a player-movement event
+                -- took priority. Pet-side farm can continue independently.
+                if byOwner == "HOT_EGG"
+                    or byOwner == "EVENT_CAPSULE"
+                    or byOwner == "KRAKEN_EGG" then
+                    return true
+                end
                 if type(runtime.cancelMovement) == "function" then
                     return runtime.cancelMovement(byOwner)
                 end
@@ -10086,18 +10132,27 @@ local function createUNOHubPriorityIntegration(deps)
     local function eventRequested()
         local backend = backends.EVENT_CAPSULE
         if type(backend) ~= "table" then return false end
+
+        -- UPCOMING countdown / toggle enabled alone must NOT pause NORMAL_FARM.
+        -- Request priority only when there is real capsule work.
         local ok, pending = safeCall(backend.getPendingCapsules)
         if ok and type(pending) == "table" and #pending > 0 then
             return true
         end
-        local carryOk, carry = safeCall(backend.getCarryCount)
-        if carryOk and tonumber(carry) and tonumber(carry) > 0 then
-            return true
-        end
+
         local statusOk, status = safeCall(backend.getStatus)
-        return statusOk and (status == "RETURNING_TO_RECYCLER"
-            or status == "DEPOSITING"
-            or status == "WAITING_FOR_DEPOSIT_CONFIRMATION")
+        if not statusOk then return false end
+
+        local activeStatus = {
+            ["TARGET_READY"] = true,
+            ["MOVING_TO_CAPSULE"] = true,
+            ["WAITING_FOR_PICKUP_CONFIRMATION"] = true,
+            ["RETURNING_TO_RECYCLER"] = true,
+            ["FORCE_DEPOSIT"] = true,
+            ["DEPOSITING"] = true,
+            ["WAITING_FOR_DEPOSIT_CONFIRMATION"] = true,
+        }
+        return activeStatus[tostring(status)] == true
     end
 
     local function krakenRequested()

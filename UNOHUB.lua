@@ -1,5 +1,5 @@
 --[[
-    UNO HUB1
+    UNO HUB
 ]]
 
 
@@ -5452,6 +5452,13 @@ env.UNO_HUB_RUNTIME = {
     setAutoFarmRebirth = setAutoFarmRebirth,
     getHotEggState = function() return HE end,
     getNormalFarmState = function() return AFR end,
+    isTowerActive = isTowerActive,
+    requestTowerSurrender = function()
+        return requestSurrender(AFR.generation)
+    end,
+    isTowerExited = function()
+        return not isTowerActive()
+    end,
     shutdown = shutdown,
 }
 closeBtn.MouseButton1Click:Connect(shutdown)
@@ -9557,6 +9564,7 @@ local function __unoStage05()
 local PRIORITY = {
     HOT_EGG = 100,
     EVENT_CAPSULE = 80,
+    UFO_ASCENSION = 75,
     KRAKEN_EGG = 70,
     AUTO_ARENA = 40,
     NORMAL_FARM = 10,
@@ -9565,6 +9573,7 @@ local PRIORITY = {
 local DEFAULT_FEATURES = {
     "HOT_EGG",
     "EVENT_CAPSULE",
+    "UFO_ASCENSION",
     "KRAKEN_EGG",
     "AUTO_ARENA",
     "NORMAL_FARM",
@@ -10232,14 +10241,40 @@ local function createUNOHubPriorityIntegration(deps)
         }
     end
 
+    local function getUFOBackend()
+        local candidate = backends.UFO_ASCENSION or env.UNO_UFO_ASCENSION
+        return type(candidate) == "table" and candidate or nil
+    end
+
+    local function makeUFOAdapter()
+        return {
+            setPaused = function(reason, value)
+                -- V3.2 standalone has no coordinator pause API.
+                -- Higher-priority owners can still preempt movement ownership;
+                -- UFO itself only performs pet order actions.
+                return true
+            end,
+            cancelMovement = function(byOwner)
+                return true
+            end,
+            isCritical = function()
+                local backend = getUFOBackend()
+                if not backend or type(backend.getStatus) ~= "function" then return false end
+                local ok, snapshot = pcall(backend.getStatus)
+                return ok and type(snapshot) == "table" and snapshot.recoveryInProgress == true
+            end,
+        }
+    end
+
     local features = {
         HOT_EGG = makeHotEggAdapter(),
         EVENT_CAPSULE = makeEventAdapter(),
+        UFO_ASCENSION = makeUFOAdapter(),
         KRAKEN_EGG = makeKrakenAdapter(),
         AUTO_ARENA = makeArenaAdapter(),
         NORMAL_FARM = makeNormalFarmAdapter(),
     }
-    for _, owner in ipairs({ "HOT_EGG", "EVENT_CAPSULE", "KRAKEN_EGG", "AUTO_ARENA", "NORMAL_FARM" }) do
+    for _, owner in ipairs({ "HOT_EGG", "EVENT_CAPSULE", "UFO_ASCENSION", "KRAKEN_EGG", "AUTO_ARENA", "NORMAL_FARM" }) do
         requestCache[owner] = false
         criticalCache[owner] = false
     end
@@ -10301,6 +10336,14 @@ local function createUNOHubPriorityIntegration(deps)
         end
         local pendingOk, pending = safeCall(backend.getPendingEggs)
         return pendingOk and type(pending) == "table" and next(pending) ~= nil
+    end
+
+    local function ufoRequested()
+        local backend = getUFOBackend()
+        if not backend or type(backend.getStatus) ~= "function" then return false end
+        local ok, snapshot = pcall(backend.getStatus)
+        if not ok or type(snapshot) ~= "table" or snapshot.enabled ~= true then return false end
+        return snapshot.ufoActive == true or snapshot.recoveryInProgress == true
     end
 
     local function arenaRequested()
@@ -10366,6 +10409,7 @@ local function createUNOHubPriorityIntegration(deps)
     local function sync()
         syncFeature("HOT_EGG", hotEggRequested(), false)
         syncFeature("EVENT_CAPSULE", eventRequested(), features.EVENT_CAPSULE.isCritical())
+        syncFeature("UFO_ASCENSION", ufoRequested(), features.UFO_ASCENSION.isCritical())
         syncFeature("KRAKEN_EGG", krakenRequested(), false)
         local arenaCritical = features.AUTO_ARENA.isCritical()
         syncFeature("AUTO_ARENA", arenaRequested(), arenaCritical)
@@ -11246,6 +11290,17 @@ function api.disable()
     return true
 end
 
+function api.setEnabled(value)
+    if value == true then
+        return api.enable()
+    end
+    return api.disable()
+end
+
+function api.isEnabled()
+    return state.enabled == true and not destroyed
+end
+
 function api.getStatus()
     return cloneTable(state)
 end
@@ -11419,7 +11474,24 @@ end
 
 env.UNO_UFO_ASCENSION = api
 
-log("STANDALONE V3.1 START")
+do
+    local runtime = env.UNO_HUB_RUNTIME
+    if type(runtime) == "table" then
+        api.setTowerHooks({
+            isTowerActive = function()
+                return type(runtime.isTowerActive) == "function" and runtime.isTowerActive() == true
+            end,
+            isTowerExited = function()
+                return type(runtime.isTowerExited) == "function" and runtime.isTowerExited() == true
+            end,
+            surrender = function()
+                return type(runtime.requestTowerSurrender) == "function" and runtime.requestTowerSurrender() or false
+            end,
+        })
+    end
+end
+
+log("STANDALONE V3.2 START")
 log("resolving dependencies...")
 log("LiveEventController = " .. (LiveEventController and "READY" or "MISSING"))
 log("ChickenController = " .. (ChickenController and type(ChickenController.setOrder) == "function" and "READY" or "MISSING"))
@@ -11431,7 +11503,7 @@ if not dependencyReady() then
 else
     setState("WAITING_FOR_UFO")
 end
-log("STANDALONE V3.1 READY")
+log("STANDALONE V3.2 READY")
 
 return api
 

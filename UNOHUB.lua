@@ -131,6 +131,12 @@ local State = {
         surrenderInFlight = false, declineInFlight = false,
         coordinatorPauseReasons = {},
     },
+    ufoAscension = {
+        enabled = false, phase = "DISABLED", status = "Disabled", targetId = nil, targetName = "Equipped Chicken",
+        rarity = nil, geneCap = nil, genome = nil, genesMax = false, ufoActive = false,
+        cycleCount = 0, recoveryInProgress = false, recoveryAttempted = false, recoveryConfirmed = nil,
+        lastGeneChange = nil, lastError = nil, generation = 0,
+    },
     hotEgg = {
         enabled = false, phase = "DISABLED", generation = 0, movementMode = "Tween",
         meteorAvoidance = true, safetyMargin = 6, exitPitAfter = true,
@@ -148,7 +154,7 @@ local State = {
     },
     movementOwner = "NONE",
     toggles = {
-        autoFarmRebirth = false, autoKoDismiss = true, autoHatch = false, autoCollectEgg = false,
+        autoFarmRebirth = false, autoKoDismiss = true, autoHatch = false, autoCollectEgg = false, autoUFOAscension = false,
         autoIncubatorClaim = false, autoSell = false, autoFuse = false,
         autoBuyGenerator = false, autoUpgradeGenerator = false, autoExpandCoop = false, autoUpgradeRecycler = false, autoUpgradeIncubator = false,
         antiAfk = true, autoRebirth = false, autoHotEgg = false, autoArena = false, autoEventCapsule = false, autoKraken = false, showFloatingButton = true, reducedMotion = false,
@@ -4894,6 +4900,7 @@ do
                 autoEventCapsule = State.toggles.autoEventCapsule == true,
                 autoArena = State.toggles.autoArena == true,
                 autoKraken = State.toggles.autoKraken == true,
+                autoUFOAscension = State.toggles.autoUFOAscension == true,
             }
         end, function(data)
             if type(data) ~= "table" then return end
@@ -4921,6 +4928,7 @@ do
             applyToggle("autoEventCapsule")
             applyToggle("autoArena")
             applyToggle("autoKraken")
+            applyToggle("autoUFOAscension")
         end, { defaults = {
             autoFarmRebirth = false,
             autoRebirth = false,
@@ -4937,6 +4945,7 @@ do
             autoEventCapsule = false,
             autoArena = false,
             autoKraken = false,
+            autoUFOAscension = false,
         } })
 
         ConfigManager.registerSection("hotEgg", function()
@@ -5840,6 +5849,15 @@ safeBuild("Auto Farm", function()
     settingRow(eventCard, 2, "Event Capsule", nil, "autoEventCapsule", setEventCapsulePhase9)
     settingRow(eventCard, 3, "Auto Kraken Eggs", nil, "autoKraken", setKrakenPhase9)
     settingRow(eventCard, 4, "Auto Arena", nil, "autoArena", setAutoArenaPhase9)
+    local _, ufoCard = card(events, 2, "UFO Ascension", "Equipped Chicken • Until Max Genes")
+    settingRow(ufoCard, 1, "Auto UFO Ascension", nil, "autoUFOAscension", function(v)
+        local env = (getgenv and getgenv()) or _G
+        local phase9 = env.UNO_HUB_PHASE9
+        if phase9 and type(phase9.setUFOAscensionEnabled) == "function" then pcall(phase9.setUFOAscensionEnabled, v == true) end
+    end)
+    local ufoTarget = row(ufoCard, 2, "Chicken")
+    local ufoStatus = row(ufoCard, 3, "Status")
+    local ufoGenes = row(ufoCard, 4, "Genes")
 
     -- INCUBATOR
     local incubator = tabs.Incubator
@@ -6084,6 +6102,15 @@ safeBuild("Auto Farm", function()
                 phase = phase .. " (" .. tostring(AFR.countdown) .. "s)"
             end
             setText(farmPhaseLabel, phase)
+            local env = (getgenv and getgenv()) or _G
+            local phase9 = env.UNO_HUB_PHASE9
+            local us = phase9 and type(phase9.getUFOAscensionState) == "function" and phase9.getUFOAscensionState() or nil
+            if type(us) == "table" then
+                setText(ufoStatus, us.status or us.phase or "Waiting for UFO")
+                setText(ufoTarget, us.targetName or "Equipped Chicken")
+                local g = us.genome or {}; local c = us.geneCap or "—"
+                setText(ufoGenes, string.format("HP %s/%s ATK %s/%s SPD %s/%s PWR %s/%s EGG %s/%s", tostring(g.vigor or "—"), tostring(c), tostring(g.furia or "—"), tostring(c), tostring(g.velocidad or "—"), tostring(c), tostring(g.impetu or "—"), tostring(c), tostring(g.fertility or "—"), tostring(c)))
+            end
         end,
     }
 end)
@@ -7098,6 +7125,12 @@ do
         setAutoRebirth = setAutoRebirth,
         getHotEggState = function() return HE end,
         getNormalFarmState = function() return AFR end,
+        isTowerActive = isTowerActive,
+        requestTowerSurrender = function() return requestSurrender(AFR.generation) end,
+        markConfigDirty = markConfigDirty,
+        isTowerActive = isTowerActive,
+        requestTowerSurrender = function() return requestSurrender(AFR.generation) end,
+        markConfigDirty = markConfigDirty,
         shutdown = shutdown,
     }
     print("[UNO HUB] Core runtime bridge READY")
@@ -9533,6 +9566,233 @@ end
 __unoRunStage("04 04_UNO_HUB_KRAKEN_EGG_COLLECTOR_PHASE9(1).lua", __unoStage04)
 
 
+local function __unoStageUFO()
+
+local function createUFOAscensionFeature(deps)
+    deps = type(deps) == "table" and deps or {}
+    local taskLib = deps.task or task
+    local state = deps.state or {}
+    local destroyed, enabled, paused, running = false, false, false, false
+    local token = 0
+    local mutationConnection = nil
+    local currentTargetId, requestTargetId = nil, nil
+    local beforeGenome, mutationPayload = nil, nil
+    local sentToChaos, cycleComplete = false, false
+    local chaosSentAt, mutationDeadline, nextCycleAt = nil, nil, nil
+    local recoveryInProgress, recoveryAttempted, recoveryConfirmed = false, false, nil
+    local ufoActive = false
+    local status = "DISABLED"
+    local cycleCount = 0
+    local lastGeneChange, lastError = nil, nil
+    local rarity, cap, genome, targetName = nil, nil, nil, "Equipped Chicken"
+    local stopCurrentEvent = false
+    local GENE_KEYS = {"vigor", "furia", "velocidad", "impetu", "fertility"}
+    local LABELS = {vigor="HP", furia="ATK", velocidad="SPD", impetu="PWR", fertility="EGG"}
+    local CAPS = {common=8, uncommon=12, rare=16, epic=20, legendary=24, mythic=27, divine=29, celestial=30, cosmic=31, secret=31}
+    local function log(msg) if type(deps.log) == "function" then pcall(deps.log, "UFO", msg) end end
+    local function setStatus(v) status=v; state.ufoAscension=state.ufoAscension or {}; state.ufoAscension.phase=v; state.ufoAscension.status=v end
+    local function active()
+        local c=deps.liveEventController
+        if not c or type(c.isEventActive)~="function" then lastError="LiveEventController unavailable"; return nil end
+        local ok,v=pcall(function() return c:isEventActive("ufo") end)
+        if not ok then lastError=tostring(v); return nil end
+        return v==true
+    end
+    local function roster()
+        if type(deps.dataController)~="table" or type(deps.dataController.roster)~="function" then return nil end
+        local ok,v=pcall(deps.dataController.roster)
+        return ok and type(v)=="table" and v or nil
+    end
+    local function target()
+        local r=roster()
+        if not r or r.activeId==nil or type(r.chickens)~="table" then return nil end
+        local id=tostring(r.activeId)
+        for _,c in pairs(r.chickens) do
+            if type(c)=="table" and tostring(c.id)==id then return c,r end
+        end
+    end
+    local function genes(c)
+        if type(c)~="table" or type(c.genome)~="table" then return nil end
+        local g={}
+        for _,k in ipairs(GENE_KEYS) do g[k]=tonumber(c.genome[k]) or c.genome[k] end
+        return g
+    end
+    local function getRarity(c)
+        local r=type(c)=="table" and c.rarity
+        if type(r)=="table" then r=r.id or r.name or r.key end
+        return r
+    end
+    local function setSnapshot(c)
+        genome=genes(c); rarity=getRarity(c); cap=CAPS[string.lower(tostring(rarity or ""))]
+        targetName=c and (c.name or c.displayName or c.type) or "Equipped Chicken"
+        local max=true
+        if not cap or not genome then max=false else
+            for _,k in ipairs(GENE_KEYS) do
+                if tonumber(genome[k])==nil or tonumber(genome[k])<cap then max=false break end
+            end
+        end
+        state.ufoAscension.genome=genome; state.ufoAscension.rarity=rarity; state.ufoAscension.geneCap=cap
+        state.ufoAscension.targetId=currentTargetId; state.ufoAscension.targetName=targetName; state.ufoAscension.genesMax=max
+        return max
+    end
+    local function changed(a,b)
+        if not a or not b then return false end
+        for _,k in ipairs(GENE_KEYS) do if tostring(a[k])~=tostring(b[k]) then return true end end
+        return false
+    end
+    local function report(a,b)
+        local out={}
+        if a and b then for _,k in ipairs(GENE_KEYS) do if tostring(a[k])~=tostring(b[k]) then table.insert(out,LABELS[k].." "..tostring(a[k]).." -> "..tostring(b[k])) end end end
+        lastGeneChange=#out>0 and table.concat(out,", ") or nil
+        if lastGeneChange then log("GENE CHANGE: "..lastGeneChange) end
+    end
+    local function sameTarget()
+        local c,r=target()
+        return c and r and tostring(c.id)==tostring(currentTargetId), c,r
+    end
+    local function towerExit(t)
+        if type(deps.isTowerActive)~="function" or not deps.isTowerActive() then return true end
+        setStatus("LEAVING_TOWER")
+        if type(deps.surrenderTower)~="function" then lastError="Tower exit hook unavailable"; setStatus("ERROR"); return false end
+        local ok,v=pcall(deps.surrenderTower)
+        if not ok or v==false then lastError="Tower surrender failed"; setStatus("ERROR"); return false end
+        local deadline=os.clock()+15
+        while not destroyed and token==t and os.clock()<deadline do
+            if type(deps.isTowerActive)~="function" or not deps.isTowerActive() then return true end
+            taskLib.wait(0.25)
+        end
+        lastError="Tower exit timeout"; setStatus("ERROR"); return false
+    end
+    local function subscribe()
+        if mutationConnection then return true end
+        local r=deps.remotes
+        if not r or type(r.onClient)~="function" or type(r.defs)~="table" or not r.defs.ChickenMutated then lastError="ChickenMutated subscription unavailable"; return false end
+        local ok,c=pcall(function() return r.onClient(r.defs.ChickenMutated,function(payload)
+            if not enabled or destroyed then return end
+            local id=type(payload)=="table" and (payload.chickenId or payload.id or (type(payload.chicken)=="table" and payload.chicken.id)) or nil
+            if id~=nil and tostring(id)~=tostring(requestTargetId) then return end
+            if sentToChaos then mutationPayload=payload; state.ufoAscension.mutationSeen=true end
+        end) end)
+        if ok and c then mutationConnection=c; state.ufoAscension.mutationSubscribed=true; return true end
+        lastError="ChickenMutated subscription failed"; return false
+    end
+    local function confirmGenomeRefresh(t)
+        setStatus("WAITING_FOR_GENOME_REFRESH")
+        local deadline=os.clock()+3
+        while not destroyed and token==t and os.clock()<deadline do
+            if state.ufoAscension.mutationSeen then
+                local ok,c=sameTarget()
+                if ok then
+                    local after=genes(c)
+                    if after then
+                        state.ufoAscension.rosterRefreshSeen=true; state.ufoAscension.genomeRefreshSeen=true
+                        if changed(beforeGenome,after) then report(beforeGenome,after) end
+                        genome=after; setSnapshot(c); cycleCount+=1; state.ufoAscension.cycleCount=cycleCount
+                        sentToChaos=false; cycleComplete=true; chaosSentAt=nil; mutationDeadline=nil; nextCycleAt=os.clock()+3
+                        state.ufoAscension.recoveryInProgress=false
+                        setStatus(state.ufoAscension.genesMax and "GENES_MAX" or "GENE_UPDATED")
+                        return true
+                    end
+                end
+            end
+            taskLib.wait(0.1)
+        end
+        lastError="Genome refresh timeout"; sentToChaos=false; cycleComplete=false; stopCurrentEvent=true; setStatus("ERROR"); return false
+    end
+    local function recover(t)
+        recoveryInProgress=true; recoveryAttempted=true; state.ufoAscension.recoveryInProgress=true; state.ufoAscension.recoveryAttempted=true
+        setStatus("RECOVERING_TO_COOP")
+        local c,r=target()
+        if not c or tostring(c.id)~=tostring(currentTargetId) then lastError="Recovery target changed"; setStatus("RECOVERY_UNVERIFIED"); recoveryInProgress=false; return false end
+        local ok,v=pcall(function() return deps.chickenController:setOrder("coop") end)
+        if not ok or v==false then lastError="RETREAT coop failed"; setStatus("RECOVERY_UNVERIFIED"); recoveryInProgress=false; return false end
+        if deps.chickenMode and type(deps.chickenMode.order)=="function" then pcall(deps.chickenMode.order,"coop") end
+        log("RETREAT SENT"); setStatus("WAITING_FOR_COOP")
+        local deadline=os.clock()+10
+        while not destroyed and token==t and os.clock()<deadline do
+            local where=nil
+            if deps.chickenMode and type(deps.chickenMode.where)=="function" then pcall(function() where=deps.chickenMode.where() end) end
+            local c2,r2=target()
+            if c2 and tostring(c2.id)==tostring(currentTargetId) and where=="corral" then
+                recoveryConfirmed=true; recoveryInProgress=false; state.ufoAscension.recoveryConfirmed=true
+                log("RETREAT CONFIRMED"); setStatus("RECOVERY_COMPLETE"); return true
+            end
+            taskLib.wait(0.25)
+        end
+        lastError="RETREAT confirmation timeout"; recoveryInProgress=false; state.ufoAscension.recoveryConfirmed=nil; log("RETREAT UNVERIFIED"); setStatus("RECOVERY_UNVERIFIED"); return false
+    end
+    local function beginCycle(t)
+        if paused or not enabled or stopCurrentEvent or sentToChaos or (nextCycleAt and os.clock()<nextCycleAt) then return false end
+        local c,r=target()
+        if not c then lastError="Equipped chicken unavailable"; setStatus("ERROR"); return false end
+        local id=tostring(c.id)
+        if currentTargetId and currentTargetId~=id then lastError="Equipped chicken changed"; setStatus("ERROR"); return false end
+        currentTargetId=currentTargetId or id; state.ufoAscension.targetId=currentTargetId
+        if setSnapshot(c) then enabled=false; state.enabled=false; state.ufoAscension.enabled=false; setStatus("GENES_MAX"); if type(deps.onMaxGenes)=="function" then pcall(deps.onMaxGenes) end; return false end
+        if not towerExit(t) then return false end
+        beforeGenome=genes(c); requestTargetId=currentTargetId; mutationPayload=nil; state.ufoAscension.mutationSeen=false
+        cycleComplete=false; setStatus("SENDING_TO_CHAOS")
+        local ok,v=pcall(function() return deps.chickenController:setOrder("chaos") end)
+        if not ok or v==false then lastError="Chaos request failed"; sentToChaos=false; setStatus("ERROR"); return false end
+        sentToChaos=true; chaosSentAt=os.clock(); mutationDeadline=chaosSentAt+20; setStatus("WAITING_FOR_UFO_BEAM")
+        return true
+    end
+    local function resetEvent()
+        currentTargetId=nil; requestTargetId=nil; sentToChaos=false; cycleComplete=false; chaosSentAt=nil; mutationDeadline=nil; nextCycleAt=nil
+        recoveryInProgress=false; recoveryAttempted=false; recoveryConfirmed=nil; stopCurrentEvent=false
+        state.ufoAscension.recoveryInProgress=false; state.ufoAscension.recoveryAttempted=false; state.ufoAscension.recoveryConfirmed=nil
+    end
+    local function work(my)
+        while enabled and not destroyed and token==my do
+            local a=active(); ufoActive=a==true; state.ufoAscension.ufoActive=ufoActive
+            if a==nil then setStatus("ERROR")
+            elseif a==false then
+                if sentToChaos and not cycleComplete and currentTargetId and not recoveryAttempted then
+                    recoveryInProgress=true; state.ufoAscension.recoveryInProgress=true
+                    recover(my)
+                end
+                if not recoveryInProgress then resetEvent(); setStatus("WAITING_FOR_UFO") end
+                taskLib.wait(0.25)
+            elseif sentToChaos then
+                if state.ufoAscension.mutationSeen then
+                    confirmGenomeRefresh(my)
+                elseif mutationDeadline and os.clock()>=mutationDeadline then
+                    lastError="Mutation timeout"; sentToChaos=false; cycleComplete=false; stopCurrentEvent=true; setStatus("ERROR")
+                else
+                    setStatus("WAITING_FOR_UFO_BEAM"); taskLib.wait(0.25)
+                end
+            elseif not paused then
+                beginCycle(my); taskLib.wait(0.25)
+            else setStatus("PAUSED"); taskLib.wait(0.5) end
+        end
+        running=false
+    end
+    local api={}
+    function api.setEnabled(v)
+        if destroyed then return false end
+        enabled=v==true; state.enabled=enabled; state.ufoAscension.enabled=enabled; token+=1
+        if enabled then
+            stopCurrentEvent=false
+            if not subscribe() then enabled=false; state.enabled=false; state.ufoAscension.enabled=false; setStatus("ERROR"); return false end
+            if not running then running=true; local t=token; taskLib.spawn(function() work(t) end) end
+        else setStatus("DISABLED") end
+        return true
+    end
+    api.enable=function() return api.setEnabled(true) end; api.disable=function() return api.setEnabled(false) end; api.isEnabled=function() return enabled and not destroyed end
+    api.setPaused=function(reason,v) paused=v==true; state.ufoAscension.paused=paused; return true end; api.isPaused=function() return paused end; api.cancelMovement=function() return true end; api.isCritical=function() return false end
+    api.wantsPriority=function() return enabled and (ufoActive or recoveryInProgress) end; api.getStatus=function() return status end; api.getState=function() return state.ufoAscension end
+    api.getContinuousStatus=function() return {status=status,enabled=enabled,ufoActive=ufoActive,cycleCount=cycleCount,targetId=currentTargetId,recoveryInProgress=recoveryInProgress,recoveryAttempted=recoveryAttempted,recoveryConfirmed=recoveryConfirmed,lastGeneChange=lastGeneChange,lastError=lastError,chaosSentAt=chaosSentAt,mutationDeadline=mutationDeadline} end
+    function api.destroy() if destroyed then return end; destroyed=true; enabled=false; token+=1; if mutationConnection then pcall(function() mutationConnection:Disconnect() end); mutationConnection=nil end; setStatus("DISABLED") end
+    return api
+end
+local globalEnv=(getgenv and getgenv()) or _G
+globalEnv.UNO_UFO_ASCENSION_FACTORY=createUFOAscensionFeature
+return createUFOAscensionFeature
+end
+
+end
+__unoRunStage("UFO Ascension V3.2 backend factory", __unoStageUFO)
+
 local function __unoStage05()
 -- EVENT PRIORITY COORDINATOR
 -- Standalone Phase 7 arbitration module.
@@ -9541,6 +9801,7 @@ local function __unoStage05()
 local PRIORITY = {
     HOT_EGG = 100,
     EVENT_CAPSULE = 80,
+    UFO_ASCENSION = 75,
     KRAKEN_EGG = 70,
     AUTO_ARENA = 40,
     NORMAL_FARM = 10,
@@ -9549,6 +9810,7 @@ local PRIORITY = {
 local DEFAULT_FEATURES = {
     "HOT_EGG",
     "EVENT_CAPSULE",
+    "UFO_ASCENSION",
     "KRAKEN_EGG",
     "AUTO_ARENA",
     "NORMAL_FARM",
@@ -10192,6 +10454,16 @@ local function createUNOHubPriorityIntegration(deps)
         }
     end
 
+    local function makeUFOAdapter()
+        local backend = backends.UFO_ASCENSION
+        if type(backend) ~= "table" then return {} end
+        return {
+            setPaused = function(reason, value) if type(backend.setPaused) == "function" then return backend.setPaused(reason, value) end return true end,
+            cancelMovement = function(byOwner) if type(backend.cancelMovement) == "function" then return backend.cancelMovement(byOwner) end return true end,
+            isCritical = function() return type(backend.isCritical) == "function" and backend.isCritical() == true end,
+        }
+    end
+
     local function makeKrakenAdapter()
         local backend = backends.KRAKEN_EGG
         if type(backend) ~= "table" then
@@ -10219,11 +10491,12 @@ local function createUNOHubPriorityIntegration(deps)
     local features = {
         HOT_EGG = makeHotEggAdapter(),
         EVENT_CAPSULE = makeEventAdapter(),
+        UFO_ASCENSION = makeUFOAdapter(),
         KRAKEN_EGG = makeKrakenAdapter(),
         AUTO_ARENA = makeArenaAdapter(),
         NORMAL_FARM = makeNormalFarmAdapter(),
     }
-    for _, owner in ipairs({ "HOT_EGG", "EVENT_CAPSULE", "KRAKEN_EGG", "AUTO_ARENA", "NORMAL_FARM" }) do
+    for _, owner in ipairs({ "HOT_EGG", "EVENT_CAPSULE", "UFO_ASCENSION", "KRAKEN_EGG", "AUTO_ARENA", "NORMAL_FARM" }) do
         requestCache[owner] = false
         criticalCache[owner] = false
     end
@@ -10274,6 +10547,11 @@ local function createUNOHubPriorityIntegration(deps)
             ["WAITING_FOR_DEPOSIT_CONFIRMATION"] = true,
         }
         return activeStatus[tostring(status)] == true
+    end
+
+    local function ufoRequested()
+        local backend = backends.UFO_ASCENSION
+        return type(backend) == "table" and type(backend.wantsPriority) == "function" and backend.wantsPriority() == true
     end
 
     local function krakenRequested()
@@ -10350,6 +10628,7 @@ local function createUNOHubPriorityIntegration(deps)
     local function sync()
         syncFeature("HOT_EGG", hotEggRequested(), false)
         syncFeature("EVENT_CAPSULE", eventRequested(), features.EVENT_CAPSULE.isCritical())
+        syncFeature("UFO_ASCENSION", ufoRequested(), false)
         syncFeature("KRAKEN_EGG", krakenRequested(), false)
         local arenaCritical = features.AUTO_ARENA.isCritical()
         syncFeature("AUTO_ARENA", arenaRequested(), arenaCritical)
@@ -10664,10 +10943,13 @@ local function createBootstrap()
     local eventFactory = env.UNO_EVENT_CAPSULE_COLLECTOR_FACTORY
     local arenaFactory = env.UNO_AUTO_ARENA_FACTORY
     local krakenFactory = env.UNO_KRAKEN_EGG_COLLECTOR_FACTORY
+    local ufoFactory = env.UNO_UFO_ASCENSION_FACTORY
     local integrationFactory = env.UNO_HUB_PRIORITY_INTEGRATION_FACTORY
     if type(eventFactory) ~= "function" then block("Event Capsule factory unavailable: UNO_EVENT_CAPSULE_COLLECTOR_FACTORY") return end
     if type(arenaFactory) ~= "function" then block("Auto Arena factory unavailable: UNO_AUTO_ARENA_FACTORY") return end
     if type(krakenFactory) ~= "function" then block("Kraken factory unavailable: UNO_KRAKEN_EGG_COLLECTOR_FACTORY") return end
+    -- UFO is optional: the current UNO HUB must remain usable when its runtime dependencies are absent.
+    if type(ufoFactory) ~= "function" then log("UFO Ascension unavailable: factory missing") end
     if type(integrationFactory) ~= "function" then block("Priority integration factory unavailable: UNO_HUB_PRIORITY_INTEGRATION_FACTORY") return end
     status = "CONSTRUCTING_BACKENDS"
     local tween = createTweenMovement(root)
@@ -10734,6 +11016,49 @@ local function createBootstrap()
     backends.KRAKEN_EGG = krakenBackend
     ownedBackends.KRAKEN_EGG = krakenBackend
     log("Kraken dependencies READY")
+    if type(ufoFactory) == "function" then
+        local scripts = root.player and root.player:FindFirstChild("PlayerScripts")
+        local features = scripts and scripts:FindFirstChild("Features")
+        local admin = features and features:FindFirstChild("Admin")
+        local controllers = admin and admin:FindFirstChild("controllers")
+        local chickenFolder = features and features:FindFirstChild("Chicken")
+        local chickenControllers = chickenFolder and chickenFolder:FindFirstChild("controllers")
+        local ufoLiveEventController = safeRequire(controllers and controllers:FindFirstChild("LiveEventController"))
+        local ufoChickenController = safeRequire(chickenControllers and chickenControllers:FindFirstChild("ChickenController"))
+        local ufoChickenMode = safeRequire(chickenFolder and chickenFolder:FindFirstChild("ChickenMode"))
+        local ufoDataController = integrationModules.DataController
+        local ufoMissing = nil
+        if type(ufoLiveEventController) ~= "table" then
+            ufoMissing = "LiveEventController"
+        elseif type(ufoChickenController) ~= "table" then
+            ufoMissing = "ChickenController"
+        elseif type(ufoDataController) ~= "table" then
+            ufoMissing = "DataController"
+        elseif type(ufoDataController.roster) ~= "function" then
+            ufoMissing = "DataController.roster"
+        elseif type(remotes) ~= "table" then
+            ufoMissing = "Remotes"
+        end
+        if ufoMissing then
+            log("UFO Ascension unavailable: " .. ufoMissing)
+        else
+            local ufoDeps = {
+                state = root.runtime.State, task = task, liveEventController = ufoLiveEventController,
+                chickenController = ufoChickenController,
+                chickenMode = ufoChickenMode,
+                dataController = ufoDataController, remotes = remotes,
+                isTowerActive = function() return root.runtime.State and root.runtime.State.tower and root.runtime.State.tower.runActive == true end,
+                surrenderTower = function() return root.runtime.requestTowerSurrender and root.runtime.requestTowerSurrender() or false end,
+                log = function(level, message) log(message) end,
+                onMaxGenes = function()
+                    if root.runtime.State and root.runtime.State.toggles then root.runtime.State.toggles.autoUFOAscension = false end
+                    if root.runtime.markConfigDirty then pcall(root.runtime.markConfigDirty) end
+                end,
+            }
+            local ufoOk, ufoBackend = pcall(ufoFactory, ufoDeps)
+            if ufoOk and type(ufoBackend) == "table" then backends.UFO_ASCENSION = ufoBackend; ownedBackends.UFO_ASCENSION = ufoBackend; log("UFO Ascension dependencies READY") else log("UFO Ascension unavailable: " .. tostring(ufoBackend)) end
+        end
+    end
     status = "CONNECTING_PRIORITY"
     env.UNO_HUB_BACKENDS = backends
     env.UNO_REAL_BACKENDS = backends
@@ -10796,6 +11121,16 @@ local api = {
         if not backend or type(backend.setEnabled) ~= "function" then return false end
         return backend.setEnabled(value == true)
     end,
+    setUFOAscensionEnabled = function(value)
+        local backend = backends.UFO_ASCENSION
+        if not backend or type(backend.setEnabled) ~= "function" then return false end
+        return backend.setEnabled(value == true)
+    end,
+    getUFOAscensionState = function()
+        local backend = backends.UFO_ASCENSION
+        if backend and type(backend.getState) == "function" then return backend.getState() end
+        return nil
+    end,
     destroy = destroy,
 }
 
@@ -10823,6 +11158,9 @@ do
         end
         if toggles.autoKraken == true and type(phase9.setKrakenEnabled) == "function" then
             pcall(phase9.setKrakenEnabled, true)
+        end
+        if toggles.autoUFOAscension == true and type(phase9.setUFOAscensionEnabled) == "function" then
+            pcall(phase9.setUFOAscensionEnabled, true)
         end
     end
 end

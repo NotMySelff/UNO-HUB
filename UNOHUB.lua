@@ -12146,7 +12146,7 @@ if not dependencyReady() then
 else
     setState("WAITING_FOR_UFO")
 end
-log("STANDALONE V3.2 READY (6S POST-TOWER + FULL EVENT HOLD)")
+log("STANDALONE V3.2 READY (6S POST-TOWER + HARD NORMAL_FARM UFO HOLD)")
 
 return api
 
@@ -12208,6 +12208,20 @@ do
             local requested = false
             local lastCritical = nil
             local lastHoldAssertAt = 0
+            local normalFarmHardHeld = false
+
+            local function setNormalFarmHardHold(value)
+                value = value == true
+                if normalFarmHardHeld == value then return end
+                normalFarmHardHeld = value
+
+                if type(runtime) == "table"
+                    and type(runtime.setNormalFarmCoordinatorPaused) == "function" then
+                    pcall(runtime.setNormalFarmCoordinatorPaused, "UFO_EVENT_HOLD", value)
+                    print("[UNO UFO MERGE] NORMAL_FARM hard hold=" .. tostring(value))
+                end
+            end
+
             while env.UNO_UFO_ASCENSION == ufoApi do
                 local want = false
                 local critical = false
@@ -12218,6 +12232,13 @@ do
                         critical = st.recoveryInProgress == true
                     end
                 end
+
+                -- HARD RULE:
+                -- while UFO backend is enabled and the UFO event is active (or
+                -- interrupted-cycle recovery is still running), NORMAL_FARM must
+                -- remain paused even if EVENT_CAPSULE/HOT_EGG temporarily owns the
+                -- coordinator. This pause reason is independent of owner changes.
+                setNormalFarmHardHold(want)
 
                 if want and not requested then
                     requested = true
@@ -12266,6 +12287,7 @@ do
             if requested and type(coordinator.releasePriority) == "function" then
                 pcall(coordinator.releasePriority, "UFO_ASCENSION")
             end
+            setNormalFarmHardHold(false)
         end)
     else
         warn("[UNO UFO MERGE] Coordinator bridge unavailable; UFO backend still isolated")

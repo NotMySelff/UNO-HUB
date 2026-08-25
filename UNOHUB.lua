@@ -11044,6 +11044,13 @@ local GENE_CAPS = {
 local GENE_KEYS = { "vigor", "furia", "velocidad", "impetu", "fertility" }
 local CONTINUOUS_CYCLE_DELAY_SECONDS = 3
 local CYCLE_MUTATION_TIMEOUT_SECONDS = 20
+
+-- Production policy chosen after runtime trials:
+-- after a Tower surrender is confirmed, keep UFO ownership and wait a
+-- conservative 6 seconds before attempting Chaos.
+local POST_TOWER_CHAOS_DELAY_SECONDS = 6
+local PIT_CONFIRM_TIMEOUT_SECONDS = 4
+
 local GENE_LABELS = {
     vigor = "HP",
     furia = "ATK",
@@ -11104,6 +11111,13 @@ local function makeState()
         rosterRefreshSeen = false,
         genomeRefreshSeen = false,
         genomeChanged = false,
+
+        -- Post-Tower / Chaos acceptance state.
+        postTowerDelayUntil = nil,
+        chaosSentAt = nil,
+        pitConfirmed = false,
+        pitConfirmedAt = nil,
+
         createdAt = now(),
     }
 end
@@ -11557,6 +11571,9 @@ local function sendChaos(token, chicken)
     state.rosterRefreshSeen = false
     state.genomeRefreshSeen = false
     state.genomeChanged = false
+    state.chaosSentAt = nil
+    state.pitConfirmed = false
+    state.pitConfirmedAt = nil
     mutationPayload = nil
     setState("SENDING_TO_CHAOS")
     local ok, result = pcall(function()
@@ -11598,7 +11615,10 @@ local function sendChaos(token, chicken)
         return false
     end
     state.sentToChaosThisCycle = true
-    setState("WAITING_FOR_MUTATION")
+    state.chaosSentAt = now()
+    state.pitConfirmed = false
+    state.pitConfirmedAt = nil
+    setState("WAITING_FOR_PIT_CONFIRMATION")
     return true
 end
 
@@ -11629,6 +11649,10 @@ local function clearEventCycleState()
     state.geneCap = nil
     state.genesMax = false
     state.lastError = nil
+    state.postTowerDelayUntil = nil
+    state.chaosSentAt = nil
+    state.pitConfirmed = false
+    state.pitConfirmedAt = nil
     repeatReadyAt = nil
 end
 
@@ -11772,7 +11796,42 @@ local function processOnce(token)
         return
     end
     if state.requestInFlight then
-        if state.mutationSeen then confirmMutation(token) end
+        if not state.pitConfirmed then
+            local whereValue = nil
+            if ChickenMode and type(ChickenMode.where) == "function" then
+                pcall(function() whereValue = ChickenMode.where() end)
+            end
+
+            if whereValue == "pit" then
+                state.pitConfirmed = true
+                state.pitConfirmedAt = now()
+                log("CHAOS ACCEPTED: replicated/reconciled where=pit")
+                setState("WAITING_FOR_MUTATION")
+            elseif state.chaosSentAt and (now() - state.chaosSentAt) >= PIT_CONFIRM_TIMEOUT_SECONDS then
+                -- The controller call returned, but the replicated chicken never
+                -- entered PIT. Do not falsely wait for ChickenMutated and do not
+                -- retry/spam Chaos. Keep UFO ownership for the active event so
+                -- NORMAL_FARM cannot resume underneath an unresolved UFO session.
+                state.requestInFlight = false
+                state.cycleInProgress = false
+                state.sentToChaosThisCycle = false
+                state.lastCycleFailure = "CHAOS_ORDER_NOT_APPLIED"
+                state.lastError = "CHAOS_ORDER_NOT_APPLIED"
+                state.stopContinuousThisEvent = true
+                setState("WAITING_FOR_EVENT_END")
+                log("CHAOS ORDER NOT APPLIED: PIT confirmation timeout")
+                return
+            else
+                setState("WAITING_FOR_PIT_CONFIRMATION")
+                return
+            end
+        end
+
+        if state.mutationSeen then
+            confirmMutation(token)
+        else
+            setState("WAITING_FOR_MUTATION")
+        end
         return
     end
     if state.stopContinuousThisEvent then
@@ -11830,7 +11889,59 @@ local function processOnce(token)
         return
     end
 
-    logTowerExitDiagnostic("IMMEDIATELY_BEFORE_CHAOS")
+    state.postTowerDelayUntil = now() + POST_TOWER_CHAOS_DELAY_SECONDS
+    setState("WAITING_POST_TOWER_DELAY")
+    log("POST-TOWER DELAY START " .. tostring(POST_TOWER_CHAOS_DELAY_SECONDS) .. "s")
+
+    while not destroyed and state.enabled and workerToken == token and now() < state.postTowerDelayUntil do
+        local stillActive = getCurrentEventActive()
+        if stillActive ~= true then
+            state.ufoActive = false
+            state.cycleInProgress = false
+            state.postTowerDelayUntil = nil
+            state.lastCycleFailure = "UFO_ENDED_DURING_POST_TOWER_DELAY"
+            setState("WAITING_FOR_UFO")
+            log("POST-TOWER DELAY ABORTED: UFO event ended")
+            return
+        end
+
+        -- UFO already owns priority here. If Tower somehow becomes active again,
+        -- do not allow the normal farm path to continue/restart under the UFO.
+        if towerIsActive() then
+            state.cycleInProgress = false
+            state.postTowerDelayUntil = nil
+            state.lastCycleFailure = "TOWER_REENTERED_DURING_UFO"
+            state.lastError = "TOWER_REENTERED_DURING_UFO"
+            state.stopContinuousThisEvent = true
+            setState("WAITING_FOR_EVENT_END")
+            log("POST-TOWER DELAY ABORTED: Tower became active again while UFO owns priority")
+            return
+        end
+
+        task.wait(0.10)
+    end
+
+    state.postTowerDelayUntil = nil
+
+    local stillActive = getCurrentEventActive()
+    state.ufoActive = stillActive == true
+    if stillActive ~= true then
+        state.cycleInProgress = false
+        state.lastCycleFailure = "UFO_ENDED_BEFORE_CHAOS"
+        setState("WAITING_FOR_UFO")
+        return
+    end
+
+    if towerIsActive() then
+        state.cycleInProgress = false
+        state.lastCycleFailure = "TOWER_ACTIVE_AFTER_POST_DELAY"
+        state.lastError = "TOWER_ACTIVE_AFTER_POST_DELAY"
+        state.stopContinuousThisEvent = true
+        setState("WAITING_FOR_EVENT_END")
+        return
+    end
+
+    logTowerExitDiagnostic("AFTER_6S_BEFORE_CHAOS")
 
     if not sendChaos(token, chicken) then
         state.cycleInProgress = false
@@ -12095,7 +12206,7 @@ if not dependencyReady() then
 else
     setState("WAITING_FOR_UFO")
 end
-log("STANDALONE V3.2 READY")
+log("STANDALONE V3.2 READY (POST-TOWER 6S + PIT CONFIRM)")
 
 return api
 
@@ -12156,6 +12267,7 @@ do
         task.spawn(function()
             local requested = false
             local lastCritical = nil
+            local lastReassertAt = 0
             while env.UNO_UFO_ASCENSION == ufoApi do
                 local want = false
                 local critical = false
@@ -12181,6 +12293,21 @@ do
                     if critical ~= lastCritical and type(coordinator.setCritical) == "function" then
                         lastCritical = critical
                         pcall(coordinator.setCritical, "UFO_ASCENSION", critical)
+                    end
+
+                    -- Defensive ownership hold: while the UFO is active, NORMAL_FARM
+                    -- must never become the effective owner. Higher-priority event
+                    -- owners are allowed to preempt UFO normally.
+                    if type(coordinator.getCurrentOwner) == "function" and type(coordinator.requestPriority) == "function" then
+                        local okOwner, owner = pcall(coordinator.getCurrentOwner)
+                        if okOwner and owner == "NORMAL_FARM" and (now() - lastReassertAt) >= 0.75 then
+                            lastReassertAt = now()
+                            pcall(coordinator.requestPriority, "UFO_ASCENSION", 75, {
+                                enabled = true,
+                                critical = critical,
+                            })
+                            print("[UNO UFO MERGE] reasserted UFO_ASCENSION over NORMAL_FARM")
+                        end
                     end
                 elseif not want and requested then
                     requested = false

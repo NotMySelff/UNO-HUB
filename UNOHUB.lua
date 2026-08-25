@@ -1,5 +1,5 @@
 --[[
-    UNO HUB1
+    UNO HUB
 ]]
 
 
@@ -11278,27 +11278,83 @@ local function towerIsExited()
     return false
 end
 
+local function readChickenModeDiagnostic()
+    local whereValue = "<unavailable>"
+    local orderValue = "<unavailable>"
+
+    if ChickenMode and type(ChickenMode.where) == "function" then
+        local ok, value = pcall(ChickenMode.where)
+        if ok then whereValue = tostring(value) end
+    end
+
+    if ChickenMode and type(ChickenMode.order) == "function" then
+        local ok, value = pcall(ChickenMode.order)
+        if ok then orderValue = tostring(value) end
+    end
+
+    return whereValue, orderValue
+end
+
+local function logTowerExitDiagnostic(label)
+    local active = towerIsActive()
+    local exited = towerIsExited()
+    local whereValue, orderValue = readChickenModeDiagnostic()
+    log(string.format(
+        "TOWER EXIT DIAG [%s] active=%s exited=%s where=%s order=%s",
+        tostring(label),
+        tostring(active),
+        tostring(exited),
+        tostring(whereValue),
+        tostring(orderValue)
+    ))
+end
+
 local function waitForTowerExit(token)
     if type(towerHooks.isTowerActive) ~= "function" then
+        log("TOWER EXIT DIAG [NO_HOOK] isTowerActive hook unavailable")
         return true
     end
-    if not towerIsActive() then return true end
+    if not towerIsActive() then
+        logTowerExitDiagnostic("ALREADY_EXITED")
+        return true
+    end
+
     setState("WAITING_FOR_TOWER_EXIT")
+    logTowerExitDiagnostic("BEFORE_SURRENDER")
+
     if type(towerHooks.surrender) == "function" then
         local ok, result = pcall(towerHooks.surrender)
         if not ok or result == false then
+            log("TOWER EXIT DIAG [SURRENDER_CALL] failed=" .. tostring(result))
             state.lastError = "TOWER_SURRENDER_FAILED"
             setState("ERROR")
             return false
         end
+        log("TOWER EXIT DIAG [SURRENDER_CALL] success result=" .. tostring(result))
     else
         state.lastError = "TOWER_ACTIVE_WAITING_EXTERNAL"
         setState("WAITING_FOR_TOWER_EXIT")
         return false
     end
     local deadline = now() + 15
+    local nextDiagAt = 0
     while not destroyed and workerToken == token and now() < deadline do
-        if towerIsExited() then return true end
+        if towerIsExited() then
+            logTowerExitDiagnostic("EXIT_DETECTED")
+            -- Diagnostic only: sample the chicken state again shortly after
+            -- the Tower hook first reports exited. This does NOT delay Chaos.
+            task.delay(0.35, function()
+                if not destroyed then
+                    logTowerExitDiagnostic("EXIT_PLUS_350MS")
+                end
+            end)
+            return true
+        end
+
+        if now() >= nextDiagAt then
+            nextDiagAt = now() + 1
+            logTowerExitDiagnostic("WAITING")
+        end
         task.wait(0.25)
     end
     state.lastError = "TOWER_EXIT_NOT_CONFIRMED"
@@ -11741,6 +11797,9 @@ local function processOnce(token)
         state.stopContinuousThisEvent = true
         return
     end
+
+    logTowerExitDiagnostic("IMMEDIATELY_BEFORE_CHAOS")
+
     if not sendChaos(token, chicken) then
         state.cycleInProgress = false
         state.lastCycleFailure = "SET_ORDER_CHAOS_FAILED"
@@ -12064,6 +12123,7 @@ do
     if type(coordinator) == "table" and type(ufoApi) == "table" then
         task.spawn(function()
             local requested = false
+            local lastCritical = nil
             while env.UNO_UFO_ASCENSION == ufoApi do
                 local want = false
                 local critical = false
@@ -12077,6 +12137,7 @@ do
 
                 if want and not requested then
                     requested = true
+                    lastCritical = critical
                     if type(coordinator.setFeatureEnabled) == "function" then
                         pcall(coordinator.setFeatureEnabled, "UFO_ASCENSION", true)
                     end
@@ -12085,11 +12146,13 @@ do
                     end
                     print("[UNO UFO MERGE] requested UFO_ASCENSION priority=75")
                 elseif want and requested then
-                    if type(coordinator.setCritical) == "function" then
+                    if critical ~= lastCritical and type(coordinator.setCritical) == "function" then
+                        lastCritical = critical
                         pcall(coordinator.setCritical, "UFO_ASCENSION", critical)
                     end
                 elseif not want and requested then
                     requested = false
+                    lastCritical = nil
                     if type(coordinator.releasePriority) == "function" then
                         pcall(coordinator.releasePriority, "UFO_ASCENSION")
                     end

@@ -5557,16 +5557,36 @@ local function row(parent, order, left)
     v.Size = UDim2.new(0.5, 0, 1, 0); v.Position = UDim2.fromScale(0.5, 0)
     return v
 end
+local ToggleVisualSetters = {}
+
+local function setToggleVisual(key, value)
+    local list = ToggleVisualSetters[key]
+    if type(list) ~= "table" then return end
+    for _, setter in ipairs(list) do
+        if type(setter) == "function" then
+            pcall(setter, value == true, false)
+        end
+    end
+end
+
 local function settingRow(parent, order, title, desc, key, onChange)
     local f = Instance.new("Frame"); f.LayoutOrder = order or 0; f.Size = UDim2.new(1, 0, 0, 0)
     f.AutomaticSize = Enum.AutomaticSize.Y; f.BackgroundTransparency = 1; f.Parent = parent; pad(f, 4, 0, 4, 0)
     local top = Instance.new("Frame"); top.Size = UDim2.new(1, 0, 0, 24); top.BackgroundTransparency = 1; top.Parent = f
     text(top, title, 13, Theme.TextPrimary, Enum.Font.GothamMedium).Size = UDim2.new(1, -50, 1, 0)
-    local sw = select(1, makeSwitch(top, State.toggles[key] == true, function(v)
+    local sw, swSet = makeSwitch(top, State.toggles[key] == true, function(v)
         State.toggles[key] = v
-        if onChange then onChange(v) end
+        if onChange then
+            local ok, result = pcall(onChange, v)
+            if not ok or result == false then
+                State.toggles[key] = false
+                if type(swSet) == "function" then pcall(swSet, false, true) end
+            end
+        end
         markConfigDirty()
-    end))
+    end)
+    ToggleVisualSetters[key] = ToggleVisualSetters[key] or {}
+    table.insert(ToggleVisualSetters[key], swSet)
     sw.Position = UDim2.new(1, -40, 0.5, -11)
 end
 
@@ -5824,16 +5844,71 @@ end
 local function setKrakenPhase9(v)
     return setPhase9Toggle("autoKraken", "setKrakenEnabled", v)
 end
-local function setUfoAscension(v)
-    State.toggles.autoUfoAscension = v == true
+local function forceUfoAscensionOff(reason)
+    State.toggles.autoUfoAscension = false
+    if State.ufoAscension then
+        State.ufoAscension.enabled = false
+        if reason == "GENES_MAX" then
+            State.ufoAscension.phase = "GENES_MAX"
+            State.ufoAscension.status = "Genes Max"
+        end
+    end
+    setToggleVisual("autoUfoAscension", false)
     markConfigDirty()
+
     local env = (getgenv and getgenv()) or _G
     local backend = env.UNO_UFO_ASCENSION
-    if type(backend) ~= "table" or type(backend.setEnabled) ~= "function" then
-        return not State.toggles.autoUfoAscension
+    if type(backend) == "table" and type(backend.disable) == "function" then
+        pcall(backend.disable)
     end
-    local ok, result = pcall(backend.setEnabled, State.toggles.autoUfoAscension)
-    return ok and result ~= false
+    return false
+end
+
+local function setUfoAscension(v)
+    local wantEnabled = v == true
+    local env = (getgenv and getgenv()) or _G
+    local backend = env.UNO_UFO_ASCENSION
+
+    if wantEnabled then
+        if type(backend) ~= "table" or type(backend.setEnabled) ~= "function" then
+            State.toggles.autoUfoAscension = false
+            setToggleVisual("autoUfoAscension", false)
+            markConfigDirty()
+            return false
+        end
+
+        if type(backend.isEquippedGenesMax) == "function" then
+            local okMax, isMax = pcall(backend.isEquippedGenesMax)
+            if okMax and isMax == true then
+                return forceUfoAscensionOff("GENES_MAX")
+            end
+        end
+    end
+
+    State.toggles.autoUfoAscension = wantEnabled
+    if State.ufoAscension then State.ufoAscension.enabled = wantEnabled end
+    markConfigDirty()
+
+    if type(backend) ~= "table" or type(backend.setEnabled) ~= "function" then
+        return not wantEnabled
+    end
+
+    local ok, result = pcall(backend.setEnabled, wantEnabled)
+    if not ok or result == false then
+        State.toggles.autoUfoAscension = false
+        if State.ufoAscension then State.ufoAscension.enabled = false end
+        setToggleVisual("autoUfoAscension", false)
+        markConfigDirty()
+        return false
+    end
+    return true
+end
+
+do
+    local env = (getgenv and getgenv()) or _G
+    env.UNO_HUB_UFO_FORCE_OFF = function(reason)
+        return forceUfoAscensionOff(reason)
+    end
 end
 
 safeBuild("Auto Farm", function()
@@ -10902,6 +10977,10 @@ local function confirmMutation(token, timeoutSeconds)
                         state.enabled = false
                         workerToken += 1
                         setState("GENES_MAX")
+                        local hubForceOff = env.UNO_HUB_UFO_FORCE_OFF
+                        if type(hubForceOff) == "function" then
+                            pcall(hubForceOff, "GENES_MAX")
+                        end
                         return true
                     end
                     repeatReadyAt = now() + CONTINUOUS_CYCLE_DELAY_SECONDS
@@ -11216,6 +11295,10 @@ local function processOnce(token)
         state.enabled = false
         workerToken += 1
         setState("GENES_MAX")
+        local hubForceOff = env.UNO_HUB_UFO_FORCE_OFF
+        if type(hubForceOff) == "function" then
+            pcall(hubForceOff, "GENES_MAX")
+        end
         return
     end
     state.currentCycle = state.cycleCountThisEvent + 1
@@ -11303,6 +11386,18 @@ end
 
 function api.getStatus()
     return cloneTable(state)
+end
+
+function api.isEquippedGenesMax()
+    local chicken = getEquippedChicken()
+    if type(chicken) ~= "table" then
+        return false, "EQUIPPED_CHICKEN_NOT_FOUND"
+    end
+    local genome = getGenome(chicken)
+    if type(genome) ~= "table" then
+        return false, "GENOME_UNAVAILABLE"
+    end
+    return areGenesMaxFor(chicken, genome) == true, nil
 end
 
 function api.getState()
@@ -11931,7 +12026,24 @@ do
     local ufoBackend = env.UNO_UFO_ASCENSION
     if type(toggles) == "table" and toggles.autoUfoAscension == true
         and type(ufoBackend) == "table" and type(ufoBackend.setEnabled) == "function" then
-        pcall(ufoBackend.setEnabled, true)
+        local alreadyMax = false
+        if type(ufoBackend.isEquippedGenesMax) == "function" then
+            local okMax, value = pcall(ufoBackend.isEquippedGenesMax)
+            alreadyMax = okMax and value == true
+        end
+
+        if alreadyMax then
+            toggles.autoUfoAscension = false
+            if runtime and runtime.State and runtime.State.ufoAscension then
+                runtime.State.ufoAscension.enabled = false
+                runtime.State.ufoAscension.phase = "GENES_MAX"
+                runtime.State.ufoAscension.status = "Genes Max"
+            end
+            local forceOff = env.UNO_HUB_UFO_FORCE_OFF
+            if type(forceOff) == "function" then pcall(forceOff, "GENES_MAX") end
+        else
+            pcall(ufoBackend.setEnabled, true)
+        end
     end
 end
 

@@ -1,5 +1,5 @@
 --[[
-    UNO HUB1
+    UNO HUB
 ]]
 
 
@@ -11494,6 +11494,11 @@ local function handleMutation(payload)
     state.lastMutationPayload = mutationPayload
     state.mutationSeen = true
     log("ChickenMutated received for active target " .. tostring(targetIdAtRequest))
+    local whereValue, orderValue = readChickenModeDiagnostic()
+    log(string.format(
+        "POST CHAOS DIAG [MUTATION_RECEIVED] target=%s where=%s order=%s",
+        tostring(targetIdAtRequest), tostring(whereValue), tostring(orderValue)
+    ))
 end
 
 local function subscribeMutation()
@@ -11558,6 +11563,33 @@ local function sendChaos(token, chicken)
         return ChickenController:setOrder("chaos")
     end)
     lastChaosAt = now()
+
+    log(string.format(
+        "POST CHAOS DIAG [CALL_RETURN] ok=%s result=%s target=%s",
+        tostring(ok), tostring(result), tostring(targetIdAtRequest)
+    ))
+
+    local function postChaosSnapshot(label)
+        if destroyed then return end
+        local whereValue, orderValue = readChickenModeDiagnostic()
+        local activeId = nil
+        pcall(function()
+            local roster = DataController.roster()
+            activeId = roster and roster.activeId or nil
+        end)
+        log(string.format(
+            "POST CHAOS DIAG [%s] target=%s activeId=%s where=%s order=%s sent=%s mutationSeen=%s",
+            tostring(label), tostring(targetIdAtRequest), tostring(activeId),
+            tostring(whereValue), tostring(orderValue),
+            tostring(state.sentToChaosThisCycle), tostring(state.mutationSeen)
+        ))
+    end
+
+    postChaosSnapshot("0MS")
+    task.delay(0.35, function() postChaosSnapshot("350MS") end)
+    task.delay(1.00, function() postChaosSnapshot("1S") end)
+    task.delay(3.00, function() postChaosSnapshot("3S") end)
+
     if not ok or result == false then
         state.requestInFlight = false
         state.cycleInProgress = false

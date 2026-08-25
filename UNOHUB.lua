@@ -1,5 +1,5 @@
 --[[
-    UNO HUB
+    UNO HUB1
 ]]
 
 
@@ -130,6 +130,12 @@ local State = {
         retryDelay = 5, postRebirthDelay = 30, countdown = 0, countdownLabel = "",
         surrenderInFlight = false, declineInFlight = false,
         coordinatorPauseReasons = {},
+    },
+    ufoAscension = {
+        enabled = false, phase = "DISABLED", status = "Disabled",
+        targetId = nil, targetName = "Equipped Chicken", rarity = nil,
+        geneCap = nil, genome = nil, genesMax = false, ufoActive = false,
+        cycleCount = 0, recoveryInProgress = false, lastError = nil,
     },
     hotEgg = {
         enabled = false, phase = "DISABLED", generation = 0, movementMode = "Tween",
@@ -5450,15 +5456,13 @@ env.UNO_HUB_RUNTIME = {
     getNormalFarmCoordinatorPauseReasons = function() return AFR.coordinatorPauseReasons end,
     setAutoHotEgg = setAutoHotEgg,
     setAutoFarmRebirth = setAutoFarmRebirth,
+    setUfoAscension = setUfoAscension,
+    setToggleVisual = setToggleVisual,
+    isTowerActive = isTowerActive,
+    isTowerExited = function() return not isTowerActive() end,
+    requestTowerSurrender = function() return requestSurrender(AFR.generation) end,
     getHotEggState = function() return HE end,
     getNormalFarmState = function() return AFR end,
-    isTowerActive = isTowerActive,
-    requestTowerSurrender = function()
-        return requestSurrender(AFR.generation)
-    end,
-    isTowerExited = function()
-        return not isTowerActive()
-    end,
     shutdown = shutdown,
 }
 closeBtn.MouseButton1Click:Connect(shutdown)
@@ -5557,16 +5561,37 @@ local function row(parent, order, left)
     v.Size = UDim2.new(0.5, 0, 1, 0); v.Position = UDim2.fromScale(0.5, 0)
     return v
 end
+local ToggleVisualSetters = {}
+
+local function setToggleVisual(key, value)
+    local setters = ToggleVisualSetters[key]
+    if type(setters) ~= "table" then return end
+    for _, setter in ipairs(setters) do
+        if type(setter) == "function" then
+            pcall(setter, value == true, false)
+        end
+    end
+end
+
 local function settingRow(parent, order, title, desc, key, onChange)
     local f = Instance.new("Frame"); f.LayoutOrder = order or 0; f.Size = UDim2.new(1, 0, 0, 0)
     f.AutomaticSize = Enum.AutomaticSize.Y; f.BackgroundTransparency = 1; f.Parent = parent; pad(f, 4, 0, 4, 0)
     local top = Instance.new("Frame"); top.Size = UDim2.new(1, 0, 0, 24); top.BackgroundTransparency = 1; top.Parent = f
     text(top, title, 13, Theme.TextPrimary, Enum.Font.GothamMedium).Size = UDim2.new(1, -50, 1, 0)
-    local sw = select(1, makeSwitch(top, State.toggles[key] == true, function(v)
+    local sw, swSet
+    sw, swSet = makeSwitch(top, State.toggles[key] == true, function(v)
         State.toggles[key] = v
-        if onChange then onChange(v) end
+        if onChange then
+            local ok, result = pcall(onChange, v)
+            if not ok or result == false then
+                State.toggles[key] = false
+                if type(swSet) == "function" then pcall(swSet, false, true) end
+            end
+        end
         markConfigDirty()
-    end))
+    end)
+    ToggleVisualSetters[key] = ToggleVisualSetters[key] or {}
+    if type(swSet) == "function" then table.insert(ToggleVisualSetters[key], swSet) end
     sw.Position = UDim2.new(1, -40, 0.5, -11)
 end
 
@@ -5824,16 +5849,50 @@ end
 local function setKrakenPhase9(v)
     return setPhase9Toggle("autoKraken", "setKrakenEnabled", v)
 end
+
 local function setUfoAscension(v)
-    State.toggles.autoUfoAscension = v == true
-    markConfigDirty()
+    local wantEnabled = v == true
     local env = (getgenv and getgenv()) or _G
     local backend = env.UNO_UFO_ASCENSION
-    if type(backend) ~= "table" or type(backend.setEnabled) ~= "function" then
-        return not State.toggles.autoUfoAscension
+
+    if wantEnabled then
+        if type(backend) ~= "table" or type(backend.setEnabled) ~= "function" then
+            State.toggles.autoUfoAscension = false
+            setToggleVisual("autoUfoAscension", false)
+            State.ufoAscension.enabled = false
+            State.ufoAscension.status = "Unavailable"
+            markConfigDirty()
+            return false
+        end
+        if type(backend.isEquippedGenesMax) == "function" then
+            local okMax, isMax = pcall(backend.isEquippedGenesMax)
+            if okMax and isMax == true then
+                State.toggles.autoUfoAscension = false
+                State.ufoAscension.enabled = false
+                State.ufoAscension.phase = "GENES_MAX"
+                State.ufoAscension.status = "Genes Max"
+                setToggleVisual("autoUfoAscension", false)
+                markConfigDirty()
+                return false
+            end
+        end
     end
-    local ok, result = pcall(backend.setEnabled, State.toggles.autoUfoAscension)
-    return ok and result ~= false
+
+    State.toggles.autoUfoAscension = wantEnabled
+    State.ufoAscension.enabled = wantEnabled
+    local ok, result = false, false
+    if type(backend) == "table" and type(backend.setEnabled) == "function" then
+        ok, result = pcall(backend.setEnabled, wantEnabled)
+    end
+    if not ok or result == false then
+        State.toggles.autoUfoAscension = false
+        State.ufoAscension.enabled = false
+        setToggleVisual("autoUfoAscension", false)
+        markConfigDirty()
+        return false
+    end
+    markConfigDirty()
+    return true
 end
 
 safeBuild("Auto Farm", function()
@@ -5860,8 +5919,14 @@ safeBuild("Auto Farm", function()
     settingRow(eventCard, 1, "Auto Hot Egg", nil, "autoHotEgg", setAutoHotEgg)
     settingRow(eventCard, 2, "Event Capsule", nil, "autoEventCapsule", setEventCapsulePhase9)
     settingRow(eventCard, 3, "Auto Kraken Eggs", nil, "autoKraken", setKrakenPhase9)
-    settingRow(eventCard, 4, "UFO Ascension", nil, "autoUfoAscension", setUfoAscension)
-    settingRow(eventCard, 5, "Auto Arena", nil, "autoArena", setAutoArenaPhase9)
+    settingRow(eventCard, 4, "Auto Arena", nil, "autoArena", setAutoArenaPhase9)
+
+    local _, ufoCard = card(events, 2, "UFO Ascension")
+    settingRow(ufoCard, 1, "Auto UFO Ascension", nil, "autoUfoAscension", setUfoAscension)
+    local ufoChickenLabel = row(ufoCard, 2, "Chicken")
+    local ufoTargetLabel = row(ufoCard, 3, "Target")
+    local ufoStatusLabel = row(ufoCard, 4, "Status")
+    local ufoGenesLabel = row(ufoCard, 5, "Genes")
 
     -- INCUBATOR
     local incubator = tabs.Incubator
@@ -6106,6 +6171,47 @@ safeBuild("Auto Farm", function()
                 phase = phase .. " (" .. tostring(AFR.countdown) .. "s)"
             end
             setText(farmPhaseLabel, phase)
+
+            local env = (getgenv and getgenv()) or _G
+            local ufo = env.UNO_UFO_ASCENSION
+            if type(ufo) == "table" and type(ufo.getStatus) == "function" then
+                local okUfo, us = pcall(ufo.getStatus)
+                if okUfo and type(us) == "table" then
+                    State.ufoAscension.enabled = us.enabled == true
+                    State.ufoAscension.phase = tostring(us.state or "IDLE")
+                    State.ufoAscension.status = tostring(us.state or "IDLE")
+                    State.ufoAscension.targetId = us.equippedId
+                    State.ufoAscension.targetName = us.equippedName or "Equipped Chicken"
+                    State.ufoAscension.rarity = us.rarity
+                    State.ufoAscension.geneCap = us.geneCap
+                    State.ufoAscension.genome = us.genome
+                    State.ufoAscension.genesMax = us.genesMax == true
+                    State.ufoAscension.ufoActive = us.ufoActive == true
+                    State.ufoAscension.cycleCount = tonumber(us.cycleCountThisEvent) or 0
+                    State.ufoAscension.recoveryInProgress = us.recoveryInProgress == true
+                    State.ufoAscension.lastError = us.lastError
+
+                    setText(ufoChickenLabel, us.equippedName or us.equippedId or "Equipped Chicken")
+                    setText(ufoTargetLabel, us.genesMax and "Genes Max" or "Until Max Genes")
+                    setText(ufoStatusLabel, us.state or "IDLE")
+                    local g = us.genome
+                    local cap = us.geneCap
+                    if type(g) == "table" and cap then
+                        setText(ufoGenesLabel, string.format(
+                            "HP %s/%s · ATK %s/%s · SPD %s/%s · PWR %s/%s · EGG %s/%s",
+                            tostring(g.vigor or "?"), tostring(cap),
+                            tostring(g.furia or "?"), tostring(cap),
+                            tostring(g.velocidad or "?"), tostring(cap),
+                            tostring(g.impetu or "?"), tostring(cap),
+                            tostring(g.fertility or "?"), tostring(cap)
+                        ))
+                    else
+                        setText(ufoGenesLabel, "—")
+                    end
+                end
+            else
+                setText(ufoStatusLabel, "Waiting for backend")
+            end
         end,
     }
 end)
@@ -6618,10 +6724,9 @@ safeBuild("Events", function()
     settingRow(phase9Card, 1, "Event Capsule", nil, "autoEventCapsule", setEventCapsulePhase9)
     settingRow(phase9Card, 2, "Auto Arena", nil, "autoArena", setAutoArenaPhase9)
     settingRow(phase9Card, 3, "Auto Kraken Eggs", nil, "autoKraken", setKrakenPhase9)
-    settingRow(phase9Card, 4, "UFO Ascension", nil, "autoUfoAscension", setUfoAscension)
-    local p9Status = row(phase9Card, 5, "Phase 9 Status")
-    local p9Owner = row(phase9Card, 6, "Priority Owner")
-    local p9Error = row(phase9Card, 7, "Last Error")
+    local p9Status = row(phase9Card, 4, "Phase 9 Status")
+    local p9Owner = row(phase9Card, 5, "Priority Owner")
+    local p9Error = row(phase9Card, 6, "Last Error")
 
     local _, heCard = card(sc, 2, "HOT EGG")
     settingRow(heCard, 1, "Auto Hot Egg", nil, "autoHotEgg", setAutoHotEgg)
@@ -7119,6 +7224,11 @@ do
         setAutoHotEgg = setAutoHotEgg,
         setAutoFarmRebirth = setAutoFarmRebirth,
         setAutoRebirth = setAutoRebirth,
+        setUfoAscension = setUfoAscension,
+        setToggleVisual = setToggleVisual,
+        isTowerActive = isTowerActive,
+        isTowerExited = function() return not isTowerActive() end,
+        requestTowerSurrender = function() return requestSurrender(AFR.generation) end,
         getHotEggState = function() return HE end,
         getNormalFarmState = function() return AFR end,
         shutdown = shutdown,
@@ -9564,7 +9674,6 @@ local function __unoStage05()
 local PRIORITY = {
     HOT_EGG = 100,
     EVENT_CAPSULE = 80,
-    UFO_ASCENSION = 75,
     KRAKEN_EGG = 70,
     AUTO_ARENA = 40,
     NORMAL_FARM = 10,
@@ -9573,7 +9682,6 @@ local PRIORITY = {
 local DEFAULT_FEATURES = {
     "HOT_EGG",
     "EVENT_CAPSULE",
-    "UFO_ASCENSION",
     "KRAKEN_EGG",
     "AUTO_ARENA",
     "NORMAL_FARM",
@@ -10241,40 +10349,14 @@ local function createUNOHubPriorityIntegration(deps)
         }
     end
 
-    local function getUFOBackend()
-        local candidate = backends.UFO_ASCENSION or env.UNO_UFO_ASCENSION
-        return type(candidate) == "table" and candidate or nil
-    end
-
-    local function makeUFOAdapter()
-        return {
-            setPaused = function(reason, value)
-                -- V3.2 standalone has no coordinator pause API.
-                -- Higher-priority owners can still preempt movement ownership;
-                -- UFO itself only performs pet order actions.
-                return true
-            end,
-            cancelMovement = function(byOwner)
-                return true
-            end,
-            isCritical = function()
-                local backend = getUFOBackend()
-                if not backend or type(backend.getStatus) ~= "function" then return false end
-                local ok, snapshot = pcall(backend.getStatus)
-                return ok and type(snapshot) == "table" and snapshot.recoveryInProgress == true
-            end,
-        }
-    end
-
     local features = {
         HOT_EGG = makeHotEggAdapter(),
         EVENT_CAPSULE = makeEventAdapter(),
-        UFO_ASCENSION = makeUFOAdapter(),
         KRAKEN_EGG = makeKrakenAdapter(),
         AUTO_ARENA = makeArenaAdapter(),
         NORMAL_FARM = makeNormalFarmAdapter(),
     }
-    for _, owner in ipairs({ "HOT_EGG", "EVENT_CAPSULE", "UFO_ASCENSION", "KRAKEN_EGG", "AUTO_ARENA", "NORMAL_FARM" }) do
+    for _, owner in ipairs({ "HOT_EGG", "EVENT_CAPSULE", "KRAKEN_EGG", "AUTO_ARENA", "NORMAL_FARM" }) do
         requestCache[owner] = false
         criticalCache[owner] = false
     end
@@ -10336,14 +10418,6 @@ local function createUNOHubPriorityIntegration(deps)
         end
         local pendingOk, pending = safeCall(backend.getPendingEggs)
         return pendingOk and type(pending) == "table" and next(pending) ~= nil
-    end
-
-    local function ufoRequested()
-        local backend = getUFOBackend()
-        if not backend or type(backend.getStatus) ~= "function" then return false end
-        local ok, snapshot = pcall(backend.getStatus)
-        if not ok or type(snapshot) ~= "table" or snapshot.enabled ~= true then return false end
-        return snapshot.ufoActive == true or snapshot.recoveryInProgress == true
     end
 
     local function arenaRequested()
@@ -10409,7 +10483,6 @@ local function createUNOHubPriorityIntegration(deps)
     local function sync()
         syncFeature("HOT_EGG", hotEggRequested(), false)
         syncFeature("EVENT_CAPSULE", eventRequested(), features.EVENT_CAPSULE.isCritical())
-        syncFeature("UFO_ASCENSION", ufoRequested(), features.UFO_ASCENSION.isCritical())
         syncFeature("KRAKEN_EGG", krakenRequested(), false)
         local arenaCritical = features.AUTO_ARENA.isCritical()
         syncFeature("AUTO_ARENA", arenaRequested(), arenaCritical)
@@ -10476,8 +10549,423 @@ end
 __unoRunStage("06 06_UNO_HUB_PRIORITY_INTEGRATION_PHASE9(1).lua", __unoStage06)
 
 
--- UNO UFO ASCENSION V3.2 merged directly from supplied standalone
-local function __unoStageUFOAscension()
+local function __unoStage07()
+-- UNO HUB PHASE 9 AUTOMATIC RUNTIME BOOTSTRAP
+-- Constructs real backend instances from source-backed game modules.
+-- It never fabricates Arena/Kraken dependencies and never claims runtime PASS.
+
+local env = (getgenv and getgenv()) or _G
+local old = env.UNO_HUB_PHASE9
+if old and type(old.destroy) == "function" then
+    pcall(old.destroy)
+end
+
+local status = "BOOTSTRAPPING"
+local lastError = nil
+local backends: {[string]: any} = {}
+local integration: any = nil
+local destroyed = false
+local ownedBackends: {[string]: any} = {}
+local movementBroker = { integration = nil }
+
+local function log(message)
+    print("[UNO Bootstrap] " .. tostring(message))
+end
+
+local function block(reason)
+    status = "BLOCKED"
+    lastError = tostring(reason)
+    for key, backend in pairs(ownedBackends) do
+        if backend and type(backend.destroy) == "function" then pcall(backend.destroy) end
+        ownedBackends[key] = nil
+    end
+    backends = {}
+    env.UNO_HUB_BACKENDS = nil
+    env.UNO_REAL_BACKENDS = nil
+    log("BLOCKED " .. lastError)
+    print("PHASE 9 BOOTSTRAP: BLOCKED — " .. lastError)
+end
+
+local function safeRequire(instance)
+    if not instance then return nil end
+    local ok, result = pcall(require, instance)
+    return ok and result or nil
+end
+
+local function child(root, name)
+    return root and root:FindFirstChild(name) or nil
+end
+
+local function getRoot()
+    local runtime = env.UNO_HUB_RUNTIME
+    if type(runtime) ~= "table" then
+        return nil, "UNOHUB_PHASE9.lua runtime bridge unavailable"
+    end
+    local services = runtime.Services
+    if type(services) ~= "table" then
+        return nil, "UNOHUB_PHASE9.lua runtime services unavailable"
+    end
+    return {
+        runtime = runtime,
+        Players = services.Players,
+        ReplicatedStorage = services.ReplicatedStorage,
+        Workspace = services.Workspace,
+        CollectionService = services.CollectionService,
+        TweenService = services.TweenService,
+        player = services.Players and services.Players.LocalPlayer,
+    }
+end
+
+local function createTweenMovement(root)
+    local active = nil
+    local serial = 0
+    local function getRootPart()
+        local character = root.player and root.player.Character
+        return character and character:FindFirstChild("HumanoidRootPart")
+    end
+    local function cancel(reason)
+        serial += 1
+        local current = active
+        active = nil
+        if current and current.tween then
+            pcall(function() current.tween:Cancel() end)
+        end
+        return true
+    end
+    local function moveTo(position, options)
+        if typeof(position) ~= "Vector3" then return false end
+        options = type(options) == "table" and options or {}
+        cancel("replace")
+        serial += 1
+        local mySerial = serial
+        local hrp = getRootPart()
+        if not hrp then return false end
+        local distance = (hrp.Position - position).Magnitude
+        local speed = tonumber(options.speed) or 45
+        local duration = math.max(0.05, distance / math.max(1, speed))
+        local tween = root.TweenService:Create(
+            hrp,
+            TweenInfo.new(duration, Enum.EasingStyle.Linear, Enum.EasingDirection.Out),
+            { CFrame = CFrame.new(position + Vector3.new(0, 3, 0)) }
+        )
+        local handle = {
+            completed = false,
+            cancelled = false,
+            done = false,
+            cancel = function(self)
+                if self.cancelled or self.done then return end
+                self.cancelled = true
+                cancel("handle_cancel")
+            end,
+            stop = function(self) self:cancel() end,
+            destroy = function(self) self:cancel() end,
+            isComplete = function(self) return self.completed or self.done end,
+        }
+        active = { tween = tween, handle = handle, serial = mySerial }
+        tween.Completed:Connect(function()
+            if mySerial ~= serial then return end
+            handle.completed = true
+            handle.done = true
+            if active and active.serial == mySerial then active = nil end
+        end)
+        tween:Play()
+        task.spawn(function()
+            while mySerial == serial and not handle.done do
+                if type(options.isCancelled) == "function" then
+                    local ok, cancelled = pcall(options.isCancelled)
+                    if ok and cancelled == true then
+                        handle:cancel()
+                        break
+                    end
+                end
+                task.wait(0.1)
+            end
+        end)
+        return handle
+    end
+    return {
+        moveTo = moveTo,
+        cancelMovement = cancel,
+    }
+end
+
+local function resolveArena(root, modules, remotes, charm)
+    local scripts = root.player and root.player:FindFirstChild("PlayerScripts")
+    local ui = scripts and scripts:FindFirstChild("UI")
+    local ui2d = ui and ui:FindFirstChild("2d")
+    local arenaFolder = ui2d and ui2d:FindFirstChild("Arena")
+    local settingsFolder = ui2d and ui2d:FindFirstChild("Settings")
+    local arenaClient = safeRequire(arenaFolder and arenaFolder:FindFirstChild("ArenaClient"))
+    local arenaState = safeRequire(arenaFolder and arenaFolder:FindFirstChild("ArenaState"))
+    local rankSettings = safeRequire(settingsFolder and settingsFolder:FindFirstChild("ArenaRankSettings"))
+    if not arenaClient then return nil, "ArenaClient source path unresolved" end
+    if not arenaState then return nil, "ArenaState source path unresolved" end
+    if not rankSettings then return nil, "ArenaRankSettings source path unresolved" end
+    if not remotes then return nil, "ReplicatedStorage.Core.Remotes unresolved" end
+    if not charm then return nil, "ReplicatedStorage.Packages.Charm unresolved" end
+    return {
+        ArenaClient = arenaClient,
+        ArenaState = arenaState,
+        ArenaRankSettings = rankSettings,
+        Remotes = remotes,
+        Charm = charm,
+    }
+end
+
+local function resolveKraken(root, modules, remotes)
+    if not remotes or type(remotes.fire) ~= "function" or type(remotes.onClient) ~= "function" then
+        return nil, "ReplicatedStorage.Core.Remotes fire/onClient API unresolved"
+    end
+    if type(remotes.defs) ~= "table" or not remotes.defs.LiveEventClientSignal or not remotes.defs.LiveEventSignal then
+        return nil, "Core.Remotes LiveEventClientSignal/LiveEventSignal definitions unresolved"
+    end
+    local scripts = root.player and root.player:FindFirstChild("PlayerScripts")
+    local features = scripts and scripts:FindFirstChild("Features")
+    local admin = features and features:FindFirstChild("Admin")
+    local controllers = admin and admin:FindFirstChild("controllers")
+    local liveEventController = safeRequire(controllers and controllers:FindFirstChild("LiveEventController"))
+    if not liveEventController then
+        return nil, "PlayerScripts.Features.Admin.controllers.LiveEventController unresolved"
+    end
+    if type(liveEventController.isEventActive) ~= "function" or type(liveEventController.getEventState) ~= "function" then
+        return nil, "LiveEventController isEventActive/getEventState API unresolved"
+    end
+    local function getLandedEggs()
+        local folder = root.Workspace:FindFirstChild("KrakenEggs")
+        local result = {}
+        if not folder then return result end
+        for _, instance in ipairs(folder:GetChildren()) do
+            if instance:IsA("Model") then table.insert(result, instance) end
+        end
+        return result
+    end
+    local function getEggId(instance)
+        return instance and instance:GetAttribute("eggId")
+    end
+    local function getEggPosition(instance)
+        return instance and instance:GetPivot().Position
+    end
+    local function getEggExpiry(instance)
+        -- The official controller keeps expiresAt in the event record and
+        -- schedules despawn there; it does not replicate an expiry attribute
+        -- onto the visual Model. The backend therefore receives nil.
+        return nil
+    end
+    local function isEggReady(instance)
+        local prompt = instance and instance:FindFirstChildWhichIsA("ProximityPrompt", true)
+        return prompt ~= nil and prompt.Enabled == true
+    end
+    local function onLiveEventSignal(callback)
+        return remotes.onClient(remotes.defs.LiveEventSignal, callback)
+    end
+    local function fireClientSignal(payload)
+        return remotes.fire(remotes.defs.LiveEventClientSignal, payload)
+    end
+    local function getPlayerPosition()
+        local character = root.player and root.player.Character
+        local hrp = character and character:FindFirstChild("HumanoidRootPart")
+        return hrp and hrp.Position
+    end
+    return {
+        getKrakenEventState = function()
+            return liveEventController:getEventState("kraken")
+        end,
+        isKrakenActive = function()
+            return liveEventController:isEventActive("kraken")
+        end,
+        getLandedEggs = getLandedEggs,
+        getEggId = getEggId,
+        getEggPosition = getEggPosition,
+        getEggExpiry = getEggExpiry,
+        isEggReady = isEggReady,
+        fireClientSignal = fireClientSignal,
+        onLiveEventSignal = onLiveEventSignal,
+        getPlayerPosition = getPlayerPosition,
+        moveTo = createTweenMovement(root).moveTo,
+    }
+end
+
+local function createBootstrap()
+    local root, rootError = getRoot()
+    if not root then block(rootError) return end
+    status = "RESOLVING_DEPENDENCIES"
+    local integrationModules = root.runtime.Integration and root.runtime.Integration.modules or {}
+    local remotes = integrationModules.Remotes
+        or safeRequire(child(child(root.ReplicatedStorage, "Core"), "Remotes"))
+    local charm = integrationModules.Charm
+        or safeRequire(child(child(root.ReplicatedStorage, "Packages"), "Charm"))
+    local eventFactory = env.UNO_EVENT_CAPSULE_COLLECTOR_FACTORY
+    local arenaFactory = env.UNO_AUTO_ARENA_FACTORY
+    local krakenFactory = env.UNO_KRAKEN_EGG_COLLECTOR_FACTORY
+    local integrationFactory = env.UNO_HUB_PRIORITY_INTEGRATION_FACTORY
+    if type(eventFactory) ~= "function" then block("Event Capsule factory unavailable: UNO_EVENT_CAPSULE_COLLECTOR_FACTORY") return end
+    if type(arenaFactory) ~= "function" then block("Auto Arena factory unavailable: UNO_AUTO_ARENA_FACTORY") return end
+    if type(krakenFactory) ~= "function" then block("Kraken factory unavailable: UNO_KRAKEN_EGG_COLLECTOR_FACTORY") return end
+    if type(integrationFactory) ~= "function" then block("Priority integration factory unavailable: UNO_HUB_PRIORITY_INTEGRATION_FACTORY") return end
+    status = "CONSTRUCTING_BACKENDS"
+    local tween = createTweenMovement(root)
+    local looseRemotes = child(root.ReplicatedStorage, "Remotes")
+    local scrapDepositedRemote = looseRemotes and looseRemotes:FindFirstChild("ScrapDeposited")
+    local scrapDeposited = scrapDepositedRemote
+    if scrapDepositedRemote and scrapDepositedRemote:IsA("RemoteEvent") then
+        scrapDeposited = scrapDepositedRemote.OnClientEvent
+    end
+    if not scrapDeposited or type(scrapDeposited.Connect) ~= "function" then
+        block("ScrapDeposited client signal unresolved")
+        return
+    end
+    local eventOk, eventBackend = pcall(eventFactory, {
+        player = root.player,
+        workspace = root.Workspace,
+        collectionService = root.CollectionService,
+        scrapDeposited = scrapDeposited,
+        task = task,
+        log = function(level, message) log(message) end,
+        movement = tween,
+        moveTo = tween.moveTo,
+        acquireMovement = function(owner, priority)
+            if not movementBroker.integration then return false end
+            return movementBroker.integration.getCoordinator().acquireMovement("EVENT_CAPSULE", priority)
+        end,
+        releaseMovement = function(owner)
+            if movementBroker.integration then
+                return movementBroker.integration.getCoordinator().releaseMovement("EVENT_CAPSULE")
+            end
+            return false
+        end,
+        maxCarry = 5,
+        movementMode = "Tween",
+        capsuleRetargetInterval = 0.35,
+        capsuleRetargetDistance = 3,
+        capsuleFollowDistance = 3,
+        recyclerFrontDistance = 5,
+        recyclerFrontSign = 1,
+    })
+    if not eventOk or type(eventBackend) ~= "table" then block("Event Capsule construction failed: " .. tostring(eventBackend)) return end
+    backends.EVENT_CAPSULE = eventBackend
+    ownedBackends.EVENT_CAPSULE = eventBackend
+    log("Event Capsule dependencies READY")
+    local arenaDeps, arenaError = resolveArena(root, integrationModules, remotes, charm)
+    if not arenaDeps then block(arenaError) return end
+    local arenaOk, arenaBackend = pcall(arenaFactory, {
+        ArenaClient = arenaDeps.ArenaClient,
+        ArenaState = arenaDeps.ArenaState,
+        ArenaRankSettings = arenaDeps.ArenaRankSettings,
+        Remotes = arenaDeps.Remotes,
+        Charm = arenaDeps.Charm,
+        task = task,
+        log = function(level, message) log(message) end,
+    })
+    if not arenaOk or type(arenaBackend) ~= "table" then block("Auto Arena construction failed: " .. tostring(arenaBackend)) return end
+    backends.AUTO_ARENA = arenaBackend
+    ownedBackends.AUTO_ARENA = arenaBackend
+    log("Arena dependencies READY")
+    local krakenDeps, krakenError = resolveKraken(root, integrationModules, remotes)
+    if not krakenDeps then block(krakenError) return end
+    local krakenOk, krakenBackend = pcall(krakenFactory, krakenDeps)
+    if not krakenOk or type(krakenBackend) ~= "table" then block("Kraken construction failed: " .. tostring(krakenBackend)) return end
+    backends.KRAKEN_EGG = krakenBackend
+    ownedBackends.KRAKEN_EGG = krakenBackend
+    log("Kraken dependencies READY")
+    status = "CONNECTING_PRIORITY"
+    env.UNO_HUB_BACKENDS = backends
+    env.UNO_REAL_BACKENDS = backends
+    local integrationOk, createdIntegration = pcall(integrationFactory, {
+        runtime = root.runtime,
+        backends = backends,
+        log = function(level, message) log(message) end,
+        destroyBackends = false,
+    })
+    if not integrationOk or type(createdIntegration) ~= "table" then block("Priority integration construction failed: " .. tostring(createdIntegration)) return end
+    integration = createdIntegration
+    movementBroker.integration = integration
+    log("Priority integration READY")
+    integration.run()
+    status = "READY"
+    log("READY")
+end
+
+local function destroy()
+    if destroyed then return end
+    destroyed = true
+    if integration and type(integration.destroy) == "function" then pcall(integration.destroy) end
+    integration = nil
+    movementBroker.integration = nil
+    for key, backend in pairs(ownedBackends) do
+        if backend and type(backend.destroy) == "function" then pcall(backend.destroy) end
+        ownedBackends[key] = nil
+    end
+    env.UNO_HUB_BACKENDS = nil
+    env.UNO_REAL_BACKENDS = nil
+    if env.UNO_HUB_PHASE9 == api then env.UNO_HUB_PHASE9 = nil end
+end
+
+local function getBackends()
+    local result = {}
+    for key, backend in pairs(backends) do result[key] = backend end
+    return result
+end
+
+local api = {
+    getStatus = function() return status end,
+    getBackends = getBackends,
+    getIntegration = function() return integration end,
+    getCoordinatorState = function()
+        return integration and integration.getState() or nil
+    end,
+    getLastError = function() return lastError end,
+    setEventCapsuleEnabled = function(value)
+        local backend = backends.EVENT_CAPSULE
+        if not backend or type(backend.setEnabled) ~= "function" then return false end
+        return backend.setEnabled(value == true)
+    end,
+    setAutoArenaEnabled = function(value)
+        local backend = backends.AUTO_ARENA
+        if not backend or type(backend.setAutoArena) ~= "function" then return false end
+        return backend.setAutoArena(value == true)
+    end,
+    setKrakenEnabled = function(value)
+        local backend = backends.KRAKEN_EGG
+        if not backend or type(backend.setEnabled) ~= "function" then return false end
+        return backend.setEnabled(value == true)
+    end,
+    destroy = destroy,
+}
+
+env.UNO_HUB_PHASE9 = api
+createBootstrap()
+return api
+end
+
+
+local __unoFinalApi = __unoRunStage("07 07_UNO_HUB_PHASE9_BOOTSTRAP(1).lua", __unoStage07)
+
+-- Restore Phase 9 event toggles only after the Phase 9 backends exist.
+do
+    local env = (getgenv and getgenv()) or _G
+    local runtime = env.UNO_HUB_RUNTIME
+    local phase9 = env.UNO_HUB_PHASE9
+    local toggles = runtime and runtime.State and runtime.State.toggles
+
+    if type(phase9) == "table" and type(toggles) == "table" then
+        if toggles.autoEventCapsule == true and type(phase9.setEventCapsuleEnabled) == "function" then
+            pcall(phase9.setEventCapsuleEnabled, true)
+        end
+        if toggles.autoArena == true and type(phase9.setAutoArenaEnabled) == "function" then
+            pcall(phase9.setAutoArenaEnabled, true)
+        end
+        if toggles.autoKraken == true and type(phase9.setKrakenEnabled) == "function" then
+            pcall(phase9.setKrakenEnabled, true)
+        end
+    end
+end
+
+
+
+
+local function __unoStage08()
+-- UNO UFO ASCENSION V3.2 - clean standalone integration stage.
+-- Runtime-confirmed UFO logic is intentionally kept isolated from the Phase 9 bootstrap.
 --[[
     UNO UFO ASCENSION STANDALONE V3.2 RETREAT RECOVERY
     Direct-execute test module.
@@ -10902,6 +11390,18 @@ local function confirmMutation(token, timeoutSeconds)
                         state.enabled = false
                         workerToken += 1
                         setState("GENES_MAX")
+                        local runtime = env.UNO_HUB_RUNTIME
+                        if type(runtime) == "table" then
+                            if runtime.State and runtime.State.toggles then
+                                runtime.State.toggles.autoUfoAscension = false
+                            end
+                            if type(runtime.setToggleVisual) == "function" then
+                                pcall(runtime.setToggleVisual, "autoUfoAscension", false)
+                            end
+                            if type(runtime.setUfoAscension) == "function" then
+                                pcall(runtime.setUfoAscension, false)
+                            end
+                        end
                         return true
                     end
                     repeatReadyAt = now() + CONTINUOUS_CYCLE_DELAY_SECONDS
@@ -11216,6 +11716,18 @@ local function processOnce(token)
         state.enabled = false
         workerToken += 1
         setState("GENES_MAX")
+        local runtime = env.UNO_HUB_RUNTIME
+        if type(runtime) == "table" then
+            if runtime.State and runtime.State.toggles then
+                runtime.State.toggles.autoUfoAscension = false
+            end
+            if type(runtime.setToggleVisual) == "function" then
+                pcall(runtime.setToggleVisual, "autoUfoAscension", false)
+            end
+            if type(runtime.setUfoAscension) == "function" then
+                pcall(runtime.setUfoAscension, false)
+            end
+        end
         return
     end
     state.currentCycle = state.cycleCountThisEvent + 1
@@ -11291,9 +11803,7 @@ function api.disable()
 end
 
 function api.setEnabled(value)
-    if value == true then
-        return api.enable()
-    end
+    if value == true then return api.enable() end
     return api.disable()
 end
 
@@ -11303,6 +11813,14 @@ end
 
 function api.getStatus()
     return cloneTable(state)
+end
+
+function api.isEquippedGenesMax()
+    local chicken = getEquippedChicken()
+    if type(chicken) ~= "table" then return false, "EQUIPPED_CHICKEN_NOT_FOUND" end
+    local currentGenome = getGenome(chicken)
+    if type(currentGenome) ~= "table" then return false, "GENOME_UNAVAILABLE" end
+    return areGenesMaxFor(chicken, currentGenome) == true, nil
 end
 
 function api.getState()
@@ -11474,23 +11992,6 @@ end
 
 env.UNO_UFO_ASCENSION = api
 
-do
-    local runtime = env.UNO_HUB_RUNTIME
-    if type(runtime) == "table" then
-        api.setTowerHooks({
-            isTowerActive = function()
-                return type(runtime.isTowerActive) == "function" and runtime.isTowerActive() == true
-            end,
-            isTowerExited = function()
-                return type(runtime.isTowerExited) == "function" and runtime.isTowerExited() == true
-            end,
-            surrender = function()
-                return type(runtime.requestTowerSurrender) == "function" and runtime.requestTowerSurrender() or false
-            end,
-        })
-    end
-end
-
 log("STANDALONE V3.2 START")
 log("resolving dependencies...")
 log("LiveEventController = " .. (LiveEventController and "READY" or "MISSING"))
@@ -11509,429 +12010,99 @@ return api
 
 end
 
-local __unoUfoApi = __unoRunStage("UFO ASCENSION V3.2", __unoStageUFOAscension)
+local __unoUfoApi = __unoRunStage("08 UFO ASCENSION V3.2", __unoStage08)
 
-local function __unoStage07()
--- UNO HUB PHASE 9 AUTOMATIC RUNTIME BOOTSTRAP
--- Constructs real backend instances from source-backed game modules.
--- It never fabricates Arena/Kraken dependencies and never claims runtime PASS.
-
-local env = (getgenv and getgenv()) or _G
-local old = env.UNO_HUB_PHASE9
-if old and type(old.destroy) == "function" then
-    pcall(old.destroy)
-end
-
-local status = "BOOTSTRAPPING"
-local lastError = nil
-local backends: {[string]: any} = {}
-local integration: any = nil
-local destroyed = false
-local ownedBackends: {[string]: any} = {}
-local movementBroker = { integration = nil }
-
-local function log(message)
-    print("[UNO Bootstrap] " .. tostring(message))
-end
-
-local function block(reason)
-    status = "BLOCKED"
-    lastError = tostring(reason)
-    for key, backend in pairs(ownedBackends) do
-        if backend and type(backend.destroy) == "function" then pcall(backend.destroy) end
-        ownedBackends[key] = nil
-    end
-    backends = {}
-    env.UNO_HUB_BACKENDS = nil
-    env.UNO_REAL_BACKENDS = nil
-    log("BLOCKED " .. lastError)
-    print("PHASE 9 BOOTSTRAP: BLOCKED — " .. lastError)
-end
-
-local function safeRequire(instance)
-    if not instance then return nil end
-    local ok, result = pcall(require, instance)
-    return ok and result or nil
-end
-
-local function child(root, name)
-    return root and root:FindFirstChild(name) or nil
-end
-
-local function getRoot()
+do
+    local env = (getgenv and getgenv()) or _G
     local runtime = env.UNO_HUB_RUNTIME
-    if type(runtime) ~= "table" then
-        return nil, "UNOHUB_PHASE9.lua runtime bridge unavailable"
-    end
-    local services = runtime.Services
-    if type(services) ~= "table" then
-        return nil, "UNOHUB_PHASE9.lua runtime services unavailable"
-    end
-    return {
-        runtime = runtime,
-        Players = services.Players,
-        ReplicatedStorage = services.ReplicatedStorage,
-        Workspace = services.Workspace,
-        CollectionService = services.CollectionService,
-        TweenService = services.TweenService,
-        player = services.Players and services.Players.LocalPlayer,
-    }
-end
+    local ufoApi = env.UNO_UFO_ASCENSION
+    local phase9 = env.UNO_HUB_PHASE9
+    local integration = phase9 and type(phase9.getIntegration) == "function" and phase9.getIntegration() or env.UNO_HUB_PRIORITY_INTEGRATION
+    local coordinator = integration and type(integration.getCoordinator) == "function" and integration.getCoordinator() or nil
 
-local function createTweenMovement(root)
-    local active = nil
-    local serial = 0
-    local function getRootPart()
-        local character = root.player and root.player.Character
-        return character and character:FindFirstChild("HumanoidRootPart")
-    end
-    local function cancel(reason)
-        serial += 1
-        local current = active
-        active = nil
-        if current and current.tween then
-            pcall(function() current.tween:Cancel() end)
+    if type(ufoApi) == "table" then
+        if type(runtime) == "table" and type(ufoApi.setTowerHooks) == "function" then
+            ufoApi.setTowerHooks({
+                isTowerActive = function()
+                    return type(runtime.isTowerActive) == "function" and runtime.isTowerActive() == true
+                end,
+                isTowerExited = function()
+                    return type(runtime.isTowerExited) == "function" and runtime.isTowerExited() == true
+                end,
+                surrender = function()
+                    return type(runtime.requestTowerSurrender) == "function" and runtime.requestTowerSurrender() or false
+                end,
+            })
+            print("[UNO UFO MERGE] Tower hooks READY")
         end
-        return true
+
+        -- Restore saved UFO toggle only after the standalone backend exists.
+        local toggles = runtime and runtime.State and runtime.State.toggles
+        if type(toggles) == "table" and toggles.autoUfoAscension == true then
+            local maxed = false
+            if type(ufoApi.isEquippedGenesMax) == "function" then
+                local okMax, value = pcall(ufoApi.isEquippedGenesMax)
+                maxed = okMax and value == true
+            end
+            if maxed then
+                toggles.autoUfoAscension = false
+                if type(runtime.setToggleVisual) == "function" then
+                    pcall(runtime.setToggleVisual, "autoUfoAscension", false)
+                end
+                if runtime.State.ufoAscension then
+                    runtime.State.ufoAscension.status = "Genes Max"
+                    runtime.State.ufoAscension.phase = "GENES_MAX"
+                end
+            elseif type(ufoApi.setEnabled) == "function" then
+                pcall(ufoApi.setEnabled, true)
+            end
+        end
     end
-    local function moveTo(position, options)
-        if typeof(position) ~= "Vector3" then return false end
-        options = type(options) == "table" and options or {}
-        cancel("replace")
-        serial += 1
-        local mySerial = serial
-        local hrp = getRootPart()
-        if not hrp then return false end
-        local distance = (hrp.Position - position).Magnitude
-        local speed = tonumber(options.speed) or 45
-        local duration = math.max(0.05, distance / math.max(1, speed))
-        local tween = root.TweenService:Create(
-            hrp,
-            TweenInfo.new(duration, Enum.EasingStyle.Linear, Enum.EasingDirection.Out),
-            { CFrame = CFrame.new(position + Vector3.new(0, 3, 0)) }
-        )
-        local handle = {
-            completed = false,
-            cancelled = false,
-            done = false,
-            cancel = function(self)
-                if self.cancelled or self.done then return end
-                self.cancelled = true
-                cancel("handle_cancel")
-            end,
-            stop = function(self) self:cancel() end,
-            destroy = function(self) self:cancel() end,
-            isComplete = function(self) return self.completed or self.done end,
-        }
-        active = { tween = tween, handle = handle, serial = mySerial }
-        tween.Completed:Connect(function()
-            if mySerial ~= serial then return end
-            handle.completed = true
-            handle.done = true
-            if active and active.serial == mySerial then active = nil end
-        end)
-        tween:Play()
+
+    -- Lightweight coordinator bridge. Uses the existing coordinator directly;
+    -- does not create or replace a second coordinator.
+    if type(coordinator) == "table" and type(ufoApi) == "table" then
         task.spawn(function()
-            while mySerial == serial and not handle.done do
-                if type(options.isCancelled) == "function" then
-                    local ok, cancelled = pcall(options.isCancelled)
-                    if ok and cancelled == true then
-                        handle:cancel()
-                        break
+            local requested = false
+            while env.UNO_UFO_ASCENSION == ufoApi do
+                local want = false
+                local critical = false
+                if type(ufoApi.getStatus) == "function" then
+                    local ok, st = pcall(ufoApi.getStatus)
+                    if ok and type(st) == "table" then
+                        want = st.enabled == true and (st.ufoActive == true or st.recoveryInProgress == true)
+                        critical = st.recoveryInProgress == true
                     end
                 end
-                task.wait(0.1)
+
+                if want and not requested then
+                    requested = true
+                    if type(coordinator.setFeatureEnabled) == "function" then
+                        pcall(coordinator.setFeatureEnabled, "UFO_ASCENSION", true)
+                    end
+                    if type(coordinator.requestPriority) == "function" then
+                        pcall(coordinator.requestPriority, "UFO_ASCENSION", 75, { enabled = true, critical = critical })
+                    end
+                    print("[UNO UFO MERGE] requested UFO_ASCENSION priority=75")
+                elseif want and requested then
+                    if type(coordinator.setCritical) == "function" then
+                        pcall(coordinator.setCritical, "UFO_ASCENSION", critical)
+                    end
+                elseif not want and requested then
+                    requested = false
+                    if type(coordinator.releasePriority) == "function" then
+                        pcall(coordinator.releasePriority, "UFO_ASCENSION")
+                    end
+                    print("[UNO UFO MERGE] released UFO_ASCENSION")
+                end
+                task.wait(0.25)
+            end
+            if requested and type(coordinator.releasePriority) == "function" then
+                pcall(coordinator.releasePriority, "UFO_ASCENSION")
             end
         end)
-        return handle
-    end
-    return {
-        moveTo = moveTo,
-        cancelMovement = cancel,
-    }
-end
-
-local function resolveArena(root, modules, remotes, charm)
-    local scripts = root.player and root.player:FindFirstChild("PlayerScripts")
-    local ui = scripts and scripts:FindFirstChild("UI")
-    local ui2d = ui and ui:FindFirstChild("2d")
-    local arenaFolder = ui2d and ui2d:FindFirstChild("Arena")
-    local settingsFolder = ui2d and ui2d:FindFirstChild("Settings")
-    local arenaClient = safeRequire(arenaFolder and arenaFolder:FindFirstChild("ArenaClient"))
-    local arenaState = safeRequire(arenaFolder and arenaFolder:FindFirstChild("ArenaState"))
-    local rankSettings = safeRequire(settingsFolder and settingsFolder:FindFirstChild("ArenaRankSettings"))
-    if not arenaClient then return nil, "ArenaClient source path unresolved" end
-    if not arenaState then return nil, "ArenaState source path unresolved" end
-    if not rankSettings then return nil, "ArenaRankSettings source path unresolved" end
-    if not remotes then return nil, "ReplicatedStorage.Core.Remotes unresolved" end
-    if not charm then return nil, "ReplicatedStorage.Packages.Charm unresolved" end
-    return {
-        ArenaClient = arenaClient,
-        ArenaState = arenaState,
-        ArenaRankSettings = rankSettings,
-        Remotes = remotes,
-        Charm = charm,
-    }
-end
-
-local function resolveKraken(root, modules, remotes)
-    if not remotes or type(remotes.fire) ~= "function" or type(remotes.onClient) ~= "function" then
-        return nil, "ReplicatedStorage.Core.Remotes fire/onClient API unresolved"
-    end
-    if type(remotes.defs) ~= "table" or not remotes.defs.LiveEventClientSignal or not remotes.defs.LiveEventSignal then
-        return nil, "Core.Remotes LiveEventClientSignal/LiveEventSignal definitions unresolved"
-    end
-    local scripts = root.player and root.player:FindFirstChild("PlayerScripts")
-    local features = scripts and scripts:FindFirstChild("Features")
-    local admin = features and features:FindFirstChild("Admin")
-    local controllers = admin and admin:FindFirstChild("controllers")
-    local liveEventController = safeRequire(controllers and controllers:FindFirstChild("LiveEventController"))
-    if not liveEventController then
-        return nil, "PlayerScripts.Features.Admin.controllers.LiveEventController unresolved"
-    end
-    if type(liveEventController.isEventActive) ~= "function" or type(liveEventController.getEventState) ~= "function" then
-        return nil, "LiveEventController isEventActive/getEventState API unresolved"
-    end
-    local function getLandedEggs()
-        local folder = root.Workspace:FindFirstChild("KrakenEggs")
-        local result = {}
-        if not folder then return result end
-        for _, instance in ipairs(folder:GetChildren()) do
-            if instance:IsA("Model") then table.insert(result, instance) end
-        end
-        return result
-    end
-    local function getEggId(instance)
-        return instance and instance:GetAttribute("eggId")
-    end
-    local function getEggPosition(instance)
-        return instance and instance:GetPivot().Position
-    end
-    local function getEggExpiry(instance)
-        -- The official controller keeps expiresAt in the event record and
-        -- schedules despawn there; it does not replicate an expiry attribute
-        -- onto the visual Model. The backend therefore receives nil.
-        return nil
-    end
-    local function isEggReady(instance)
-        local prompt = instance and instance:FindFirstChildWhichIsA("ProximityPrompt", true)
-        return prompt ~= nil and prompt.Enabled == true
-    end
-    local function onLiveEventSignal(callback)
-        return remotes.onClient(remotes.defs.LiveEventSignal, callback)
-    end
-    local function fireClientSignal(payload)
-        return remotes.fire(remotes.defs.LiveEventClientSignal, payload)
-    end
-    local function getPlayerPosition()
-        local character = root.player and root.player.Character
-        local hrp = character and character:FindFirstChild("HumanoidRootPart")
-        return hrp and hrp.Position
-    end
-    return {
-        getKrakenEventState = function()
-            return liveEventController:getEventState("kraken")
-        end,
-        isKrakenActive = function()
-            return liveEventController:isEventActive("kraken")
-        end,
-        getLandedEggs = getLandedEggs,
-        getEggId = getEggId,
-        getEggPosition = getEggPosition,
-        getEggExpiry = getEggExpiry,
-        isEggReady = isEggReady,
-        fireClientSignal = fireClientSignal,
-        onLiveEventSignal = onLiveEventSignal,
-        getPlayerPosition = getPlayerPosition,
-        moveTo = createTweenMovement(root).moveTo,
-    }
-end
-
-local function createBootstrap()
-    local root, rootError = getRoot()
-    if not root then block(rootError) return end
-    status = "RESOLVING_DEPENDENCIES"
-    local integrationModules = root.runtime.Integration and root.runtime.Integration.modules or {}
-    local remotes = integrationModules.Remotes
-        or safeRequire(child(child(root.ReplicatedStorage, "Core"), "Remotes"))
-    local charm = integrationModules.Charm
-        or safeRequire(child(child(root.ReplicatedStorage, "Packages"), "Charm"))
-    local eventFactory = env.UNO_EVENT_CAPSULE_COLLECTOR_FACTORY
-    local arenaFactory = env.UNO_AUTO_ARENA_FACTORY
-    local krakenFactory = env.UNO_KRAKEN_EGG_COLLECTOR_FACTORY
-    local integrationFactory = env.UNO_HUB_PRIORITY_INTEGRATION_FACTORY
-    if type(eventFactory) ~= "function" then block("Event Capsule factory unavailable: UNO_EVENT_CAPSULE_COLLECTOR_FACTORY") return end
-    if type(arenaFactory) ~= "function" then block("Auto Arena factory unavailable: UNO_AUTO_ARENA_FACTORY") return end
-    if type(krakenFactory) ~= "function" then block("Kraken factory unavailable: UNO_KRAKEN_EGG_COLLECTOR_FACTORY") return end
-    if type(integrationFactory) ~= "function" then block("Priority integration factory unavailable: UNO_HUB_PRIORITY_INTEGRATION_FACTORY") return end
-    status = "CONSTRUCTING_BACKENDS"
-    local tween = createTweenMovement(root)
-    local looseRemotes = child(root.ReplicatedStorage, "Remotes")
-    local scrapDepositedRemote = looseRemotes and looseRemotes:FindFirstChild("ScrapDeposited")
-    local scrapDeposited = scrapDepositedRemote
-    if scrapDepositedRemote and scrapDepositedRemote:IsA("RemoteEvent") then
-        scrapDeposited = scrapDepositedRemote.OnClientEvent
-    end
-    if not scrapDeposited or type(scrapDeposited.Connect) ~= "function" then
-        block("ScrapDeposited client signal unresolved")
-        return
-    end
-    local eventOk, eventBackend = pcall(eventFactory, {
-        player = root.player,
-        workspace = root.Workspace,
-        collectionService = root.CollectionService,
-        scrapDeposited = scrapDeposited,
-        task = task,
-        log = function(level, message) log(message) end,
-        movement = tween,
-        moveTo = tween.moveTo,
-        acquireMovement = function(owner, priority)
-            if not movementBroker.integration then return false end
-            return movementBroker.integration.getCoordinator().acquireMovement("EVENT_CAPSULE", priority)
-        end,
-        releaseMovement = function(owner)
-            if movementBroker.integration then
-                return movementBroker.integration.getCoordinator().releaseMovement("EVENT_CAPSULE")
-            end
-            return false
-        end,
-        maxCarry = 5,
-        movementMode = "Tween",
-        capsuleRetargetInterval = 0.35,
-        capsuleRetargetDistance = 3,
-        capsuleFollowDistance = 3,
-        recyclerFrontDistance = 5,
-        recyclerFrontSign = 1,
-    })
-    if not eventOk or type(eventBackend) ~= "table" then block("Event Capsule construction failed: " .. tostring(eventBackend)) return end
-    backends.EVENT_CAPSULE = eventBackend
-    ownedBackends.EVENT_CAPSULE = eventBackend
-    log("Event Capsule dependencies READY")
-    local arenaDeps, arenaError = resolveArena(root, integrationModules, remotes, charm)
-    if not arenaDeps then block(arenaError) return end
-    local arenaOk, arenaBackend = pcall(arenaFactory, {
-        ArenaClient = arenaDeps.ArenaClient,
-        ArenaState = arenaDeps.ArenaState,
-        ArenaRankSettings = arenaDeps.ArenaRankSettings,
-        Remotes = arenaDeps.Remotes,
-        Charm = arenaDeps.Charm,
-        task = task,
-        log = function(level, message) log(message) end,
-    })
-    if not arenaOk or type(arenaBackend) ~= "table" then block("Auto Arena construction failed: " .. tostring(arenaBackend)) return end
-    backends.AUTO_ARENA = arenaBackend
-    ownedBackends.AUTO_ARENA = arenaBackend
-    log("Arena dependencies READY")
-    local krakenDeps, krakenError = resolveKraken(root, integrationModules, remotes)
-    if not krakenDeps then block(krakenError) return end
-    local krakenOk, krakenBackend = pcall(krakenFactory, krakenDeps)
-    if not krakenOk or type(krakenBackend) ~= "table" then block("Kraken construction failed: " .. tostring(krakenBackend)) return end
-    backends.KRAKEN_EGG = krakenBackend
-    ownedBackends.KRAKEN_EGG = krakenBackend
-    log("Kraken dependencies READY")
-    status = "CONNECTING_PRIORITY"
-    env.UNO_HUB_BACKENDS = backends
-    env.UNO_REAL_BACKENDS = backends
-    local integrationOk, createdIntegration = pcall(integrationFactory, {
-        runtime = root.runtime,
-        backends = backends,
-        log = function(level, message) log(message) end,
-        destroyBackends = false,
-    })
-    if not integrationOk or type(createdIntegration) ~= "table" then block("Priority integration construction failed: " .. tostring(createdIntegration)) return end
-    integration = createdIntegration
-    movementBroker.integration = integration
-    log("Priority integration READY")
-    integration.run()
-    status = "READY"
-    log("READY")
-end
-
-local function destroy()
-    if destroyed then return end
-    destroyed = true
-    if integration and type(integration.destroy) == "function" then pcall(integration.destroy) end
-    integration = nil
-    movementBroker.integration = nil
-    for key, backend in pairs(ownedBackends) do
-        if backend and type(backend.destroy) == "function" then pcall(backend.destroy) end
-        ownedBackends[key] = nil
-    end
-    env.UNO_HUB_BACKENDS = nil
-    env.UNO_REAL_BACKENDS = nil
-    if env.UNO_HUB_PHASE9 == api then env.UNO_HUB_PHASE9 = nil end
-end
-
-local function getBackends()
-    local result = {}
-    for key, backend in pairs(backends) do result[key] = backend end
-    return result
-end
-
-local api = {
-    getStatus = function() return status end,
-    getBackends = getBackends,
-    getIntegration = function() return integration end,
-    getCoordinatorState = function()
-        return integration and integration.getState() or nil
-    end,
-    getLastError = function() return lastError end,
-    setEventCapsuleEnabled = function(value)
-        local backend = backends.EVENT_CAPSULE
-        if not backend or type(backend.setEnabled) ~= "function" then return false end
-        return backend.setEnabled(value == true)
-    end,
-    setAutoArenaEnabled = function(value)
-        local backend = backends.AUTO_ARENA
-        if not backend or type(backend.setAutoArena) ~= "function" then return false end
-        return backend.setAutoArena(value == true)
-    end,
-    setKrakenEnabled = function(value)
-        local backend = backends.KRAKEN_EGG
-        if not backend or type(backend.setEnabled) ~= "function" then return false end
-        return backend.setEnabled(value == true)
-    end,
-    destroy = destroy,
-}
-
-env.UNO_HUB_PHASE9 = api
-createBootstrap()
-return api
-end
-
-
-local __unoFinalApi = __unoRunStage("07 07_UNO_HUB_PHASE9_BOOTSTRAP(1).lua", __unoStage07)
-
--- Restore Phase 9 event toggles only after the Phase 9 backends exist.
-do
-    local env = (getgenv and getgenv()) or _G
-    local runtime = env.UNO_HUB_RUNTIME
-    local phase9 = env.UNO_HUB_PHASE9
-    local toggles = runtime and runtime.State and runtime.State.toggles
-
-    if type(phase9) == "table" and type(toggles) == "table" then
-        if toggles.autoEventCapsule == true and type(phase9.setEventCapsuleEnabled) == "function" then
-            pcall(phase9.setEventCapsuleEnabled, true)
-        end
-        if toggles.autoArena == true and type(phase9.setAutoArenaEnabled) == "function" then
-            pcall(phase9.setAutoArenaEnabled, true)
-        end
-        if toggles.autoKraken == true and type(phase9.setKrakenEnabled) == "function" then
-            pcall(phase9.setKrakenEnabled, true)
-        end
-    end
-end
-
-
--- Restore UFO Ascension preference after its backend has been constructed.
-do
-    local env = (getgenv and getgenv()) or _G
-    local runtime = env.UNO_HUB_RUNTIME
-    local toggles = runtime and runtime.State and runtime.State.toggles
-    local ufoBackend = env.UNO_UFO_ASCENSION
-    if type(toggles) == "table" and toggles.autoUfoAscension == true
-        and type(ufoBackend) == "table" and type(ufoBackend.setEnabled) == "function" then
-        pcall(ufoBackend.setEnabled, true)
+    else
+        warn("[UNO UFO MERGE] Coordinator bridge unavailable; UFO backend still isolated")
     end
 end
 

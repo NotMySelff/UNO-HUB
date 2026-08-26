@@ -1,5 +1,5 @@
 --[[
-    UNO HUB1
+    UNO HUB
 ]]
 
 
@@ -7470,8 +7470,7 @@ end
 
 local function collectSnapshot()
 
-    *-- Mutable atoms are intentionally read here, not captured at module load.*
-
+    -- Mutable atoms are intentionally read here, not captured at module load.
     local moneyObject = readAtom(DataController and DataController.money)
 
     local rebirthObject = readAtom(DataController and DataController.rebirth)
@@ -8772,12 +8771,9 @@ end
 
 local function localClock()
 
-    *-- os.date("*t") is evaluated directly in the client-local wall-clock context.*
-
-    *-- The protected closure avoids the Luau analyzer warning from passing os.date*
-
-    *-- itself through pcall with a variadic argument list.*
-
+    -- os.date("*t") is evaluated directly in the client-local wall-clock context.
+    -- The protected closure avoids the Luau analyzer warning from passing os.date
+    -- itself through pcall with a variadic argument list.
     local ok, clock = pcall(function()
 
         return os.date("*t")
@@ -9104,8 +9100,7 @@ local function processTrigger(trigger, now)
 
     if not sent and reason == "SENDER_IN_FLIGHT" then
 
-        *-- Keep one deferred decision for a sender operation already in progress.*
-
+        -- Keep one deferred decision for a sender operation already in progress.
         state.pendingTrigger = trigger
 
     end

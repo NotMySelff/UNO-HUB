@@ -3901,30 +3901,30 @@ local function setAutoBuyGenerator(on)
         else State.economy.buyStatus = "FAILED" end
     end)
 end
-local GeneratorMaxLevelVisualSetters = {}
+State._generatorMaxLevelVisualSetters = State._generatorMaxLevelVisualSetters or {}
 
-local function getGeneratorGameMaxLevel()
+State._getGeneratorGameMaxLevel = function()
     local gameConfig = Integration.modules.GameConfig
     local generators = gameConfig and gameConfig.generators
     local runtimeMax = generators and tonumber(generators.maxLevel)
     return math.max(1, math.floor(runtimeMax or 50))
 end
 
-local function getMaxUpgradeGeneratorLevel()
-    local gameMax = getGeneratorGameMaxLevel()
+State._getMaxUpgradeGeneratorLevel = function()
+    local gameMax = State._getGeneratorGameMaxLevel()
     local value = tonumber(State.economy.maxUpgradeGeneratorLevel) or 50
     return math.clamp(math.floor(value + 0.5), 1, gameMax)
 end
 
-local function setMaxUpgradeGeneratorLevel(value)
-    local gameMax = getGeneratorGameMaxLevel()
+State._setMaxUpgradeGeneratorLevel = function(value)
+    local gameMax = State._getGeneratorGameMaxLevel()
     local numeric = tonumber(value)
     if numeric == nil then
-        numeric = getMaxUpgradeGeneratorLevel()
+        numeric = State._getMaxUpgradeGeneratorLevel()
     end
     numeric = math.clamp(math.floor(numeric + 0.5), 1, gameMax)
     State.economy.maxUpgradeGeneratorLevel = numeric
-    for _, refresh in ipairs(GeneratorMaxLevelVisualSetters) do
+    for _, refresh in ipairs(State._generatorMaxLevelVisualSetters) do
         if type(refresh) == "function" then
             pcall(refresh, numeric)
         end
@@ -3942,7 +3942,7 @@ local function setAutoUpgradeGenerator(on)
         local view = generatorView(before)
         if not view then State.economy.upgradeStatus = "NO DATA" return end
         local candidates = {}
-        local configuredMaxLevel = getMaxUpgradeGeneratorLevel()
+        local configuredMaxLevel = State._getMaxUpgradeGeneratorLevel()
         for _, gen in pairs(view.generators) do
             local level = tonumber(gen.level)
             if gen.canUpgrade and level ~= nil and level < configuredMaxLevel then
@@ -4976,7 +4976,7 @@ do
                 autoUpgradeIncubator = State.toggles.autoUpgradeIncubator == true,
                 autoBuyGenerator = State.toggles.autoBuyGenerator == true,
                 autoUpgradeGenerator = State.toggles.autoUpgradeGenerator == true,
-                maxUpgradeGeneratorLevel = getMaxUpgradeGeneratorLevel(),
+                maxUpgradeGeneratorLevel = State._getMaxUpgradeGeneratorLevel(),
                 autoExpandCoop = State.toggles.autoExpandCoop == true,
                 autoUpgradeRecycler = State.toggles.autoUpgradeRecycler == true,
                 autoEventCapsule = State.toggles.autoEventCapsule == true,
@@ -5015,9 +5015,9 @@ do
             if AutoUpgradeIncubatorFeature then applyToggle("autoUpgradeIncubator", function(v) AutoUpgradeIncubatorFeature.setAutoUpgradeIncubator(v) end) end
             applyToggle("autoBuyGenerator", setAutoBuyGenerator)
             if data.maxUpgradeGeneratorLevel ~= nil then
-                setMaxUpgradeGeneratorLevel(data.maxUpgradeGeneratorLevel)
+                State._setMaxUpgradeGeneratorLevel(data.maxUpgradeGeneratorLevel)
             else
-                setMaxUpgradeGeneratorLevel(50)
+                State._setMaxUpgradeGeneratorLevel(50)
             end
             applyToggle("autoUpgradeGenerator", setAutoUpgradeGenerator)
             applyToggle("autoExpandCoop", setAutoExpandCoop)
@@ -5868,7 +5868,7 @@ State._generatorMaxLevelStepper = function(parent, order)
     valueBox.BackgroundColor3 = Theme.SurfaceElevated
     valueBox.BorderSizePixel = 0
     valueBox.ClearTextOnFocus = false
-    valueBox.Text = tostring(getMaxUpgradeGeneratorLevel())
+    valueBox.Text = tostring(State._getMaxUpgradeGeneratorLevel())
     valueBox.Font = Enum.Font.GothamMedium
     valueBox.TextSize = 12
     valueBox.TextColor3 = Theme.TextPrimary
@@ -5892,32 +5892,32 @@ State._generatorMaxLevelStepper = function(parent, order)
 
     local function refresh(value)
         if not valueBox or not valueBox.Parent then return end
-        local normalized = tonumber(value) or getMaxUpgradeGeneratorLevel()
+        local normalized = tonumber(value) or State._getMaxUpgradeGeneratorLevel()
         valueBox.Text = tostring(math.floor(normalized + 0.5))
     end
 
-    table.insert(GeneratorMaxLevelVisualSetters, refresh)
+    table.insert(State._generatorMaxLevelVisualSetters, refresh)
 
     local function commitText()
         local typed = tonumber(valueBox.Text)
         if typed == nil then
-            refresh(getMaxUpgradeGeneratorLevel())
+            refresh(State._getMaxUpgradeGeneratorLevel())
             return
         end
-        setMaxUpgradeGeneratorLevel(typed)
+        State._setMaxUpgradeGeneratorLevel(typed)
     end
 
     minus.MouseButton1Click:Connect(function()
-        setMaxUpgradeGeneratorLevel(getMaxUpgradeGeneratorLevel() - 1)
+        State._setMaxUpgradeGeneratorLevel(State._getMaxUpgradeGeneratorLevel() - 1)
     end)
     plus.MouseButton1Click:Connect(function()
-        setMaxUpgradeGeneratorLevel(getMaxUpgradeGeneratorLevel() + 1)
+        State._setMaxUpgradeGeneratorLevel(State._getMaxUpgradeGeneratorLevel() + 1)
     end)
     valueBox.FocusLost:Connect(function()
         commitText()
     end)
 
-    refresh(getMaxUpgradeGeneratorLevel())
+    refresh(State._getMaxUpgradeGeneratorLevel())
     return valueBox
 end
 

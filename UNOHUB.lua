@@ -7085,9 +7085,2737 @@ safeBuild("Performance", function()
     Views.Performance = { root = sc, update = function() end }
 end)
 
+-- UNO_WEBHOOK_ALL_IN_ONE_V1.lua
+
+-- Mechanical merge of validated Snapshot V2 + Sender V1 Fix3 + Scheduler V1.
+
+-- Scheduler remains disabled on load; configure webhook and call scheduler.enable() explicitly.
+
+
+
+
+
+-- ===== SNAPSHOT V2 =====
+
+-- UNO_WEBHOOK_SNAPSHOT_COLLECTOR_V2.lua
+
+-- Final read-only snapshot collector for future webhook integration.
+
+-- No HTTP requests, Discord sends, gameplay remotes, matchmaking, automation,
+
+-- or UNO HUB state changes are performed here.
+
+local Players = game:GetService("Players")
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local LocalPlayer = Players.LocalPlayer
+
+local function safeRequire(instance)
+
+    if not instance then return nil end
+
+    local ok, value = pcall(require, instance)
+
+    return ok and value or nil
+
+end
+
+local function findPath(root, path)
+
+    local current = root
+
+    for _, name in ipairs(path) do
+
+        if not current then return nil end
+
+        current = current:FindFirstChild(name)
+
+    end
+
+    return current
+
+end
+
+local function readAtom(atom)
+
+    if type(atom) ~= "function" then return nil end
+
+    local ok, value = pcall(atom)
+
+    return ok and value or nil
+
+end
+
+local DataController = safeRequire(findPath(LocalPlayer, { "PlayerScripts", "Core", "Data", "DataController" }))
+
+local Catalog = safeRequire(findPath(ReplicatedStorage, { "Content", "Catalog" }))
+
+local ArenaView = safeRequire(findPath(ReplicatedStorage, { "Features", "Arena", "ArenaView" }))
+
+local ArenaState = safeRequire(findPath(ReplicatedStorage, { "Features", "Arena", "ArenaState" }))
+
+local RankData = safeRequire(findPath(ReplicatedStorage, { "Features", "Ranked", "RankData" }))
+
+local RankedIds = safeRequire(findPath(ReplicatedStorage, { "Features", "ArenaBridge", "RankedIds" }))
+
+local ArenaFormat = safeRequire(findPath(LocalPlayer, { "PlayerScripts", "UI", "2d", "Arena", "ArenaFormat" }))
+
+local SUFFIXES = {
+
+    "", "K", "M", "B", "T", "Qa", "Qi", "Sx", "Sp", "Oc", "No", "Dc",
+
+    "Ud", "Dd", "Td", "Qad", "Qid", "Sxd", "Spd", "Ocd", "Nod", "Vg",
+
+}
+
+local function compactNumber(value)
+
+    local number = tonumber(value)
+
+    if not number then return nil end
+
+    if number == 0 then return "0" end
+
+    local negative = number < 0
+
+    number = math.abs(number)
+
+    local index = 1
+
+    while number >= 1000 and index < #SUFFIXES do
+
+        number /= 1000
+
+        index += 1
+
+    end
+
+    local text
+
+    if index == 1 then
+
+        text = string.format("%.0f", number)
+
+    elseif number >= 100 then
+
+        text = string.format("%.0f", number)
+
+    elseif number >= 10 then
+
+        text = string.format("%.1f", number)
+
+    else
+
+        text = string.format("%.1f", number)
+
+    end
+
+    text = text:gsub("%.0$", "")
+
+    return (negative and "-" or "") .. text .. SUFFIXES[index]
+
+end
+
+local function numericValue(value)
+
+    if type(value) == "number" then return value end
+
+    if type(value) == "table" and type(value.toNumber) == "function" then
+
+        local ok, number = pcall(value.toNumber, value)
+
+        if ok and type(number) == "number" then return number end
+
+    end
+
+    return tonumber(value)
+
+end
+
+local function getActiveSeasonKey()
+
+    if not RankData or type(RankData.GetSeasonKey) ~= "function" then
+
+        return nil, "RankData.GetSeasonKey unavailable"
+
+    end
+
+    local ok, key = pcall(RankData.GetSeasonKey)
+
+    if not ok or type(key) ~= "string" or key == "" then
+
+        return nil, tostring(key)
+
+    end
+
+    return key, nil
+
+end
+
+local function getAvailableSeasonKeys(ranked)
+
+    local keys = {}
+
+    if type(ranked) ~= "table" or type(ranked.seasons) ~= "table" then return keys end
+
+    for key in pairs(ranked.seasons) do keys[#keys + 1] = tostring(key) end
+
+    table.sort(keys)
+
+    return keys
+
+end
+
+local function getSeasonRecord(ranked, seasonKey)
+
+    if not seasonKey or type(ranked) ~= "table" or type(ranked.seasons) ~= "table" then return nil end
+
+    local record = ranked.seasons[seasonKey]
+
+    return type(record) == "table" and record or nil
+
+end
+
+local function resolveRankObject(currentRankName, trophies, topPercent)
+
+    if type(currentRankName) == "string" and currentRankName ~= "" and RankedIds and ArenaView then
+
+        local okId, rankId = pcall(RankedIds.fromName, currentRankName)
+
+        if okId and rankId and type(ArenaView.rankById) == "function" then
+
+            local okRank, rank = pcall(ArenaView.rankById, rankId)
+
+            if okRank and type(rank) == "table" then return rank end
+
+        end
+
+    end
+
+    if ArenaView and type(ArenaView.rankFor) == "function" and type(trophies) == "number" then
+
+        local okRank, rank = pcall(ArenaView.rankFor, trophies, topPercent)
+
+        if okRank and type(rank) == "table" then return rank end
+
+    end
+
+    return nil
+
+end
+
+local function resolveNextRank(currentRank, trophies, topPercent)
+
+    if currentRank and ArenaView and type(ArenaView.nextRank) == "function" then
+
+        local okNext, nextRank = pcall(ArenaView.nextRank, currentRank)
+
+        if okNext and type(nextRank) == "table" then return nextRank end
+
+    end
+
+    local rank = resolveRankObject(nil, trophies, topPercent)
+
+    if rank and ArenaView and type(ArenaView.nextRank) == "function" then
+
+        local okNext, nextRank = pcall(ArenaView.nextRank, rank)
+
+        if okNext and type(nextRank) == "table" then return nextRank end
+
+    end
+
+    return nil
+
+end
+
+local function progressText(trophies, threshold)
+
+    if type(trophies) ~= "number" then return nil end
+
+    if type(threshold) ~= "number" then return tostring(math.floor(trophies)) end
+
+    if ArenaFormat and type(ArenaFormat.progress) == "function" then
+
+        local ok, text = pcall(ArenaFormat.progress, trophies, threshold)
+
+        if ok and type(text) == "string" then return text end
+
+    end
+
+    return string.format("%d / %d", trophies, threshold)
+
+end
+
+local function getChicken(roster)
+
+    local primary = readAtom(DataController and DataController.chicken)
+
+    if type(primary) == "table" then return primary, "DataController.chicken()" end
+
+    if type(roster) == "table" and type(roster.chickens) == "table" then
+
+        for _, chicken in ipairs(roster.chickens) do
+
+            if type(chicken) == "table" and chicken.id == roster.activeId then
+
+                return chicken, "DataController.roster().activeId + .chickens"
+
+            end
+
+        end
+
+    end
+
+    return nil, nil
+
+end
+
+local function chickenName(chicken)
+
+    if type(chicken) ~= "table" or type(Catalog) ~= "table" or type(Catalog.chickenTypes) ~= "table" then return nil end
+
+    local entry = Catalog.chickenTypes[chicken.typeId]
+
+    return type(entry) == "table" and entry.name or nil
+
+end
+
+local function readEggs(roster)
+
+    local result = {}
+
+    local eggs = type(roster) == "table" and roster.eggs or nil
+
+    local eggCatalog = type(Catalog) == "table" and Catalog.eggs or nil
+
+    if type(eggs) ~= "table" then return result end
+
+    for id, rawCount in pairs(eggs) do
+
+        local count = tonumber(rawCount)
+
+        if count and count > 0 then
+
+            local entry = type(eggCatalog) == "table" and eggCatalog[id] or nil
+
+            result[#result + 1] = {
+
+                id = tostring(id),
+
+                name = type(entry) == "table" and entry.name or nil,
+
+                count = count,
+
+            }
+
+        end
+
+    end
+
+    table.sort(result, function(a, b)
+
+        local left = tostring(a.name or a.id):lower()
+
+        local right = tostring(b.name or b.id):lower()
+
+        if left == right then return a.id < b.id end
+
+        return left < right
+
+    end)
+
+    return result
+
+end
+
+local function readAvatar()
+
+    if not LocalPlayer then return nil end
+
+    local ok, imageUrl, isReady = pcall(
+
+        Players.GetUserThumbnailAsync,
+
+        Players,
+
+        LocalPlayer.UserId,
+
+        Enum.ThumbnailType.AvatarThumbnail,
+
+        Enum.ThumbnailSize.Size420x420
+
+    )
+
+    if not ok or type(imageUrl) ~= "string" or imageUrl == "" then return nil end
+
+    return {
+
+        imageUrl = imageUrl,
+
+        isReady = isReady == true,
+
+        thumbnailType = "AvatarThumbnail",
+
+    }
+
+end
+
+local function collectSnapshot()
+
+    *-- Mutable atoms are intentionally read here, not captured at module load.*
+
+    local moneyObject = readAtom(DataController and DataController.money)
+
+    local rebirthObject = readAtom(DataController and DataController.rebirth)
+
+    local roster = readAtom(DataController and DataController.roster)
+
+    local ranked = readAtom(DataController and DataController.ranked)
+
+    local arenaView = readAtom(ArenaState and ArenaState.view)
+
+    local chicken, chickenSource = getChicken(roster)
+
+    local activeSeasonKey, seasonError = getActiveSeasonKey()
+
+    local season = getSeasonRecord(ranked, activeSeasonKey)
+
+    local trophies = season and numericValue(season.trophies) or nil
+
+    local topPercent = type(arenaView) == "table" and numericValue(arenaView.topPercent) or nil
+
+    local currentRankName = season and season.currentRank or nil
+
+    local currentRank = resolveRankObject(currentRankName, trophies, topPercent)
+
+    local nextRank = resolveNextRank(currentRank, trophies, topPercent)
+
+    local nextThreshold = nextRank and numericValue(nextRank.trophies) or nil
+
+    local moneyRaw = numericValue(moneyObject)
+
+    local rebirth = type(rebirthObject) == "table" and numericValue(rebirthObject.count) or nil
+
+    local avatar = readAvatar()
+
+    local arenaStatus = "ACTIVE_SEASON_SELECTOR_UNRESOLVED"
+
+    if activeSeasonKey then
+
+        arenaStatus = season and "SOURCE_BACKED_NOT_RUNTIME_VALIDATED" or "ARENA_DATA_NOT_INITIALIZED"
+
+    end
+
+    local snapshot = {
+
+        account = {
+
+            username = LocalPlayer and LocalPlayer.Name or nil,
+
+            userId = LocalPlayer and LocalPlayer.UserId or nil,
+
+            cashRaw = moneyRaw,
+
+            cashFormatted = compactNumber(moneyRaw),
+
+            rebirth = rebirth,
+
+            rebirthFormatted = compactNumber(rebirth),
+
+        },
+
+        chicken = {
+
+            id = chicken and chicken.id or nil,
+
+            typeId = chicken and chicken.typeId or nil,
+
+            name = chickenName(chicken),
+
+            level = chicken and numericValue(chicken.level) or nil,
+
+        },
+
+        eggs = readEggs(roster),
+
+        arena = {
+
+            seasonId = activeSeasonKey,
+
+            trophies = trophies,
+
+            currentRank = type(currentRankName) == "string" and currentRankName or (currentRank and currentRank.name or nil),
+
+            bestRank = season and season.bestRank or nil,
+
+            seasonWins = season and numericValue(season.numWins or season.wins) or nil,
+
+            nextRank = nextRank and nextRank.name or nil,
+
+            nextThreshold = nextThreshold,
+
+            progressText = progressText(trophies, nextThreshold),
+
+        },
+
+        avatar = avatar,
+
+        meta = {
+
+            collectedAt = os.time(),
+
+            readOnly = true,
+
+            webhookSent = false,
+
+            gameplayRemotesCalled = false,
+
+        },
+
+    }
+
+    local sources = {
+
+        account = "SOURCE_BACKED_RUNTIME_VALIDATED_BY_PRIOR_DIAGNOSTICS",
+
+        chicken = chickenSource and "SOURCE_BACKED_RUNTIME_VALIDATED_BY_PRIOR_DIAGNOSTICS" or "UNRESOLVED",
+
+        eggs = type(roster) == "table" and "SOURCE_BACKED_RUNTIME_VALIDATED_BY_PRIOR_DIAGNOSTICS" or "UNRESOLVED",
+
+        avatar = avatar and "SOURCE_BACKED_RUNTIME_VALIDATED_BY_PRIOR_DIAGNOSTICS" or "UNRESOLVED",
+
+        arena = arenaStatus,
+
+        arenaSeasonSelector = activeSeasonKey and "SOURCE_BACKED" or "ACTIVE_SEASON_SELECTOR_UNRESOLVED",
+
+    }
+
+    return snapshot, {
+
+        sources = sources,
+
+        activeSeasonError = seasonError,
+
+        availableSeasonKeys = getAvailableSeasonKeys(ranked),
+
+        ranked = ranked,
+
+        arenaView = arenaView,
+
+        currentRankObject = currentRank,
+
+        nextRankObject = nextRank,
+
+        readOnly = true,
+
+        webhookSent = false,
+
+        gameplayRemotesCalled = false,
+
+        httpRequestsMade = false,
+
+    }
+
+end
+
+local function getSnapshot()
+
+    local snapshot = collectSnapshot()
+
+    return snapshot
+
+end
+
+local function printEggs(eggs)
+
+    if #eggs == 0 then
+
+        print("(none)")
+
+        return
+
+    end
+
+    for _, egg in ipairs(eggs) do
+
+        print(tostring(egg.name or egg.id) .. " x" .. tostring(egg.count))
+
+    end
+
+end
+
+local function printSnapshot()
+
+    local snapshot, diagnostics = collectSnapshot()
+
+    print("========== UNO WEBHOOK SNAPSHOT V2 ==========")
+
+    print("ACCOUNT")
+
+    print("Username: " .. tostring(snapshot.account.username))
+
+    print("UserId: " .. tostring(snapshot.account.userId))
+
+    print("Cash Raw: " .. tostring(snapshot.account.cashRaw))
+
+    print("Cash Display: " .. tostring(snapshot.account.cashFormatted))
+
+    print("Rebirth: " .. tostring(snapshot.account.rebirth))
+
+    print("CHICKEN")
+
+    print("Name: " .. tostring(snapshot.chicken.name))
+
+    print("ID: " .. tostring(snapshot.chicken.id))
+
+    print("TypeId: " .. tostring(snapshot.chicken.typeId))
+
+    print("Level: " .. tostring(snapshot.chicken.level))
+
+    print("EGG INVENTORY")
+
+    printEggs(snapshot.eggs)
+
+    print("ARENA")
+
+    print("Season: " .. tostring(snapshot.arena.seasonId))
+
+    print("Current Rank: " .. tostring(snapshot.arena.currentRank))
+
+    print("Trophies: " .. tostring(snapshot.arena.trophies))
+
+    print("Progress: " .. tostring(snapshot.arena.progressText))
+
+    print("Next Rank: " .. tostring(snapshot.arena.nextRank))
+
+    print("Next Threshold: " .. tostring(snapshot.arena.nextThreshold))
+
+    print("Season Wins: " .. tostring(snapshot.arena.seasonWins))
+
+    print("Best Rank: " .. tostring(snapshot.arena.bestRank))
+
+    print("AVATAR")
+
+    print("Ready: " .. tostring(snapshot.avatar and snapshot.avatar.isReady or false))
+
+    print("URL: " .. tostring(snapshot.avatar and snapshot.avatar.imageUrl or nil))
+
+    print("VALIDATION")
+
+    print("Account: " .. tostring(diagnostics.sources.account))
+
+    print("Chicken: " .. tostring(diagnostics.sources.chicken))
+
+    print("Eggs: " .. tostring(diagnostics.sources.eggs))
+
+    print("Arena: " .. tostring(diagnostics.sources.arena))
+
+    print("Arena season selector: " .. tostring(diagnostics.sources.arenaSeasonSelector))
+
+    print("Available season keys: " .. table.concat(diagnostics.availableSeasonKeys, ", "))
+
+    if diagnostics.activeSeasonError then print("Season selector error: " .. tostring(diagnostics.activeSeasonError)) end
+
+    print("Read only: " .. tostring(snapshot.meta.readOnly))
+
+    print("Webhook sent: " .. tostring(snapshot.meta.webhookSent))
+
+    print("Gameplay remotes called: " .. tostring(snapshot.meta.gameplayRemotesCalled))
+
+    print("=============================================")
+
+    return snapshot
+
+end
+
+local function debugSources()
+
+    local _, diagnostics = collectSnapshot()
+
+    return diagnostics
+
+end
+
+local API = {
+
+    getSnapshot = getSnapshot,
+
+    printSnapshot = printSnapshot,
+
+    debugSources = debugSources,
+
+    compactNumber = compactNumber,
+
+}
+
+getgenv().UNO_WEBHOOK_SNAPSHOT_V2 = API
+
+print("[UNO_WEBHOOK_SNAPSHOT_V2] READY — read-only; no HTTP, webhook, gameplay remote, or automation calls")
+
+-- return API removed by All-In-One merge; continue loading next module
+
+-- ===== SENDER V1 FIX3 =====
+
+-- UNO_WEBHOOK_SENDER_STANDALONE_V1.lua
+
+-- Manual-only Discord webhook transport and embed presentation.
+
+-- Requires the validated read-only Snapshot Collector V2:
+
+-- getgenv().UNO_WEBHOOK_SNAPSHOT_V2.getSnapshot()
+
+-- This module never starts automatically and never performs gameplay actions.
+
+local HttpService = game:GetService("HttpService")
+
+local Players = game:GetService("Players")
+
+local LocalPlayer = Players.LocalPlayer
+
+local env = (getgenv and getgenv()) or _G
+
+local state = {
+
+    webhookUrl = nil,
+
+    include = {
+
+        accountInfo = true,
+
+        chickenInfo = true,
+
+        eggInventory = true,
+
+        arenaStats = true,
+
+        avatar = true,
+
+    },
+
+    inFlight = false,
+
+    destroyed = false,
+
+    lastResult = nil,
+
+    lastPreview = nil,
+
+}
+
+local MAX_EMBEDS = 10
+
+local MAX_FIELDS_PER_EMBED = 25
+
+local MAX_TITLE = 256
+
+local MAX_DESCRIPTION = 4096
+
+local MAX_FIELD_NAME = 256
+
+local MAX_FIELD_VALUE = 1024
+
+local MAX_FOOTER = 2048
+
+local MAX_AUTHOR = 256
+
+local MAX_TOTAL_CHARS = 6000
+
+local function safeToString(value, fallback)
+
+    if value == nil then return fallback or "—" end
+
+    local text = tostring(value)
+
+    return text ~= "" and text or (fallback or "—")
+
+end
+
+local function trim(text)
+
+    return tostring(text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+
+end
+
+local function compact(value)
+
+    local number = tonumber(value)
+
+    if not number then return safeToString(value) end
+
+    if number == 0 then return "0" end
+
+    local negative = number < 0
+
+    number = math.abs(number)
+
+    local suffixes = { "", "K", "M", "B", "T", "Qa", "Qi", "Sx", "Sp", "Oc", "No", "Dc", "Ud", "Dd", "Td" }
+
+    local index = 1
+
+    while number >= 1000 and index < #suffixes do
+
+        number /= 1000
+
+        index += 1
+
+    end
+
+    local text
+
+    if index == 1 or number >= 100 then
+
+        text = string.format("%.0f", number)
+
+    else
+
+        text = string.format("%.1f", number)
+
+    end
+
+    text = text:gsub("%.0$", "")
+
+    return (negative and "-" or "") .. text .. suffixes[index]
+
+end
+
+local function redactUrl(url)
+
+    if type(url) ~= "string" then return nil end
+
+    local scheme, host, id = url:match("^(https?)://([^/]+)/api/webhooks/([^/]+)")
+
+    if not scheme then return "<invalid-or-unset>" end
+
+    return scheme .. "://" .. host .. "/api/webhooks/" .. id .. "/[REDACTED]"
+
+end
+
+local function validateWebhookUrl(url)
+
+    if type(url) ~= "string" then return false, "WEBHOOK_URL_REQUIRED" end
+
+    url = trim(url)
+
+    if #url > 2048 then return false, "WEBHOOK_URL_TOO_LONG" end
+
+    local scheme, host, id, token = url:match("^(https?)://([^/]+)/api/webhooks/([^/]+)/([^/?#]+)")
+
+    if scheme ~= "https" then return false, "WEBHOOK_URL_MUST_USE_HTTPS" end
+
+    host = host and host:lower() or ""
+
+    if host ~= "discord.com" and host ~= "discordapp.com" and host ~= "canary.discord.com" and host ~= "ptb.discord.com" then
+
+        return false, "NOT_A_DISCORD_WEBHOOK_HOST"
+
+    end
+
+    if not id or not id:match("^%d+$") then return false, "WEBHOOK_ID_INVALID" end
+
+    if not token or #token < 8 then return false, "WEBHOOK_TOKEN_INVALID" end
+
+    return true, nil
+
+end
+
+local function resolveTransport()
+
+    local candidates = {
+
+        { name = "request", fn = env.request },
+
+        { name = "http_request", fn = env.http_request },
+
+        { name = "syn.request", fn = type(env.syn) == "table" and env.syn.request or nil },
+
+        { name = "fluxus.request", fn = type(env.fluxus) == "table" and env.fluxus.request or nil },
+
+        { name = "krnl.request", fn = type(env.krnl) == "table" and env.krnl.request or nil },
+
+    }
+
+    for _, candidate in ipairs(candidates) do
+
+        if type(candidate.fn) == "function" then
+
+            return candidate
+
+        end
+
+    end
+
+    return nil
+
+end
+
+local function safeSnapshot()
+
+    local snapshotApi = env.UNO_WEBHOOK_SNAPSHOT_V2
+
+    if type(snapshotApi) ~= "table" or type(snapshotApi.getSnapshot) ~= "function" then
+
+        return nil, "SNAPSHOT_V2_UNAVAILABLE"
+
+    end
+
+    local ok, snapshot = pcall(snapshotApi.getSnapshot)
+
+    if not ok or type(snapshot) ~= "table" then
+
+        return nil, "SNAPSHOT_ACQUISITION_FAILED"
+
+    end
+
+    return snapshot, nil
+
+end
+
+local function truncate(text, limit)
+
+    text = safeToString(text, "")
+
+    if #text <= limit then return text end
+
+    if limit <= 3 then return text:sub(1, limit) end
+
+    return text:sub(1, limit - 3) .. "..."
+
+end
+
+local function field(name, value, inline)
+
+    return {
+
+        name = truncate(name, MAX_FIELD_NAME),
+
+        value = truncate(value, MAX_FIELD_VALUE),
+
+        inline = inline == true,
+
+    }
+
+end
+
+local function countEmbedChars(embed)
+
+    local total = #(embed.title or "") + #(embed.description or "")
+
+    if embed.footer then total += #(embed.footer.text or "") end
+
+    if embed.author then total += #(embed.author.name or "") end
+
+    for _, item in ipairs(embed.fields or {}) do
+
+        total += #(item.name or "") + #(item.value or "")
+
+    end
+
+    return total
+
+end
+
+local function splitLines(lines, fieldName)
+
+    local chunks = {}
+
+    local current = {}
+
+    local currentLength = #fieldName
+
+    for _, line in ipairs(lines) do
+
+        local addition = #line + (#current > 0 and 1 or 0)
+
+        if #current > 0 and currentLength + addition > MAX_FIELD_VALUE then
+
+            chunks[#chunks + 1] = current
+
+            current = {}
+
+            currentLength = #fieldName
+
+        end
+
+        current[#current + 1] = line
+
+        currentLength += addition
+
+    end
+
+    if #current > 0 or #chunks == 0 then chunks[#chunks + 1] = current end
+
+    return chunks
+
+end
+
+local function eggLines(snapshot)
+
+    local lines = {}
+
+    for _, egg in ipairs(snapshot.eggs or {}) do
+
+        local name = safeToString(egg.name, safeToString(egg.id, "Unknown Egg"))
+
+        lines[#lines + 1] = name .. ": " .. compact(egg.count) .. "x"
+
+    end
+
+    return lines
+
+end
+
+local function resolvePublicAvatar(snapshot, transport)
+
+    local avatar = snapshot.avatar
+
+    if type(avatar) ~= "table" or avatar.isReady ~= true then
+
+        return nil, "AVATAR_NOT_READY"
+
+    end
+
+    local imageUrl = avatar.imageUrl
+
+    if type(imageUrl) == "string" and imageUrl:match("^https://") then
+
+        return imageUrl, nil
+
+    end
+
+    if type(imageUrl) ~= "string" or not imageUrl:match("^rbxthumb://") then
+
+        return nil, "AVATAR_URL_NOT_HTTPS"
+
+    end
+
+    if not transport then return nil, "HTTP_TRANSPORT_UNAVAILABLE_FOR_AVATAR" end
+
+    local userId = snapshot.account and snapshot.account.userId
+
+    if not userId then return nil, "AVATAR_USER_ID_UNAVAILABLE" end
+
+    local endpoint = "https://thumbnails.roblox.com/v1/users/avatar?userIds=" .. tostring(userId) .. "&size=420x420&format=Png&isCircular=false"
+
+    local okRequest, response = pcall(transport.fn, {
+
+        Url = endpoint,
+
+        Method = "GET",
+
+        Headers = { ["Accept"] = "application/json" },
+
+    })
+
+    if not okRequest or type(response) ~= "table" then return nil, "AVATAR_RESOLUTION_REQUEST_FAILED" end
+
+    local body = response.Body or response.body
+
+    if type(body) ~= "string" then return nil, "AVATAR_RESOLUTION_EMPTY" end
+
+    local okDecode, decoded = pcall(HttpService.JSONDecode, HttpService, body)
+
+    if not okDecode or type(decoded) ~= "table" or type(decoded.data) ~= "table" then return nil, "AVATAR_RESOLUTION_BAD_JSON" end
+
+    local first = decoded.data[1]
+
+    local resolved = type(first) == "table" and first.imageUrl or nil
+
+    if type(resolved) ~= "string" or not resolved:match("^https://") then return nil, "AVATAR_RESOLUTION_NO_HTTPS_URL" end
+
+    return resolved, nil
+
+end
+
+local function buildPayload(snapshot, allowAvatarResolution)
+
+    local embeds = {}
+
+    local fields = {}
+
+    local sections = {
+
+        account = state.include.accountInfo,
+
+        chicken = state.include.chickenInfo,
+
+        arena = state.include.arenaStats,
+
+        eggs = state.include.eggInventory,
+
+        avatar = state.include.avatar,
+
+    }
+
+    if sections.account then
+
+        local account = snapshot.account or {}
+
+        fields[#fields + 1] = field("👤 ACCOUNT", "User: " .. safeToString(account.username) .. "\nCash: " .. safeToString(account.cashFormatted) .. "\nRebirth: " .. safeToString(account.rebirth), true)
+
+    end
+
+    if sections.chicken then
+
+        local chicken = snapshot.chicken or {}
+
+        fields[#fields + 1] = field("🐔 CHICKEN", "Equipped: " .. safeToString(chicken.name) .. "\nLevel: " .. safeToString(chicken.level), true)
+
+    end
+
+    if sections.arena then
+
+        local arena = snapshot.arena or {}
+
+        local trophyText = arena.trophies ~= nil and safeToString(arena.trophies) or "—"
+
+        if arena.nextThreshold ~= nil then trophyText = trophyText .. " / " .. safeToString(arena.nextThreshold) end
+
+        fields[#fields + 1] = field("🏆 ARENA", "Rank: " .. safeToString(arena.currentRank) .. "\nTrophies: " .. trophyText .. "\nSeason Wins: " .. safeToString(arena.seasonWins), true)
+
+    end
+
+    local base = {
+
+        title = "Grow A Chicken Fighter",
+
+        fields = fields,
+
+        color = 16763904,
+
+    }
+
+    local avatarResolution = nil
+
+    if sections.avatar then
+
+        if allowAvatarResolution then
+
+            local transport = resolveTransport()
+
+            local url, reason = resolvePublicAvatar(snapshot, transport)
+
+            if url then base.thumbnail = { url = url } end
+
+            avatarResolution = { included = url ~= nil, reason = reason, transport = transport and transport.name or nil }
+
+        else
+
+            local imageUrl = snapshot.avatar and snapshot.avatar.imageUrl
+
+            if type(imageUrl) == "string" and imageUrl:match("^https://") and snapshot.avatar.isReady == true then
+
+                base.thumbnail = { url = imageUrl }
+
+                avatarResolution = { included = true, reason = nil, pendingResolution = false }
+
+            else
+
+                avatarResolution = { included = false, reason = "AVATAR_PUBLIC_HTTPS_RESOLUTION_DEFERRED", pendingResolution = true }
+
+            end
+
+        end
+
+    end
+
+    local eggChunks = {}
+
+    if sections.eggs then eggChunks = splitLines(eggLines(snapshot), "🥚 EGG INVENTORY") end
+
+    local firstFields = {}
+
+    for _, item in ipairs(fields) do firstFields[#firstFields + 1] = item end
+
+    for index, lines in ipairs(eggChunks) do
+
+        local name = index == 1 and "🥚 EGG INVENTORY" or "🥚 EGG INVENTORY (" .. tostring(index) .. ")"
+
+        firstFields[#firstFields + 1] = field(name, #lines > 0 and table.concat(lines, "\n") or "(none)", false)
+
+    end
+
+    local function makeEmbed(embedFields)
+
+        local copy = {
+
+            title = base.title,
+
+            fields = embedFields,
+
+            color = base.color,
+
+        }
+
+        if base.thumbnail then copy.thumbnail = base.thumbnail end
+
+        return copy
+
+    end
+
+    local current = {}
+
+    local currentHasTitle = false
+
+    local function flush()
+
+        if #current > 0 or not currentHasTitle then
+
+            embeds[#embeds + 1] = makeEmbed(current)
+
+            current = {}
+
+            currentHasTitle = true
+
+        end
+
+    end
+
+    for _, item in ipairs(firstFields) do
+
+        if #current >= MAX_FIELDS_PER_EMBED then flush() end
+
+        current[#current + 1] = item
+
+    end
+
+    flush()
+
+    local totalChars = 0
+
+    for _, embed in ipairs(embeds) do totalChars += countEmbedChars(embed) end
+
+    local limitSafe = #embeds <= MAX_EMBEDS and totalChars <= MAX_TOTAL_CHARS
+
+    local payload = { username = "UnO Hub - Grow A Chicken Fighter", embeds = embeds, allowed_mentions = { parse = {} } }
+
+    return payload, {
+
+        sections = sections,
+
+        topRowOrder = (function()
+
+            local order = {}
+
+            if sections.account then order[#order + 1] = "ACCOUNT" end
+
+            if sections.chicken then order[#order + 1] = "CHICKEN" end
+
+            if sections.arena then order[#order + 1] = "ARENA" end
+
+            return order
+
+        end)(),
+
+        eggEntryCount = #eggLines(snapshot),
+
+        eggFieldCount = #eggChunks,
+
+        fieldCount = #fields + #eggChunks,
+
+        embedCount = #embeds,
+
+        totalChars = totalChars,
+
+        limitSafe = limitSafe,
+
+        overflow = not limitSafe,
+
+        avatar = avatarResolution,
+
+        snapshotCollectedAt = snapshot.meta and snapshot.meta.collectedAt or nil,
+
+    }
+
+end
+
+local function statusResult(ok, reason, extra)
+
+    local result = extra or {}
+
+    result.ok = ok
+
+    result.reason = reason
+
+    result.webhookUrl = nil
+
+    return result
+
+end
+
+local function preview()
+
+    if state.destroyed then return statusResult(false, "DESTROYED") end
+
+    local snapshot, snapshotError = safeSnapshot()
+
+    if not snapshot then return statusResult(false, snapshotError) end
+
+    local payload, details = buildPayload(snapshot, false)
+
+    local jsonOk, encoded = pcall(HttpService.JSONEncode, HttpService, payload)
+
+    if not jsonOk then return statusResult(false, "JSON_ENCODE_FAILED", { details = details }) end
+
+    local result = {
+
+        ok = details.limitSafe,
+
+        reason = details.limitSafe and nil or "PAYLOAD_TOO_LARGE",
+
+        payload = payload,
+
+        json = encoded,
+
+        details = details,
+
+        enabledSections = details.sections,
+
+        topRowOrder = details.topRowOrder,
+
+        eggEntryCount = details.eggEntryCount,
+
+        embedCount = details.embedCount,
+
+        fieldCount = details.fieldCount,
+
+        totalChars = details.totalChars,
+
+        splittingNecessary = details.eggFieldCount > 1,
+
+        avatarThumbnailIncluded = details.avatar and details.avatar.included or false,
+
+        avatarResolution = details.avatar,
+
+        httpPerformed = false,
+
+    }
+
+    state.lastPreview = result
+
+    print("[UNO_WEBHOOK_SENDER_V1] preview ok=" .. tostring(result.ok) .. " embeds=" .. tostring(result.embedCount) .. " fields=" .. tostring(result.fieldCount) .. " chars=" .. tostring(result.totalChars) .. " top=" .. table.concat(result.topRowOrder, ",") .. " avatar=" .. tostring(result.avatarThumbnailIncluded))
+
+    return result
+
+end
+
+local function testWebhook()
+
+    if state.destroyed then return statusResult(false, "DESTROYED") end
+
+    if state.inFlight then return statusResult(false, "TEST_SEND_IN_FLIGHT") end
+
+    local valid, urlReason = validateWebhookUrl(state.webhookUrl)
+
+    if not valid then return statusResult(false, urlReason) end
+
+    local transport = resolveTransport()
+
+    if not transport then return statusResult(false, "HTTP_TRANSPORT_UNAVAILABLE", { sentAt = os.time() }) end
+
+    state.inFlight = true
+
+    local snapshot, snapshotError = safeSnapshot()
+
+    if not snapshot then
+
+        state.inFlight = false
+
+        return statusResult(false, snapshotError)
+
+    end
+
+    local payload, details = buildPayload(snapshot, true)
+
+    if not details.limitSafe then
+
+        state.inFlight = false
+
+        return statusResult(false, "PAYLOAD_TOO_LARGE", { sentAt = os.time(), sections = details.sections, details = details })
+
+    end
+
+    local jsonOk, body = pcall(HttpService.JSONEncode, HttpService, payload)
+
+    if not jsonOk then
+
+        state.inFlight = false
+
+        return statusResult(false, "JSON_ENCODE_FAILED", { sentAt = os.time(), sections = details.sections })
+
+    end
+
+    local okRequest, response = pcall(transport.fn, {
+
+        Url = state.webhookUrl .. "?wait=true",
+
+        Method = "POST",
+
+        Headers = { ["Content-Type"] = "application/json" },
+
+        Body = body,
+
+    })
+
+    state.inFlight = false
+
+    local sentAt = os.time()
+
+    local rawHttpStatus = type(response) == "table" and (response.StatusCode or response.status_code or response.Status) or nil
+
+    local httpStatus = tonumber(rawHttpStatus)
+
+    local ok = okRequest and httpStatus ~= nil and httpStatus >= 200 and httpStatus <= 299
+
+    local reason = nil
+
+    if not ok then
+
+        if not okRequest then
+
+            reason = "HTTP_REQUEST_FAILED"
+
+        elseif httpStatus == 429 then
+
+            reason = "DISCORD_RATE_LIMITED"
+
+        elseif httpStatus == 404 then
+
+            reason = "WEBHOOK_NOT_FOUND"
+
+        else
+
+            reason = "DISCORD_HTTP_ERROR"
+
+        end
+
+    end
+
+    local result = {
+
+        ok = ok,
+
+        httpStatus = httpStatus,
+
+        reason = reason,
+
+        sentAt = sentAt,
+
+        transport = transport.name,
+
+        sections = details.sections,
+
+        embedCount = details.embedCount,
+
+        fieldCount = details.fieldCount,
+
+        totalChars = details.totalChars,
+
+        avatarResolution = details.avatar,
+
+        redactedWebhookUrl = redactUrl(state.webhookUrl),
+
+    }
+
+    state.lastResult = result
+
+    print("[UNO_WEBHOOK_SENDER_V1] testWebhook ok=" .. tostring(ok) .. " status=" .. tostring(httpStatus) .. " reason=" .. tostring(reason) .. " transport=" .. transport.name .. " webhook=" .. tostring(result.redactedWebhookUrl))
+
+    return result
+
+end
+
+local function setWebhookUrl(url)
+
+    local valid, reason = validateWebhookUrl(url)
+
+    if not valid then
+
+        state.webhookUrl = nil
+
+        return statusResult(false, reason, { redactedWebhookUrl = redactUrl(url) })
+
+    end
+
+    state.webhookUrl = trim(url)
+
+    return { ok = true, redactedWebhookUrl = redactUrl(state.webhookUrl), reason = nil }
+
+end
+
+local function setIncludeData(options)
+
+    if type(options) ~= "table" then return statusResult(false, "INCLUDE_OPTIONS_REQUIRED") end
+
+    for key, value in pairs(state.include) do
+
+        if options[key] ~= nil then state.include[key] = value == true end
+
+    end
+
+    return { ok = true, include = {
+
+        accountInfo = state.include.accountInfo,
+
+        chickenInfo = state.include.chickenInfo,
+
+        eggInventory = state.include.eggInventory,
+
+        arenaStats = state.include.arenaStats,
+
+        avatar = state.include.avatar,
+
+    } }
+
+end
+
+local function getStatus()
+
+    local transport = resolveTransport()
+
+    return {
+
+        destroyed = state.destroyed,
+
+        inFlight = state.inFlight,
+
+        webhookConfigured = state.webhookUrl ~= nil,
+
+        redactedWebhookUrl = redactUrl(state.webhookUrl),
+
+        transport = transport and transport.name or nil,
+
+        include = {
+
+            accountInfo = state.include.accountInfo,
+
+            chickenInfo = state.include.chickenInfo,
+
+            eggInventory = state.include.eggInventory,
+
+            arenaStats = state.include.arenaStats,
+
+            avatar = state.include.avatar,
+
+        },
+
+        lastResult = state.lastResult,
+
+        lastPreview = state.lastPreview and {
+
+            ok = state.lastPreview.ok,
+
+            reason = state.lastPreview.reason,
+
+            embedCount = state.lastPreview.embedCount,
+
+            fieldCount = state.lastPreview.fieldCount,
+
+            totalChars = state.lastPreview.totalChars,
+
+        } or nil,
+
+    }
+
+end
+
+local function destroy()
+
+    state.destroyed = true
+
+    state.webhookUrl = nil
+
+    state.lastResult = nil
+
+    state.lastPreview = nil
+
+    return { ok = true, destroyed = true }
+
+end
+
+local API = {
+
+    setWebhookUrl = setWebhookUrl,
+
+    setIncludeData = setIncludeData,
+
+    preview = preview,
+
+    testWebhook = testWebhook,
+
+    getStatus = getStatus,
+
+    destroy = destroy,
+
+}
+
+env.UNO_WEBHOOK_SENDER_V1 = API
+
+print("[UNO_WEBHOOK_SENDER_V1] READY — no automatic send; call preview() or testWebhook() explicitly")
+
+-- return API removed by All-In-One merge; continue loading next module
+
+-- ===== SCHEDULER V1 =====
+
+-- UNO_WEBHOOK_SCHEDULER_STANDALONE_V1.lua
+
+-- Automatic timing and trigger orchestration for the validated Snapshot V2 and Sender Fix3.
+
+-- This module does not collect gameplay data independently, build Discord payloads,
+
+-- implement HTTP, or perform gameplay actions. Loading it does not enable scheduling.
+
+local env = (getgenv and getgenv()) or _G
+
+local POLL_INTERVAL = 1
+
+local COLLISION_WINDOW = 5
+
+local PHASE_DISABLED = "DISABLED"
+
+local PHASE_INITIALIZING = "INITIALIZING"
+
+local PHASE_WAITING = "WAITING"
+
+local PHASE_WAITING_FOR_WEBHOOK = "WAITING_FOR_WEBHOOK"
+
+local PHASE_SENDING = "SENDING"
+
+local PHASE_ERROR = "ERROR"
+
+local state = {
+
+    enabled = false,
+
+    workerRunning = false,
+
+    generation = 0,
+
+    destroyed = false,
+
+    lastObservedRebirth = nil,
+
+    startupBaselineRebirth = nil,
+
+    lastSentMilestone = nil,
+
+    lastHourlyKey = nil,
+
+    lastSendAt = nil,
+
+    lastSendTrigger = nil,
+
+    lastSendResult = nil,
+
+    nextHourlyAt = nil,
+
+    phase = PHASE_DISABLED,
+
+    lastError = nil,
+
+    pendingTrigger = nil,
+
+}
+
+local function setPhase(phase)
+
+    state.phase = phase
+
+end
+
+local function snapshotApi()
+
+    local api = env.UNO_WEBHOOK_SNAPSHOT_V2
+
+    if type(api) ~= "table" or type(api.getSnapshot) ~= "function" then
+
+        return nil
+
+    end
+
+    return api
+
+end
+
+local function senderApi()
+
+    local api = env.UNO_WEBHOOK_SENDER_V1
+
+    if type(api) ~= "table" or type(api.testWebhook) ~= "function" or type(api.getStatus) ~= "function" then
+
+        return nil
+
+    end
+
+    return api
+
+end
+
+local function safeNumber(value)
+
+    local number = tonumber(value)
+
+    if not number then return nil end
+
+    if number ~= number or number == math.huge or number == -math.huge then return nil end
+
+    return math.floor(number)
+
+end
+
+local function localClock()
+
+    *-- os.date("*t") is evaluated directly in the client-local wall-clock context.*
+
+    *-- The protected closure avoids the Luau analyzer warning from passing os.date*
+
+    *-- itself through pcall with a variadic argument list.*
+
+    local ok, clock = pcall(function()
+
+        return os.date("*t")
+
+    end)
+
+    if not ok or type(clock) ~= "table" then return nil end
+
+    return clock
+
+end
+
+local function hourKey(clock)
+
+    if type(clock) ~= "table" then return nil end
+
+    return string.format("%04d-%02d-%02d-%02d", clock.year, clock.month, clock.day, clock.hour)
+
+end
+
+local function currentLocalTime(clock)
+
+    if type(clock) ~= "table" then return nil end
+
+    return string.format("%02d:%02d:%02d", clock.hour, clock.min, clock.sec)
+
+end
+
+local function nextHourlyLabel(clock)
+
+    if type(clock) ~= "table" then return nil end
+
+    return string.format("%02d:00", (clock.hour + 1) % 24)
+
+end
+
+local function secondsUntilNextHourly(clock)
+
+    if type(clock) ~= "table" then return nil end
+
+    return (59 - clock.min) * 60 + (60 - clock.sec)
+
+end
+
+local function evaluateClock(clock, lastKey)
+
+    local currentKey = hourKey(clock)
+
+    local hourlyWindow = type(clock) == "table" and clock.min == 0
+
+    return {
+
+        currentHourKey = currentKey,
+
+        hourlyWindow = hourlyWindow,
+
+        hourlyDue = hourlyWindow and currentKey ~= lastKey or false,
+
+        currentLocalTime = currentLocalTime(clock),
+
+        nextHourlyLabel = nextHourlyLabel(clock),
+
+        secondsUntilNextHourly = secondsUntilNextHourly(clock),
+
+    }
+
+end
+
+local function nextHourlyEstimate(now, clock)
+
+    local seconds = secondsUntilNextHourly(clock)
+
+    if not seconds then return nil end
+
+    return now + seconds
+
+end
+
+local function highestCrossedMilestone(previousRebirth, currentRebirth, lastSentMilestone)
+
+    local previous = safeNumber(previousRebirth)
+
+    local current = safeNumber(currentRebirth)
+
+    if not previous or not current or current <= previous or current < 100 then return nil end
+
+    local highest = math.floor(current / 100) * 100
+
+    if highest < 100 or highest <= previous then return nil end
+
+    if lastSentMilestone and highest <= lastSentMilestone then return nil end
+
+    return highest
+
+end
+
+local function evaluateDecision(previousRebirth, currentRebirth, hourlyDue, lastSentMilestone)
+
+    local milestone = highestCrossedMilestone(previousRebirth, currentRebirth, lastSentMilestone)
+
+    local hourly = hourlyDue == true
+
+    return {
+
+        milestone = milestone,
+
+        hourlyDue = hourly,
+
+        shouldSend = hourly or milestone ~= nil,
+
+        sendCount = (hourly or milestone ~= nil) and 1 or 0,
+
+        trigger = hourly and milestone and ("Hourly Report + Rebirth Milestone " .. tostring(milestone))
+
+            or milestone and ("Rebirth Milestone " .. tostring(milestone))
+
+            or hourly and "Hourly Report"
+
+            or nil,
+
+    }
+
+end
+
+local function mergeTrigger(existing, incoming)
+
+    if not existing then return incoming end
+
+    if not incoming then return existing end
+
+    if existing.milestone == nil then existing.milestone = incoming.milestone end
+
+    if existing.hourlyKey == nil then existing.hourlyKey = incoming.hourlyKey end
+
+    if existing.hourlyDue or incoming.hourlyDue then existing.hourlyDue = true end
+
+    if existing.milestone and existing.hourlyDue then
+
+        existing.trigger = "Hourly Report + Rebirth Milestone " .. tostring(existing.milestone)
+
+    elseif existing.milestone then
+
+        existing.trigger = "Rebirth Milestone " .. tostring(existing.milestone)
+
+    else
+
+        existing.trigger = "Hourly Report"
+
+    end
+
+    return existing
+
+end
+
+local function getSafeSenderStatus(sender)
+
+    local ok, result = pcall(sender.getStatus)
+
+    if not ok or type(result) ~= "table" then
+
+        return { webhookConfigured = false, inFlight = false, transport = nil, destroyed = nil }
+
+    end
+
+    return {
+
+        webhookConfigured = result.webhookConfigured == true,
+
+        inFlight = result.inFlight == true,
+
+        transport = result.transport,
+
+        destroyed = result.destroyed == true,
+
+    }
+
+end
+
+local function sendTrigger(trigger)
+
+    local sender = senderApi()
+
+    if not sender then
+
+        state.lastError = "SENDER_UNAVAILABLE"
+
+        setPhase(PHASE_ERROR)
+
+        return false, state.lastError
+
+    end
+
+    local senderStatus = getSafeSenderStatus(sender)
+
+    if senderStatus.destroyed then
+
+        state.lastError = "SENDER_DESTROYED"
+
+        setPhase(PHASE_ERROR)
+
+        return false, state.lastError
+
+    end
+
+    if not senderStatus.webhookConfigured then
+
+        setPhase(PHASE_WAITING_FOR_WEBHOOK)
+
+        return false, "WAITING_FOR_WEBHOOK"
+
+    end
+
+    if senderStatus.inFlight then
+
+        state.lastError = "SENDER_IN_FLIGHT"
+
+        setPhase(PHASE_WAITING)
+
+        return false, state.lastError
+
+    end
+
+    setPhase(PHASE_SENDING)
+
+    local okCall, result = pcall(sender.testWebhook)
+
+    if not okCall then
+
+        result = { ok = false, reason = "SENDER_CALL_FAILED" }
+
+    elseif type(result) ~= "table" then
+
+        result = { ok = false, reason = "SENDER_BAD_RESULT" }
+
+    end
+
+    state.lastSendAt = os.time()
+
+    state.lastSendTrigger = trigger.trigger
+
+    state.lastSendResult = result
+
+    if result.ok == true then
+
+        state.lastError = nil
+
+        setPhase(PHASE_WAITING)
+
+        return true, nil
+
+    end
+
+    state.lastError = result.reason or "SENDER_REJECTED"
+
+    setPhase(PHASE_ERROR)
+
+    return false, state.lastError
+
+end
+
+local function consumeTrigger(trigger)
+
+    if trigger.milestone then state.lastSentMilestone = trigger.milestone end
+
+    if trigger.hourlyKey then state.lastHourlyKey = trigger.hourlyKey end
+
+end
+
+local function processTrigger(trigger, now)
+
+    if not trigger then return { shouldSend = false, sendCount = 0 } end
+
+    if state.pendingTrigger then
+
+        state.pendingTrigger = mergeTrigger(state.pendingTrigger, trigger)
+
+        trigger = state.pendingTrigger
+
+    end
+
+    local sender = senderApi()
+
+    local senderStatus = sender and getSafeSenderStatus(sender) or { webhookConfigured = false }
+
+    if not senderStatus.webhookConfigured then
+
+        state.pendingTrigger = trigger
+
+        consumeTrigger(trigger)
+
+        setPhase(PHASE_WAITING_FOR_WEBHOOK)
+
+        return { shouldSend = true, sendCount = 0, deferred = true, trigger = trigger.trigger }
+
+    end
+
+    if state.lastSendAt and now - state.lastSendAt <= COLLISION_WINDOW then
+
+        consumeTrigger(trigger)
+
+        if state.lastSendTrigger and state.lastSendTrigger ~= trigger.trigger then
+
+            state.lastSendTrigger = state.lastSendTrigger .. " + " .. trigger.trigger
+
+        else
+
+            state.lastSendTrigger = trigger.trigger
+
+        end
+
+        state.pendingTrigger = nil
+
+        setPhase(PHASE_WAITING)
+
+        return { shouldSend = true, sendCount = 0, coalesced = true, trigger = state.lastSendTrigger }
+
+    end
+
+    consumeTrigger(trigger)
+
+    state.pendingTrigger = nil
+
+    local sent, reason = sendTrigger(trigger)
+
+    if not sent and reason == "SENDER_IN_FLIGHT" then
+
+        *-- Keep one deferred decision for a sender operation already in progress.*
+
+        state.pendingTrigger = trigger
+
+    end
+
+    return { shouldSend = true, sendCount = sent and 1 or 0, sent = sent, reason = reason, trigger = trigger.trigger }
+
+end
+
+local function readRebirth()
+
+    local api = snapshotApi()
+
+    if not api then return nil, "SNAPSHOT_V2_UNAVAILABLE" end
+
+    local ok, snapshot = pcall(api.getSnapshot)
+
+    if not ok or type(snapshot) ~= "table" then return nil, "SNAPSHOT_ACQUISITION_FAILED" end
+
+    local account = snapshot.account
+
+    local rebirth = type(account) == "table" and safeNumber(account.rebirth) or nil
+
+    if rebirth == nil then return nil, "REBIRTH_UNAVAILABLE" end
+
+    return rebirth, nil
+
+end
+
+local function tick(now)
+
+    now = tonumber(now) or os.time()
+
+    local clock = localClock()
+
+    if not clock then
+
+        state.lastError = "LOCAL_CLOCK_UNAVAILABLE"
+
+        setPhase(PHASE_ERROR)
+
+        return { ok = false, reason = state.lastError }
+
+    end
+
+    local clockState = evaluateClock(clock, state.lastHourlyKey)
+
+    state.nextHourlyAt = nextHourlyEstimate(now, clock)
+
+    local currentKey = clockState.currentHourKey
+
+    local hourlyDue = clockState.hourlyDue
+
+    local rebirth, rebirthError = readRebirth()
+
+    if not rebirth then
+
+        state.lastError = rebirthError
+
+        setPhase(PHASE_ERROR)
+
+        return { ok = false, reason = rebirthError, hourlyDue = hourlyDue }
+
+    end
+
+    if state.lastObservedRebirth == nil then
+
+        state.lastObservedRebirth = rebirth
+
+        setPhase(senderApi() and getSafeSenderStatus(senderApi()).webhookConfigured and PHASE_WAITING or PHASE_WAITING_FOR_WEBHOOK)
+
+        return { ok = true, baseline = true, rebirth = rebirth, hourlyDue = false, sendCount = 0 }
+
+    end
+
+    local milestone = highestCrossedMilestone(state.lastObservedRebirth, rebirth, state.lastSentMilestone)
+
+    state.lastObservedRebirth = rebirth
+
+    local trigger = nil
+
+    if hourlyDue or milestone then
+
+        trigger = {
+
+            hourlyDue = hourlyDue,
+
+            hourlyKey = hourlyDue and currentKey or nil,
+
+            milestone = milestone,
+
+            trigger = hourlyDue and milestone and ("Hourly Report + Rebirth Milestone " .. tostring(milestone))
+
+                or milestone and ("Rebirth Milestone " .. tostring(milestone))
+
+                or "Hourly Report",
+
+        }
+
+    end
+
+    if state.pendingTrigger and not trigger then trigger = state.pendingTrigger end
+
+    local result = processTrigger(trigger, now)
+
+    result.ok = true
+
+    result.rebirth = rebirth
+
+    result.hourlyDue = hourlyDue
+
+    result.milestone = milestone
+
+    return result
+
+end
+
+local function worker(myGeneration)
+
+    while state.enabled and not state.destroyed and state.generation == myGeneration do
+
+        local ok = pcall(tick)
+
+        if not ok then
+
+            state.lastError = "SCHEDULER_TICK_FAILED"
+
+            setPhase(PHASE_ERROR)
+
+        end
+
+        if not state.enabled or state.destroyed or state.generation ~= myGeneration then break end
+
+        task.wait(POLL_INTERVAL)
+
+    end
+
+    if state.generation == myGeneration then state.workerRunning = false end
+
+end
+
+local getStatus
+
+local function enable()
+
+    if state.destroyed then return { ok = false, reason = "DESTROYED" } end
+
+    if state.enabled then return { ok = true, alreadyEnabled = true, status = getStatus() } end
+
+    setPhase(PHASE_INITIALIZING)
+
+    local snapshot = snapshotApi()
+
+    local sender = senderApi()
+
+    if not snapshot then
+
+        state.lastError = "SNAPSHOT_V2_UNAVAILABLE"
+
+        setPhase(PHASE_ERROR)
+
+        return { ok = false, reason = state.lastError }
+
+    end
+
+    if not sender then
+
+        state.lastError = "SENDER_V1_UNAVAILABLE"
+
+        setPhase(PHASE_ERROR)
+
+        return { ok = false, reason = state.lastError }
+
+    end
+
+    local rebirth, rebirthError = readRebirth()
+
+    if not rebirth then
+
+        state.lastError = rebirthError
+
+        setPhase(PHASE_ERROR)
+
+        return { ok = false, reason = rebirthError }
+
+    end
+
+    local now = os.time()
+
+    local clock = localClock()
+
+    if not clock then
+
+        state.lastError = "LOCAL_CLOCK_UNAVAILABLE"
+
+        setPhase(PHASE_ERROR)
+
+        return { ok = false, reason = state.lastError }
+
+    end
+
+    state.enabled = true
+
+    state.lastError = nil
+
+    state.lastObservedRebirth = rebirth
+
+    state.startupBaselineRebirth = rebirth
+
+    local clockState = evaluateClock(clock, state.lastHourlyKey)
+
+    if clockState.hourlyWindow then state.lastHourlyKey = clockState.currentHourKey end
+
+    state.nextHourlyAt = nextHourlyEstimate(now, clock)
+
+    state.pendingTrigger = nil
+
+    state.generation += 1
+
+    local myGeneration = state.generation
+
+    state.workerRunning = true
+
+    setPhase(getSafeSenderStatus(sender).webhookConfigured and PHASE_WAITING or PHASE_WAITING_FOR_WEBHOOK)
+
+    task.spawn(function() worker(myGeneration) end)
+
+    return { ok = true, status = getStatus() }
+
+end
+
+local function disable()
+
+    state.enabled = false
+
+    state.generation += 1
+
+    state.workerRunning = false
+
+    state.pendingTrigger = nil
+
+    if not state.destroyed then setPhase(PHASE_DISABLED) end
+
+    return { ok = true, status = getStatus() }
+
+end
+
+local function runOnce()
+
+    if state.destroyed then return { ok = false, reason = "DESTROYED" } end
+
+    if not snapshotApi() then return { ok = false, reason = "SNAPSHOT_V2_UNAVAILABLE" } end
+
+    if state.lastObservedRebirth == nil then
+
+        local rebirth, reason = readRebirth()
+
+        if not rebirth then return { ok = false, reason = reason } end
+
+        state.lastObservedRebirth = rebirth
+
+        state.startupBaselineRebirth = state.startupBaselineRebirth or rebirth
+
+        local clock = localClock()
+
+        local now = os.time()
+
+        local clockState = clock and evaluateClock(clock, state.lastHourlyKey) or nil
+
+        if clockState and clockState.hourlyWindow then state.lastHourlyKey = clockState.currentHourKey end
+
+        state.nextHourlyAt = state.nextHourlyAt or (clock and nextHourlyEstimate(now, clock) or nil)
+
+        setPhase(senderApi() and getSafeSenderStatus(senderApi()).webhookConfigured and PHASE_WAITING or PHASE_WAITING_FOR_WEBHOOK)
+
+        return { ok = true, baseline = true, rebirth = rebirth, sendCount = 0 }
+
+    end
+
+    return tick()
+
+end
+
+local function resetBaseline()
+
+    if state.destroyed then return { ok = false, reason = "DESTROYED" } end
+
+    local rebirth, reason = readRebirth()
+
+    if not rebirth then return { ok = false, reason = reason } end
+
+    state.lastObservedRebirth = rebirth
+
+    state.startupBaselineRebirth = rebirth
+
+    state.lastSentMilestone = nil
+
+    state.pendingTrigger = nil
+
+    state.lastError = nil
+
+    setPhase(state.enabled and PHASE_WAITING or PHASE_DISABLED)
+
+    return { ok = true, rebirth = rebirth }
+
+end
+
+local function debugEvaluate(input)
+
+    input = type(input) == "table" and input or {}
+
+    local previous = input.previousRebirth
+
+    local current = input.currentRebirth
+
+    local lastSent = input.lastSentMilestone
+
+    local decision = evaluateDecision(previous, current, input.hourlyDue == true, lastSent)
+
+    decision.hourKey = input.hourKey
+
+    decision.httpPerformed = false
+
+    decision.gameplayMutated = false
+
+    return decision
+
+end
+
+local function debugEvaluateClock(input)
+
+    input = type(input) == "table" and input or {}
+
+    local clock = {
+
+        year = tonumber(input.year) or 1970,
+
+        month = tonumber(input.month) or 1,
+
+        day = tonumber(input.day) or 1,
+
+        hour = tonumber(input.hour) or 0,
+
+        min = tonumber(input.minute) or 0,
+
+        sec = tonumber(input.second) or 0,
+
+    }
+
+    local result = evaluateClock(clock, input.lastHourlyKey)
+
+    if type(input.hourKey) == "string" then result.currentHourKey = input.hourKey end
+
+    result.ok = true
+
+    result.httpPerformed = false
+
+    result.gameplayMutated = false
+
+    return result
+
+end
+
+local function debugClock()
+
+    local now = os.time()
+
+    local clock = localClock()
+
+    if not clock then
+
+        return {
+
+            ok = false,
+
+            reason = "LOCAL_CLOCK_UNAVAILABLE",
+
+            nowEpoch = now,
+
+            lastHourlyKey = state.lastHourlyKey,
+
+            enabled = state.enabled,
+
+            httpPerformed = false,
+
+            gameplayMutated = false,
+
+        }
+
+    end
+
+    local result = evaluateClock(clock, state.lastHourlyKey)
+
+    result.ok = true
+
+    result.nowEpoch = now
+
+    result.localYear = clock.year
+
+    result.localMonth = clock.month
+
+    result.localDay = clock.day
+
+    result.localHour = clock.hour
+
+    result.localMinute = clock.min
+
+    result.localSecond = clock.sec
+
+    result.lastHourlyKey = state.lastHourlyKey
+
+    result.enabled = state.enabled
+
+    result.httpPerformed = false
+
+    result.gameplayMutated = false
+
+    return result
+
+end
+
+getStatus = function()
+
+    local sender = senderApi()
+
+    local senderStatus = sender and getSafeSenderStatus(sender) or nil
+
+    local clock = localClock()
+
+    local clockState = clock and evaluateClock(clock, state.lastHourlyKey) or nil
+
+    return {
+
+        enabled = state.enabled,
+
+        workerRunning = state.workerRunning,
+
+        generation = state.generation,
+
+        lastObservedRebirth = state.lastObservedRebirth,
+
+        startupBaselineRebirth = state.startupBaselineRebirth,
+
+        lastSentMilestone = state.lastSentMilestone,
+
+        lastHourlyKey = state.lastHourlyKey,
+
+        lastSendAt = state.lastSendAt,
+
+        lastSendTrigger = state.lastSendTrigger,
+
+        lastSendResult = state.lastSendResult,
+
+        nextHourlyAt = state.nextHourlyAt,
+
+        currentLocalTime = clockState and clockState.currentLocalTime or nil,
+
+        currentHourKey = clockState and clockState.currentHourKey or nil,
+
+        hourlyWindow = clockState and clockState.hourlyWindow or false,
+
+        nextHourlyLabel = clockState and clockState.nextHourlyLabel or nil,
+
+        secondsUntilNextHourly = clockState and clockState.secondsUntilNextHourly or nil,
+
+        phase = state.phase,
+
+        lastError = state.lastError,
+
+        pendingTrigger = state.pendingTrigger and {
+
+            hourlyDue = state.pendingTrigger.hourlyDue,
+
+            hourlyKey = state.pendingTrigger.hourlyKey,
+
+            milestone = state.pendingTrigger.milestone,
+
+            trigger = state.pendingTrigger.trigger,
+
+        } or nil,
+
+        sender = senderStatus,
+
+        pollInterval = POLL_INTERVAL,
+
+        collisionWindow = COLLISION_WINDOW,
+
+    }
+
+end
+
+local function destroy()
+
+    disable()
+
+    state.destroyed = true
+
+    state.phase = PHASE_DISABLED
+
+    return { ok = true, destroyed = true }
+
+end
+
+local previous = env.UNO_WEBHOOK_SCHEDULER_V1
+
+if type(previous) == "table" and type(previous.destroy) == "function" then
+
+    pcall(previous.destroy)
+
+end
+
+local API = {
+
+    enable = enable,
+
+    disable = disable,
+
+    getStatus = getStatus,
+
+    runOnce = runOnce,
+
+    resetBaseline = resetBaseline,
+
+    debugEvaluate = debugEvaluate,
+
+    debugClock = debugClock,
+
+    debugEvaluateClock = debugEvaluateClock,
+
+    destroy = destroy,
+
+}
+
+env.UNO_WEBHOOK_SCHEDULER_V1 = API
+
+print("[UNO_WEBHOOK_SCHEDULER_V1] READY — disabled; call enable() to start scheduling")
+
+local UNO_WEBHOOK_ALL_IN_ONE_V1 = API
+env.UNO_WEBHOOK_ALL_IN_ONE_V1 = {
+    snapshot = env.UNO_WEBHOOK_SNAPSHOT_V2,
+    sender = env.UNO_WEBHOOK_SENDER_V1,
+    scheduler = env.UNO_WEBHOOK_SCHEDULER_V1,
+}
+print("[UNO WEBHOOK MERGE] backend READY")
+
 safeBuild("Webhook", function()
     local sc = createScrollPage()
-    Views.Webhook = { root = sc, update = function() end }
+    local env = (getgenv and getgenv()) or _G
+    local sender = env.UNO_WEBHOOK_SENDER_V1
+    local scheduler = env.UNO_WEBHOOK_SCHEDULER_V1
+
+    local _, mainCard = card(sc, 1, "WEBHOOK")
+
+    local urlLabel = text(mainCard, "Webhook URL", 12, Theme.TextSecondary)
+    urlLabel.LayoutOrder = 1
+    urlLabel.Size = UDim2.new(1, 0, 0, 18)
+
+    local urlBox = Instance.new("TextBox")
+    urlBox.LayoutOrder = 2
+    urlBox.Size = UDim2.new(1, 0, 0, 36)
+    urlBox.BackgroundColor3 = Theme.SurfaceElevated
+    urlBox.BorderSizePixel = 0
+    urlBox.ClearTextOnFocus = false
+    urlBox.Text = ""
+    urlBox.PlaceholderText = "https://discord.com/api/webhooks/..."
+    urlBox.Font = Enum.Font.Gotham
+    urlBox.TextSize = 12
+    urlBox.TextColor3 = Theme.TextPrimary
+    urlBox.PlaceholderColor3 = Theme.TextMuted
+    urlBox.TextXAlignment = Enum.TextXAlignment.Left
+    urlBox.Parent = mainCard
+    corner(urlBox, 7)
+    stroke(urlBox)
+    pad(urlBox, 0, 12, 0, 12)
+
+    local testButton = Instance.new("TextButton")
+    testButton.LayoutOrder = 3
+    testButton.Size = UDim2.new(1, 0, 0, 34)
+    testButton.BackgroundColor3 = Theme.SurfaceElevated
+    testButton.BorderSizePixel = 0
+    testButton.Text = "Test Webhook"
+    testButton.Font = Enum.Font.GothamMedium
+    testButton.TextSize = 12
+    testButton.TextColor3 = Theme.TextPrimary
+    testButton.AutoButtonColor = false
+    testButton.Parent = mainCard
+    corner(testButton, 7)
+    stroke(testButton)
+
+    local enableRow = Instance.new("Frame")
+    enableRow.LayoutOrder = 4
+    enableRow.Size = UDim2.new(1, 0, 0, 30)
+    enableRow.BackgroundTransparency = 1
+    enableRow.Parent = mainCard
+    text(enableRow, "Enable Webhook", 13, Theme.TextPrimary, Enum.Font.GothamMedium).Size = UDim2.new(1, -50, 1, 0)
+
+    local enabledSwitch
+    enabledSwitch = select(1, makeSwitch(enableRow, false, function(v)
+        if not sender or not scheduler then return end
+        if v then
+            local setResult = sender.setWebhookUrl(urlBox.Text)
+            if not setResult or setResult.ok ~= true then
+                warn("[UNO WEBHOOK UI] URL rejected: " .. tostring(setResult and setResult.reason))
+                return
+            end
+            local result = scheduler.enable()
+            if not result or result.ok ~= true then
+                warn("[UNO WEBHOOK UI] scheduler enable failed: " .. tostring(result and result.reason))
+            end
+        else
+            scheduler.disable()
+        end
+    end))
+    enabledSwitch.Position = UDim2.new(1, -40, 0.5, -11)
+
+    local _, includeCard = card(sc, 2, "INCLUDE DATA")
+    local includeState = {
+        accountInfo = true,
+        chickenInfo = true,
+        eggInventory = true,
+        arenaStats = true,
+        avatar = true,
+    }
+
+    local function pushInclude()
+        if sender and type(sender.setIncludeData) == "function" then
+            sender.setIncludeData(includeState)
+        end
+    end
+
+    local function includeToggle(order, title, key)
+        local f = Instance.new("Frame")
+        f.LayoutOrder = order
+        f.Size = UDim2.new(1, 0, 0, 28)
+        f.BackgroundTransparency = 1
+        f.Parent = includeCard
+        text(f, title, 13, Theme.TextPrimary, Enum.Font.GothamMedium).Size = UDim2.new(1, -50, 1, 0)
+        local sw = select(1, makeSwitch(f, includeState[key], function(v)
+            includeState[key] = v == true
+            pushInclude()
+        end))
+        sw.Position = UDim2.new(1, -40, 0.5, -11)
+    end
+
+    includeToggle(1, "Account Info", "accountInfo")
+    includeToggle(2, "Chicken Info", "chickenInfo")
+    includeToggle(3, "Egg Inventory", "eggInventory")
+    includeToggle(4, "Arena Stats", "arenaStats")
+    includeToggle(5, "Avatar", "avatar")
+    pushInclude()
+
+    local _, statusCard = card(sc, 3, "STATUS")
+    local lastSend = row(statusCard, 1, "Last Send")
+    local nextSend = row(statusCard, 2, "Next Send")
+    local statusRow = row(statusCard, 3, "Status")
+    local triggerRow = row(statusCard, 4, "Last Trigger")
+
+    urlBox.FocusLost:Connect(function()
+        if sender and urlBox.Text ~= "" then
+            local result = sender.setWebhookUrl(urlBox.Text)
+            if result and result.ok ~= true then
+                warn("[UNO WEBHOOK UI] URL rejected: " .. tostring(result.reason))
+            end
+        end
+    end)
+
+    testButton.MouseButton1Click:Connect(function()
+        if not sender then return end
+        local configured = sender.setWebhookUrl(urlBox.Text)
+        if not configured or configured.ok ~= true then
+            warn("[UNO WEBHOOK UI] Test blocked: " .. tostring(configured and configured.reason))
+            return
+        end
+        task.spawn(function()
+            local result = sender.testWebhook()
+            if not result or result.ok ~= true then
+                warn("[UNO WEBHOOK UI] Test failed: " .. tostring(result and result.reason))
+            end
+        end)
+    end)
+
+    Views.Webhook = {
+        root = sc,
+        update = function()
+            sender = env.UNO_WEBHOOK_SENDER_V1
+            scheduler = env.UNO_WEBHOOK_SCHEDULER_V1
+            if not sender or not scheduler then
+                setText(statusRow, "Unavailable")
+                setText(nextSend, "—")
+                setText(lastSend, "—")
+                setText(triggerRow, "—")
+                return
+            end
+
+            local ss = sender.getStatus()
+            local qs = scheduler.getStatus()
+            local connected = ss and ss.webhookConfigured == true
+            local active = qs and qs.enabled == true
+
+            if active and connected then
+                setText(statusRow, "Connected")
+            elseif connected then
+                setText(statusRow, "Ready")
+            else
+                setText(statusRow, "Not Configured")
+            end
+
+            if qs and qs.lastSendAt then
+                local ok, clock = pcall(function() return os.date("%H:%M:%S", qs.lastSendAt) end)
+                setText(lastSend, ok and clock or tostring(qs.lastSendAt))
+            else
+                setText(lastSend, "—")
+            end
+
+            setText(nextSend, qs and qs.nextHourlyLabel or "—")
+            setText(triggerRow, qs and qs.lastSendTrigger or "—")
+        end,
+    }
 end)
 
 safeBuild("Configs", function()

@@ -13557,45 +13557,49 @@ local function createAutoArena(deps)
         end
 
         if opponentPower > myPower then
-            if (tonumber(view.skips) or 0) <= 0 then
-                status = "WAITING FOR SKIP REFILL"
-                decision = "WAIT_FOR_SKIP_REFILL"
-                log("info", "[Arena] waiting for skip refill; skips=" .. tostring(view.skips) .. "/" .. tostring(view.maxSkips))
-                refresh(false, workerGeneration)
-                wait(refillPollInterval)
+            local skipsRemaining = tonumber(view.skips) or 0
+
+            if skipsRemaining > 0 then
+                -- While Arena refresh/skip charges are available, preserve the
+                -- existing behavior: keep searching for a lower-power opponent.
+                status = "SKIPPING"
+                decision = "SKIP"
+                local oldFingerprint = fingerprint
+                local oldSkips = skipsRemaining
+                if oldFingerprint == lastSkipFingerprint then
+                    wait(0.25)
+                    return
+                end
+                lastSkipFingerprint = oldFingerprint
+                if not isCurrentWorker(workerGeneration) then
+                    return
+                end
+                local ok, _, errorMessage = safeRequest("skip", ArenaClient.skip)
+                if not ok then
+                    lastSkipFingerprint = nil
+                    recordError("Skip failed: " .. tostring(errorMessage))
+                    refresh(true, workerGeneration)
+                    wait(failureBackoff)
+                    return
+                end
+                log("info", "[Arena] skip success")
+                if not reconcileAfterSkip(oldFingerprint, oldSkips, workerGeneration) then
+                    recordError("Skip succeeded but opponent reconciliation timed out")
+                    -- Keep the old fingerprint locked. A later worker pass may observe
+                    -- the authoritative change; it must not send a duplicate Skip first.
+                    wait(failureBackoff)
+                    return
+                end
+                lastSkipFingerprint = nil
                 return
             end
 
-            status = "SKIPPING"
-            decision = "SKIP"
-            local oldFingerprint = fingerprint
-            local oldSkips = tonumber(view.skips) or 0
-            if oldFingerprint == lastSkipFingerprint then
-                wait(0.25)
-                return
-            end
-            lastSkipFingerprint = oldFingerprint
-            if not isCurrentWorker(workerGeneration) then
-                return
-            end
-            local ok, _, errorMessage = safeRequest("skip", ArenaClient.skip)
-            if not ok then
-                lastSkipFingerprint = nil
-                recordError("Skip failed: " .. tostring(errorMessage))
-                refresh(true, workerGeneration)
-                wait(failureBackoff)
-                return
-            end
-            log("info", "[Arena] skip success")
-            if not reconcileAfterSkip(oldFingerprint, oldSkips, workerGeneration) then
-                recordError("Skip succeeded but opponent reconciliation timed out")
-                -- Keep the old fingerprint locked. A later worker pass may observe
-                -- the authoritative change; it must not send a duplicate Skip first.
-                wait(failureBackoff)
-                return
-            end
-            lastSkipFingerprint = nil
-            return
+            -- No refresh/skip charge is currently available (for example 0/0
+            -- during its refill countdown). Do NOT pause Auto Arena. Fight the
+            -- current opponent and let the normal Arena loop continue.
+            status = "NO REFRESH — FIGHTING CURRENT"
+            decision = "BATTLE_NO_REFRESH"
+            log("info", "[Arena] refresh unavailable; fighting current opponent instead of waiting")
         end
 
         decision = "BATTLE"

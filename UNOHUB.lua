@@ -1,5 +1,5 @@
 --[[
-    UNO HUB1
+    UNO HUB
 ]]
 
 
@@ -4834,11 +4834,13 @@ do
     envNow.UNO_WEBHOOK_SENDER_V1 = nil
     envNow.UNO_WEBHOOK_SNAPSHOT_V2 = nil
 end
+print("[UNO WEBHOOK] isolated module bootstrap begin")
 
 --------------------------------------------------------------------
 -- UNO WEBHOOK SNAPSHOT COLLECTOR V2 (embedded from runtime-validated standalone)
 --------------------------------------------------------------------
-;(function()
+local function __unoLoadIsolatedSnapshot()
+    local source = [====[
 -- UNO_WEBHOOK_SNAPSHOT_COLLECTOR_V2.lua
 -- Final read-only snapshot collector for future webhook integration.
 -- No HTTP requests, Discord sends, gameplay remotes, matchmaking, automation,
@@ -5201,13 +5203,31 @@ local API = {
 
 getgenv().UNO_WEBHOOK_SNAPSHOT_V2 = API
 print("[UNO_WEBHOOK_SNAPSHOT_V2] READY — read-only; no HTTP, webhook, gameplay remote, or automation calls")
--- Embedded in UNO HUB: API is published through getgenv()/env; no top-level return here.
-end)()
+]====]
+    local compiler = loadstring
+    if type(compiler) ~= "function" then
+        warn("[UNO WEBHOOK] SNAPSHOT unavailable: loadstring missing")
+        return false
+    end
+    local chunk, compileErr = compiler(source)
+    if type(chunk) ~= "function" then
+        warn("[UNO WEBHOOK] SNAPSHOT compile failed: " .. tostring(compileErr))
+        return false
+    end
+    local ok, runtimeErr = pcall(chunk)
+    if not ok then
+        warn("[UNO WEBHOOK] SNAPSHOT runtime init failed: " .. tostring(runtimeErr))
+        return false
+    end
+    return true
+end
+__unoLoadIsolatedSnapshot()
 
 --------------------------------------------------------------------
 -- UNO WEBHOOK SENDER V1 FIX3 (embedded from runtime-validated standalone)
 --------------------------------------------------------------------
-;(function()
+local function __unoLoadIsolatedSender()
+    local source = [====[
 -- UNO_WEBHOOK_SENDER_STANDALONE_V1.lua
 -- Manual-only Discord webhook transport and embed presentation.
 -- Requires the validated read-only Snapshot Collector V2:
@@ -5690,13 +5710,31 @@ local API = {
 
 env.UNO_WEBHOOK_SENDER_V1 = API
 print("[UNO_WEBHOOK_SENDER_V1] READY — no automatic send; call preview() or testWebhook() explicitly")
--- Embedded in UNO HUB: API is published through getgenv()/env; no top-level return here.
-end)()
+]====]
+    local compiler = loadstring
+    if type(compiler) ~= "function" then
+        warn("[UNO WEBHOOK] SENDER unavailable: loadstring missing")
+        return false
+    end
+    local chunk, compileErr = compiler(source)
+    if type(chunk) ~= "function" then
+        warn("[UNO WEBHOOK] SENDER compile failed: " .. tostring(compileErr))
+        return false
+    end
+    local ok, runtimeErr = pcall(chunk)
+    if not ok then
+        warn("[UNO WEBHOOK] SENDER runtime init failed: " .. tostring(runtimeErr))
+        return false
+    end
+    return true
+end
+__unoLoadIsolatedSender()
 
 --------------------------------------------------------------------
 -- UNO WEBHOOK SCHEDULER V1 FIX1 (embedded from runtime-validated standalone)
 --------------------------------------------------------------------
-;(function()
+local function __unoLoadIsolatedScheduler()
+    local source = [====[
 -- UNO_WEBHOOK_SCHEDULER_STANDALONE_V1.lua
 -- Automatic timing and trigger orchestration for the validated Snapshot V2 and Sender Fix3.
 -- This module does not collect gameplay data independently, build Discord payloads,
@@ -6243,8 +6281,25 @@ local API = {
 
 env.UNO_WEBHOOK_SCHEDULER_V1 = API
 print("[UNO_WEBHOOK_SCHEDULER_V1] READY — disabled; call enable() to start scheduling")
--- Embedded in UNO HUB: API is published through getgenv()/env; no top-level return here.
-end)()
+]====]
+    local compiler = loadstring
+    if type(compiler) ~= "function" then
+        warn("[UNO WEBHOOK] SCHEDULER unavailable: loadstring missing")
+        return false
+    end
+    local chunk, compileErr = compiler(source)
+    if type(chunk) ~= "function" then
+        warn("[UNO WEBHOOK] SCHEDULER compile failed: " .. tostring(compileErr))
+        return false
+    end
+    local ok, runtimeErr = pcall(chunk)
+    if not ok then
+        warn("[UNO WEBHOOK] SCHEDULER runtime init failed: " .. tostring(runtimeErr))
+        return false
+    end
+    return true
+end
+__unoLoadIsolatedScheduler()
 
 --------------------------------------------------------------------
 -- Webhook host adapters (UNO HUB owns UI/config; validated modules own logic)

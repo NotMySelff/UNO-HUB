@@ -10532,6 +10532,59 @@ do
         getNormalFarmCoordinatorPauseReasons = function() return AFR.coordinatorPauseReasons end,
         setAutoHotEgg = setAutoHotEgg,
         setAutoFarmRebirth = setAutoFarmRebirth,
+        towerAutomation = {
+            enableAutoTower = function()
+                local api = env.UNO_AUTO_TOWER_STANDALONE
+                return type(api) == "table" and type(api.enable) == "function" and api.enable() or false
+            end,
+            disableAutoTower = function()
+                local api = env.UNO_AUTO_TOWER_STANDALONE
+                return type(api) == "table" and type(api.disable) == "function" and api.disable() or false
+            end,
+            requestTowerEntry = function(options)
+                local manager = env.UNO_TOWER_ENTRY_MANAGER
+                if type(manager) == "table" and type(manager.requestEntry) == "function" then
+                    return manager.requestEntry(options or {})
+                end
+                return { ok = false, reason = "TOWER_AUTOMATION_UNAVAILABLE" }
+            end,
+            setUseFrontierSkip = function(value)
+                State.toggles.useFrontierSkip = value == true
+                local api = env.UNO_AUTO_TOWER_STANDALONE
+                if type(api) == "table" and type(api.setUseFrontierSkip) == "function" then
+                    return api.setUseFrontierSkip(value == true)
+                end
+                return true
+            end,
+            setStartDelay = function(value)
+                value = math.clamp(math.floor((tonumber(value) or 30) + 0.5), 0, 120)
+                State.autoTower.startDelay = value
+                local api = env.UNO_AUTO_TOWER_STANDALONE
+                if type(api) == "table" and type(api.setStartDelay) == "function" then
+                    return api.setStartDelay(value)
+                end
+                return true
+            end,
+            pause = function(reason)
+                local api = env.UNO_AUTO_TOWER_STANDALONE
+                return type(api) == "table" and type(api.pause) == "function" and api.pause(reason) or false
+            end,
+            resume = function(reason)
+                local api = env.UNO_AUTO_TOWER_STANDALONE
+                return type(api) == "table" and type(api.resume) == "function" and api.resume(reason) or false
+            end,
+            getStatus = function()
+                local api = env.UNO_AUTO_TOWER_STANDALONE
+                if type(api) == "table" and type(api.getStatus) == "function" then
+                    return api.getStatus()
+                end
+                return {
+                    enabled = false, phase = "UNAVAILABLE", workerRunning = false,
+                    useFrontierSkip = State.toggles.useFrontierSkip == true,
+                    startDelay = State.autoTower.startDelay, countdown = 0,
+                }
+            end,
+        },
         setAutoRebirth = setAutoRebirth,
         setUfoAscension = setUfoAscension,
         setToggleVisual = setToggleVisual,

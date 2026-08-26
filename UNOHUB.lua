@@ -1,5 +1,5 @@
 --[[
-    UNO HUB1
+    UNO HUB
 ]]
 
 
@@ -7085,6 +7085,13 @@ safeBuild("Performance", function()
     Views.Performance = { root = sc, update = function() end }
 end)
 
+
+-- ============================================================
+-- UNO WEBHOOK ALL-IN-ONE V1 — ISOLATED RUNTIME BOOTSTRAP
+-- This keeps the runtime-passed backend out of UNO HUB lexical scope.
+-- ============================================================
+do
+    local __unoWebhookSource = [=[
 -- UNO_WEBHOOK_ALL_IN_ONE_V1.lua
 
 -- Mechanical merge of validated Snapshot V2 + Sender V1 Fix3 + Scheduler V1.
@@ -9635,19 +9642,28 @@ env.UNO_WEBHOOK_SCHEDULER_V1 = API
 
 print("[UNO_WEBHOOK_SCHEDULER_V1] READY — disabled; call enable() to start scheduling")
 
-local UNO_WEBHOOK_ALL_IN_ONE_V1 = API
-env.UNO_WEBHOOK_ALL_IN_ONE_V1 = {
-    snapshot = env.UNO_WEBHOOK_SNAPSHOT_V2,
-    sender = env.UNO_WEBHOOK_SENDER_V1,
-    scheduler = env.UNO_WEBHOOK_SCHEDULER_V1,
-}
-print("[UNO WEBHOOK MERGE] backend READY")
+return API
+]=]
+
+    print("[UNO WEBHOOK MERGE] bootstrap compile start")
+    local __unoWebhookChunk, __unoWebhookCompileError = loadstring(__unoWebhookSource)
+    if type(__unoWebhookChunk) ~= "function" then
+        warn("[UNO WEBHOOK MERGE] COMPILE FAILED: " .. tostring(__unoWebhookCompileError))
+    else
+        print("[UNO WEBHOOK MERGE] bootstrap runtime start")
+        local __unoWebhookOk, __unoWebhookResult = pcall(__unoWebhookChunk)
+        if not __unoWebhookOk then
+            warn("[UNO WEBHOOK MERGE] RUNTIME FAILED: " .. tostring(__unoWebhookResult))
+        else
+            print("[UNO WEBHOOK MERGE] backend READY")
+        end
+    end
+end
+
 
 safeBuild("Webhook", function()
     local sc = createScrollPage()
-    local env = (getgenv and getgenv()) or _G
-    local sender = env.UNO_WEBHOOK_SENDER_V1
-    local scheduler = env.UNO_WEBHOOK_SCHEDULER_V1
+    local webhookEnv = (getgenv and getgenv()) or _G
 
     local _, mainCard = card(sc, 1, "WEBHOOK")
 
@@ -9671,7 +9687,6 @@ safeBuild("Webhook", function()
     urlBox.Parent = mainCard
     corner(urlBox, 7)
     stroke(urlBox)
-    pad(urlBox, 0, 12, 0, 12)
 
     local testButton = Instance.new("TextButton")
     testButton.LayoutOrder = 3
@@ -9694,9 +9709,14 @@ safeBuild("Webhook", function()
     enableRow.Parent = mainCard
     text(enableRow, "Enable Webhook", 13, Theme.TextPrimary, Enum.Font.GothamMedium).Size = UDim2.new(1, -50, 1, 0)
 
-    local enabledSwitch
-    enabledSwitch = select(1, makeSwitch(enableRow, false, function(v)
-        if not sender or not scheduler then return end
+    local enableSwitch = select(1, makeSwitch(enableRow, false, function(v)
+        local sender = webhookEnv.UNO_WEBHOOK_SENDER_V1
+        local scheduler = webhookEnv.UNO_WEBHOOK_SCHEDULER_V1
+        if type(sender) ~= "table" or type(scheduler) ~= "table" then
+            warn("[UNO WEBHOOK UI] backend unavailable")
+            return
+        end
+
         if v then
             local setResult = sender.setWebhookUrl(urlBox.Text)
             if not setResult or setResult.ok ~= true then
@@ -9711,7 +9731,7 @@ safeBuild("Webhook", function()
             scheduler.disable()
         end
     end))
-    enabledSwitch.Position = UDim2.new(1, -40, 0.5, -11)
+    enableSwitch.Position = UDim2.new(1, -40, 0.5, -11)
 
     local _, includeCard = card(sc, 2, "INCLUDE DATA")
     local includeState = {
@@ -9723,7 +9743,8 @@ safeBuild("Webhook", function()
     }
 
     local function pushInclude()
-        if sender and type(sender.setIncludeData) == "function" then
+        local sender = webhookEnv.UNO_WEBHOOK_SENDER_V1
+        if type(sender) == "table" and type(sender.setIncludeData) == "function" then
             sender.setIncludeData(includeState)
         end
     end
@@ -9756,7 +9777,8 @@ safeBuild("Webhook", function()
     local triggerRow = row(statusCard, 4, "Last Trigger")
 
     urlBox.FocusLost:Connect(function()
-        if sender and urlBox.Text ~= "" then
+        local sender = webhookEnv.UNO_WEBHOOK_SENDER_V1
+        if type(sender) == "table" and urlBox.Text ~= "" then
             local result = sender.setWebhookUrl(urlBox.Text)
             if result and result.ok ~= true then
                 warn("[UNO WEBHOOK UI] URL rejected: " .. tostring(result.reason))
@@ -9765,7 +9787,11 @@ safeBuild("Webhook", function()
     end)
 
     testButton.MouseButton1Click:Connect(function()
-        if not sender then return end
+        local sender = webhookEnv.UNO_WEBHOOK_SENDER_V1
+        if type(sender) ~= "table" then
+            warn("[UNO WEBHOOK UI] sender unavailable")
+            return
+        end
         local configured = sender.setWebhookUrl(urlBox.Text)
         if not configured or configured.ok ~= true then
             warn("[UNO WEBHOOK UI] Test blocked: " .. tostring(configured and configured.reason))
@@ -9782,9 +9808,9 @@ safeBuild("Webhook", function()
     Views.Webhook = {
         root = sc,
         update = function()
-            sender = env.UNO_WEBHOOK_SENDER_V1
-            scheduler = env.UNO_WEBHOOK_SCHEDULER_V1
-            if not sender or not scheduler then
+            local sender = webhookEnv.UNO_WEBHOOK_SENDER_V1
+            local scheduler = webhookEnv.UNO_WEBHOOK_SCHEDULER_V1
+            if type(sender) ~= "table" or type(scheduler) ~= "table" then
                 setText(statusRow, "Unavailable")
                 setText(nextSend, "—")
                 setText(lastSend, "—")
@@ -9806,7 +9832,9 @@ safeBuild("Webhook", function()
             end
 
             if qs and qs.lastSendAt then
-                local ok, clock = pcall(function() return os.date("%H:%M:%S", qs.lastSendAt) end)
+                local ok, clock = pcall(function()
+                    return os.date("%H:%M:%S", qs.lastSendAt)
+                end)
                 setText(lastSend, ok and clock or tostring(qs.lastSendAt))
             else
                 setText(lastSend, "—")

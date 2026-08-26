@@ -1,5 +1,5 @@
 --[[
-    UNO HUB1
+    UNO HUB
 ]]
 
 
@@ -131,15 +131,14 @@ local State = {
         surrenderInFlight = false, declineInFlight = false,
         coordinatorPauseReasons = {},
     },
-    autoTower = {
-        enabled = false, phase = "DISABLED", generation = 0,
-        retryDelay = 5, lastEntry = "—", lastFrontier = nil, lastError = nil,
-    },
     ufoAscension = {
         enabled = false, phase = "DISABLED", status = "Disabled",
         targetId = nil, targetName = "Equipped Chicken", rarity = nil,
         geneCap = nil, genome = nil, genesMax = false, ufoActive = false,
         cycleCount = 0, recoveryInProgress = false, lastError = nil,
+    },
+    autoTower = {
+        enabled = false, phase = "DISABLED", lastError = nil, lastResult = nil, runCount = 0,
     },
     hotEgg = {
         enabled = false, phase = "DISABLED", generation = 0, movementMode = "Tween",
@@ -158,10 +157,10 @@ local State = {
     },
     movementOwner = "NONE",
     toggles = {
-        autoFarmRebirth = false, autoKoDismiss = true, autoHatch = false, autoCollectEgg = false,
+        autoFarmRebirth = false, autoTower = false, useFrontierSkip = false, autoKoDismiss = true, autoHatch = false, autoCollectEgg = false,
         autoIncubatorClaim = false, autoSell = false, autoFuse = false,
         autoBuyGenerator = false, autoUpgradeGenerator = false, autoExpandCoop = false, autoUpgradeRecycler = false, autoUpgradeIncubator = false,
-        antiAfk = true, autoRebirth = false, autoTower = false, useFrontierSkip = true, autoHotEgg = false, autoArena = false, autoEventCapsule = false, autoKraken = false, autoUfoAscension = false, showFloatingButton = true, reducedMotion = false,
+        antiAfk = true, autoRebirth = false, autoHotEgg = false, autoArena = false, autoEventCapsule = false, autoKraken = false, autoUfoAscension = false, showFloatingButton = true, reducedMotion = false,
     },
 }
 
@@ -1204,7 +1203,6 @@ Integration.modules.Catalog = safeRequire(findPath(ReplicatedStorage, {"Content"
 Integration.modules.CatalogEggs = safeRequire(findPath(ReplicatedStorage, {"Content", "Catalog", "Eggs"}))
 Integration.modules.FusionRules = safeRequire(findPath(ReplicatedStorage, {"Features", "Chicken", "FusionRules"}))
 Integration.modules.IncubatorView = safeRequire(findPath(ReplicatedStorage, {"Features", "Incubator", "IncubatorView"}))
-Integration.modules.ChickenMode = safeRequire(findPath(LocalPlayer, {"PlayerScripts", "Features", "Chicken", "ChickenMode"}))
 
 local function findDataService()
     local direct = safeRequire(findPath(ReplicatedStorage, {"Packages", "DataService"}))
@@ -1227,14 +1225,12 @@ State.diagnostics["Catalog"] = Integration.modules.Catalog and "FOUND" or "MISSI
 State.diagnostics["Catalog.Eggs"] = Integration.modules.CatalogEggs and "FOUND" or "MISSING"
 State.diagnostics["FusionRules"] = Integration.modules.FusionRules and "FOUND" or "MISSING"
 State.diagnostics["IncubatorView"] = Integration.modules.IncubatorView and "FOUND" or "MISSING"
-State.diagnostics["ChickenMode"] = Integration.modules.ChickenMode and "FOUND" or "OPTIONAL/MISSING"
-State.diagnostics["TowerEntryManager"] = "MERGED"
 State.diagnostics["AutoSell.Factory"] = "PRESENT"
 State.diagnostics["AutoFuse.Factory"] = "PRESENT"
 
 local remotesFolder = ReplicatedStorage:FindFirstChild("Remotes")
 for _, name in ipairs({
-    "TowerStart", "TowerElevator", "TowerSurrender", "TowerRunStarted", "TowerFloorCleared", "TowerRivalLanded",
+    "TowerStart", "TowerSurrender", "TowerRunStarted", "TowerFloorCleared", "TowerRivalLanded",
     "TowerDefeat", "TowerRunEnded", "TowerContinueOffer", "TowerContinueDecline", "TowerContinued",
     "Rebirth", "BuyGenerator", "UpgradeGenerator", "ExpandCoop", "UpgradeRecycler",
     "HatchEggs", "IncubatorClaim", "IncubatorUpgrade", "SellChickens", "FuseChickens",
@@ -1347,113 +1343,6 @@ local function tryInvoke(name, ...)
 end
 local function responseOK(response)
     return type(response) == "table" and response.ok == true
-end
-
---------------------------------------------------------------------
--- SHARED TOWER ENTRY MANAGER
--- Used by Auto Farm Rebirth and Auto Tower.
--- Frontier is the next floor after towerBest. Elevator failure (including
--- insufficient in-game coin) falls back to the normal TowerStart path.
---------------------------------------------------------------------
-local TowerEntryManager = {
-    busy = false,
-    lastMode = "—",
-    lastFrontier = nil,
-    lastError = nil,
-}
-
-local function towerInvokeAccepted(name, ...)
-    local ok, response = tryInvoke(name, ...)
-    if not ok then return false, response end
-    if type(response) == "table" and response.ok ~= nil then
-        return response.ok == true, response
-    end
-    if response == false then return false, response end
-    return true, response
-end
-
-local function towerSetLocalOrder()
-    local mode = Integration.modules.ChickenMode
-    if type(mode) == "table" and type(mode.order) == "function" then
-        pcall(mode.order, "tower")
-    end
-end
-
-local function waitForTowerStart(timeoutSeconds, cancelPredicate)
-    local deadline = os.clock() + (tonumber(timeoutSeconds) or 6)
-    while os.clock() < deadline do
-        if type(cancelPredicate) == "function" and cancelPredicate() then
-            return false, "CANCELLED"
-        end
-        if State.tower.runActive or getTowerStatus() == "RUNNING" then
-            return true
-        end
-        task.wait(0.20)
-    end
-    return false, "TOWER_START_TIMEOUT"
-end
-
-local function startTowerThroughManager(cancelPredicate)
-    if TowerEntryManager.busy then return false, "ENTRY_BUSY" end
-    TowerEntryManager.busy = true
-    TowerEntryManager.lastError = nil
-
-    local function finish(ok, err)
-        TowerEntryManager.busy = false
-        TowerEntryManager.lastError = err
-        return ok, err
-    end
-
-    if type(cancelPredicate) == "function" and cancelPredicate() then
-        return finish(false, "CANCELLED")
-    end
-
-    refreshData()
-    local best = tonumber(State.data.towerBest) or tonumber(State.tower.best) or 0
-    local frontier = best + 1
-    TowerEntryManager.lastFrontier = frontier
-
-    -- Frontier path. We deliberately let the authoritative Elevator request
-    -- decide affordability; a rejected request is never retried and falls back.
-    if State.toggles.useFrontierSkip == true and frontier > 1 then
-        local elevatorOK, elevatorResponse = towerInvokeAccepted("TowerElevator", frontier)
-        if elevatorOK then
-            TowerEntryManager.lastMode = "FRONTIER"
-            towerSetLocalOrder()
-
-            local startOK, startResponse = towerInvokeAccepted("TowerStart")
-            if startOK then
-                local confirmed, why = waitForTowerStart(6, cancelPredicate)
-                if confirmed then
-                    log("TOWER", "Frontier entry requested: Floor " .. tostring(frontier))
-                    return finish(true)
-                end
-                return finish(false, why)
-            end
-
-            return finish(false, "TOWER_START_AFTER_ELEVATOR_FAILED:" .. tostring(startResponse))
-        else
-            -- Most importantly: insufficient coin / rejected Elevator does not
-            -- stall either automation. Continue with normal bottom start.
-            log("TOWER", "Frontier unavailable/rejected; fallback to bottom")
-        end
-    end
-
-    if type(cancelPredicate) == "function" and cancelPredicate() then
-        return finish(false, "CANCELLED")
-    end
-
-    TowerEntryManager.lastMode = "BOTTOM"
-    local startOK, startResponse = towerInvokeAccepted("TowerStart")
-    if not startOK then
-        return finish(false, "BOTTOM_START_FAILED:" .. tostring(startResponse))
-    end
-
-    local confirmed, why = waitForTowerStart(6, cancelPredicate)
-    if confirmed then
-        return finish(true)
-    end
-    return finish(false, why)
 end
 
 --------------------------------------------------------------------
@@ -2490,6 +2379,9 @@ end
 --------------------------------------------------------------------
 local AutoCollectEggFeature = nil
 local AutoSellFeature = nil
+local AutoTowerFeature = nil
+local TowerEntryManager = nil
+local setAutoTower
 
 do
     local ok, feat = pcall(function()
@@ -4665,6 +4557,17 @@ local function requestRebirth(myGen)
     afrSetPhase("ERROR")
     return false
 end
+local function requestTowerStartForFarm()
+    if TowerEntryManager and type(TowerEntryManager.requestTowerEntry) == "function" then
+        local result = TowerEntryManager.requestTowerEntry({
+            useFrontier = State.toggles.useFrontierSkip == true,
+            token = { cancelled = false },
+        })
+        return type(result) == "table" and result.ok == true
+    end
+    return tryInvoke("TowerStart")
+end
+
 local function afrTick(token)
     local myGen = AFR.generation
         while not token.cancelled and not State.closed and AFR.enabled and myGen == AFR.generation do
@@ -4752,25 +4655,22 @@ local function afrTick(token)
         end
         if State.tower.status == "IDLE" or State.tower.status == "RUN ENDED" or State.tower.status == "ERROR" then
             afrSetPhase("STARTING_TOWER")
-            local started = startTowerThroughManager(function()
-                return myGen ~= AFR.generation or not AFR.enabled
-                    or next(AFR.coordinatorPauseReasons) ~= nil
-            end)
-            if not started then afrSetPhase("ERROR"); task.wait(3) end
+            if requestTowerStartForFarm() then
+                local deadline = os.clock() + 6
+                while os.clock() < deadline and myGen == AFR.generation do
+                    if State.tower.runActive or getTowerStatus() == "RUNNING" then break end
+                    task.wait(0.25)
+                end
+            else afrSetPhase("ERROR"); task.wait(3) end
         else task.wait(0.4) end
     end
     if not AFR.enabled then afrSetPhase("DISABLED") end
 end
-local setToggleVisual = function() end -- safe no-op until UI helper is assigned
-
-local function setAutoFarmRebirth(on)
+setAutoFarmRebirth = function(on)
     on = on == true
-    if on and State.autoTower and State.autoTower.enabled then
-        State.autoTower.enabled = false
-        State.autoTower.generation += 1
-        State.autoTower.phase = "DISABLED"
+    if on and AutoTowerFeature and type(AutoTowerFeature.disable) == "function" then
+        pcall(AutoTowerFeature.disable)
         State.toggles.autoTower = false
-        setToggleVisual("autoTower", false)
     end
     State.toggles.autoFarmRebirth = on
     AFR.enabled = on
@@ -4786,98 +4686,37 @@ local function setAutoFarmRebirth(on)
     end
 end
 
-
-
---------------------------------------------------------------------
--- AUTO TOWER
--- Shares TowerEntryManager with Auto Farm Rebirth.
---------------------------------------------------------------------
-local AT = State.autoTower
-
-local function autoTowerSetPhase(phase, err)
-    AT.phase = phase
-    AT.lastError = err
-end
-
-local function autoTowerTick(token)
-    local myGen = AT.generation
-
-    while not token.cancelled and not State.closed and AT.enabled and myGen == AT.generation do
-        -- Reuse NORMAL_FARM pause reasons so UFO_EVENT_HOLD pauses Auto Tower too.
-        if next(AFR.coordinatorPauseReasons) ~= nil then
-            autoTowerSetPhase("PAUSED_FOR_EVENT")
-            task.wait(0.35)
-            continue
-        end
-
-        if isContinueOpen() then
-            autoTowerSetPhase("CONTINUE_OFFER")
-            if State.toggles.autoKoDismiss then
-                requestDecline(AFR.generation)
-            else
-                task.wait(0.5)
-            end
-            continue
-        end
-
-        if isTowerActive() then
-            autoTowerSetPhase(State.tower.status == "K.O." and "K.O." or "TOWER_RUNNING")
-            task.wait(0.4)
-            continue
-        end
-
-        if State.tower.status == "K.O." then
-            autoTowerSetPhase("WAITING_RUN_END")
-            task.wait(0.35)
-            continue
-        end
-
-        autoTowerSetPhase("STARTING_TOWER")
-        local started, err = startTowerThroughManager(function()
-            return myGen ~= AT.generation or not AT.enabled
-                or next(AFR.coordinatorPauseReasons) ~= nil
-        end)
-        AT.lastEntry = TowerEntryManager.lastMode
-        AT.lastFrontier = TowerEntryManager.lastFrontier
-
-        if not started then
-            autoTowerSetPhase("RETRY_WAIT", err)
-            for _ = 1, AT.retryDelay do
-                if token.cancelled or myGen ~= AT.generation or not AT.enabled then return end
-                task.wait(1)
-            end
-        else
-            autoTowerSetPhase("TOWER_RUNNING")
-            task.wait(0.4)
-        end
-    end
-
-    if not AT.enabled then autoTowerSetPhase("DISABLED") end
-end
-
-local function setAutoTower(on)
+setAutoTower = function(on)
     on = on == true
-
-    -- Tower ownership is exclusive: avoid two workers trying to start the same run.
-    if on and AFR.enabled then
-        setAutoFarmRebirth(false)
-        setToggleVisual("autoFarmRebirth", false)
-    end
-
-    State.toggles.autoTower = on
-    AT.enabled = on
-    AT.generation += 1
-
     if on then
-        autoTowerSetPhase("READY")
-        log("INFO", "Auto Tower enabled")
-        maid:Task(autoTowerTick)
-    else
-        autoTowerSetPhase("DISABLED")
-        log("INFO", "Auto Tower disabled")
+        if AutoTowerFeature == nil or type(AutoTowerFeature.enable) ~= "function" then
+            State.toggles.autoTower = false
+            State.autoTower.phase = "UNAVAILABLE"
+            State.autoTower.lastError = "AUTO TOWER BACKEND UNAVAILABLE"
+            return false
+        end
+        if AFR.enabled then
+            setAutoFarmRebirth(false)
+        end
     end
+    State.toggles.autoTower = on
+    State.autoTower.enabled = on
+    local ok, result = true, true
+    if AutoTowerFeature then
+        local method = on and AutoTowerFeature.enable or AutoTowerFeature.disable
+        ok, result = pcall(method)
+    end
+    if not ok or result == false then
+        State.toggles.autoTower = false
+        State.autoTower.enabled = false
+        State.autoTower.phase = "ERROR"
+        State.autoTower.lastError = tostring(result)
+        return false
+    end
+    State.autoTower.phase = on and "WAITING" or "DISABLED"
     return true
 end
+
 
 local autoRebirthGeneration = 0
 local function setAutoRebirth(on)
@@ -5126,9 +4965,9 @@ do
             end
             -- Preferences + optional worker start (allowed; user can toggle after)
             applyToggle("autoKoDismiss")
-            applyToggle("useFrontierSkip")
             applyToggle("autoFarmRebirth", setAutoFarmRebirth)
-            applyToggle("autoTower", setAutoTower)
+            applyToggle("autoTower")
+            applyToggle("useFrontierSkip")
             applyToggle("autoRebirth", setAutoRebirth)
             if AutoCollectEggFeature then applyToggle("autoCollectEgg", function(v) AutoCollectEggFeature.setAutoCollectEggs(v) end) end
             applyToggle("autoHotEgg", setAutoHotEgg)
@@ -5148,6 +4987,8 @@ do
             applyToggle("autoUfoAscension")
         end, { defaults = {
             autoFarmRebirth = false,
+            autoTower = false,
+            useFrontierSkip = false,
             autoRebirth = false,
             autoKoDismiss = true,
             autoCollectEgg = false,
@@ -5637,6 +5478,7 @@ local function shutdown()
     HatchFeature.setAutoHatch(false)
     IncubatorClaimFeature.setAutoIncubatorClaim(false)
     if AutoUpgradeIncubatorFeature then pcall(function() AutoUpgradeIncubatorFeature.setAutoUpgradeIncubator(false) end) end
+    if AutoTowerFeature then pcall(function() AutoTowerFeature.disable() end) end
     afrCancel(); heCancel(); antiAfkGen += 1
     for name in pairs(Economy.generations) do stopEconomy(name) end
     for k in pairs(State.toggles) do State.toggles[k] = false end
@@ -5673,6 +5515,20 @@ env.UNO_HUB_RUNTIME = {
     getNormalFarmCoordinatorPauseReasons = function() return AFR.coordinatorPauseReasons end,
     setAutoHotEgg = setAutoHotEgg,
     setAutoFarmRebirth = setAutoFarmRebirth,
+    setAutoTower = setAutoTower,
+    bindAutoTowerBackend = function(backend, entryManager)
+        if type(backend) ~= "table" or type(entryManager) ~= "table" then return false end
+        AutoTowerFeature = backend
+        TowerEntryManager = entryManager
+        return true
+    end,
+    setUseFrontierSkip = function(value)
+        State.toggles.useFrontierSkip = value == true
+        if AutoTowerFeature and type(AutoTowerFeature.setUseFrontierSkip) == "function" then
+            pcall(AutoTowerFeature.setUseFrontierSkip, value == true)
+        end
+        return true
+    end,
     setUfoAscension = setUfoAscension,
     setToggleVisual = setToggleVisual,
     isTowerActive = isTowerActive,
@@ -5780,7 +5636,7 @@ local function row(parent, order, left)
 end
 local ToggleVisualSetters = {}
 
-setToggleVisual = function(key, value)
+local function setToggleVisual(key, value)
     local setters = ToggleVisualSetters[key]
     if type(setters) ~= "table" then return end
     for _, setter in ipairs(setters) do
@@ -6122,7 +5978,13 @@ safeBuild("Auto Farm", function()
     local _, farmCard = card(farm, 1, "Farm")
     settingRow(farmCard, 1, "Auto Farm Rebirth", nil, "autoFarmRebirth", setAutoFarmRebirth)
     settingRow(farmCard, 2, "Auto Tower", nil, "autoTower", setAutoTower)
-    settingRow(farmCard, 3, "Use Frontier Skip", nil, "useFrontierSkip")
+    settingRow(farmCard, 3, "Use Frontier Skip", nil, "useFrontierSkip", function(v)
+        State.toggles.useFrontierSkip = v == true
+        if AutoTowerFeature and type(AutoTowerFeature.setUseFrontierSkip) == "function" then
+            AutoTowerFeature.setUseFrontierSkip(v == true)
+        end
+        return true
+    end)
     settingRow(farmCard, 4, "Auto Rebirth", nil, "autoRebirth", setAutoRebirth)
     settingRow(farmCard, 5, "Auto K.O. Dismiss", nil, "autoKoDismiss")
     if AutoCollectEggFeature then
@@ -6131,8 +5993,7 @@ safeBuild("Auto Farm", function()
         end)
     end
     local farmPhaseLabel = row(farmCard, 7, "Farm Status")
-    local towerAutoLabel = row(farmCard, 8, "Auto Tower Status")
-    local towerEntryLabel = row(farmCard, 9, "Tower Entry")
+    local autoTowerStatusLabel = row(farmCard, 8, "Tower Status")
 
     -- EVENTS
     local events = tabs.Events
@@ -6392,10 +6253,16 @@ safeBuild("Auto Farm", function()
                 phase = phase .. " (" .. tostring(AFR.countdown) .. "s)"
             end
             setText(farmPhaseLabel, phase)
-            setText(towerAutoLabel, State.autoTower and State.autoTower.phase or "DISABLED")
-            local entryMode = TowerEntryManager.lastMode or "—"
-            local entryFloor = TowerEntryManager.lastFrontier
-            setText(towerEntryLabel, entryFloor and (entryMode .. " · Floor " .. tostring(entryFloor)) or entryMode)
+            if AutoTowerFeature and type(AutoTowerFeature.getStatus) == "function" then
+                local okTower, towerStatus = pcall(AutoTowerFeature.getStatus)
+                if okTower and type(towerStatus) == "table" then
+                    setText(autoTowerStatusLabel, tostring(towerStatus.phase or "DISABLED"))
+                    State.autoTower.phase = tostring(towerStatus.phase or "DISABLED")
+                    State.autoTower.lastError = towerStatus.lastError
+                end
+            else
+                setText(autoTowerStatusLabel, "Waiting for backend")
+            end
 
             local env = (getgenv and getgenv()) or _G
             local ufo = env.UNO_UFO_ASCENSION
@@ -7448,6 +7315,20 @@ do
         getNormalFarmCoordinatorPauseReasons = function() return AFR.coordinatorPauseReasons end,
         setAutoHotEgg = setAutoHotEgg,
         setAutoFarmRebirth = setAutoFarmRebirth,
+        setAutoTower = setAutoTower,
+        bindAutoTowerBackend = function(backend, entryManager)
+            if type(backend) ~= "table" or type(entryManager) ~= "table" then return false end
+            AutoTowerFeature = backend
+            TowerEntryManager = entryManager
+            return true
+        end,
+        setUseFrontierSkip = function(value)
+            State.toggles.useFrontierSkip = value == true
+            if AutoTowerFeature and type(AutoTowerFeature.setUseFrontierSkip) == "function" then
+                pcall(AutoTowerFeature.setUseFrontierSkip, value == true)
+            end
+            return true
+        end,
         setAutoRebirth = setAutoRebirth,
         setUfoAscension = setUfoAscension,
         setToggleVisual = setToggleVisual,
@@ -9901,6 +9782,7 @@ local PRIORITY = {
     EVENT_CAPSULE = 80,
     KRAKEN_EGG = 70,
     AUTO_ARENA = 40,
+    AUTO_TOWER = 20,
     NORMAL_FARM = 10,
 }
 
@@ -9909,6 +9791,7 @@ local DEFAULT_FEATURES = {
     "EVENT_CAPSULE",
     "KRAKEN_EGG",
     "AUTO_ARENA",
+    "AUTO_TOWER",
     "NORMAL_FARM",
 }
 
@@ -10516,6 +10399,21 @@ local function createUNOHubPriorityIntegration(deps)
         }
     end
 
+    local function makeAutoTowerAdapter()
+        local backend = backends.AUTO_TOWER
+        if type(backend) ~= "table" then return {} end
+        return {
+            setPaused = function(reason, value)
+                if type(backend.setPaused) == "function" then
+                    return backend.setPaused(reason, value == true)
+                end
+                return false
+            end,
+            cancelMovement = function() return true end,
+            isCritical = function() return false end,
+        }
+    end
+
     local function makeArenaAdapter()
         local backend = backends.AUTO_ARENA
         if type(backend) ~= "table" then
@@ -10579,9 +10477,10 @@ local function createUNOHubPriorityIntegration(deps)
         EVENT_CAPSULE = makeEventAdapter(),
         KRAKEN_EGG = makeKrakenAdapter(),
         AUTO_ARENA = makeArenaAdapter(),
+        AUTO_TOWER = makeAutoTowerAdapter(),
         NORMAL_FARM = makeNormalFarmAdapter(),
     }
-    for _, owner in ipairs({ "HOT_EGG", "EVENT_CAPSULE", "KRAKEN_EGG", "AUTO_ARENA", "NORMAL_FARM" }) do
+    for _, owner in ipairs({ "HOT_EGG", "EVENT_CAPSULE", "KRAKEN_EGG", "AUTO_ARENA", "AUTO_TOWER", "NORMAL_FARM" }) do
         requestCache[owner] = false
         criticalCache[owner] = false
     end
@@ -10675,6 +10574,13 @@ local function createUNOHubPriorityIntegration(deps)
         return activeStatus[status] == true
     end
 
+    local function autoTowerRequested()
+        local backend = backends.AUTO_TOWER
+        return type(backend) == "table"
+            and type(backend.isEnabled) == "function"
+            and backend.isEnabled() == true
+    end
+
     local function normalFarmRequested()
         local state = runtime.getNormalFarmState and runtime.getNormalFarmState() or runtime.State.autoFarmRebirth
         return type(state) == "table" and state.enabled == true
@@ -10711,6 +10617,7 @@ local function createUNOHubPriorityIntegration(deps)
         syncFeature("KRAKEN_EGG", krakenRequested(), false)
         local arenaCritical = features.AUTO_ARENA.isCritical()
         syncFeature("AUTO_ARENA", arenaRequested(), arenaCritical)
+        syncFeature("AUTO_TOWER", autoTowerRequested(), false)
         syncFeature("NORMAL_FARM", normalFarmRequested(), false)
     end
 
@@ -11010,6 +10917,506 @@ local function resolveKraken(root, modules, remotes)
     }
 end
 
+local function createAutoTowerModule()
+--[=[
+    UNO_AUTO_TOWER_FRONTIER_INTEGRATION.lua
+
+    Isolated integration-ready backend for:
+      * shared TowerEntryManager
+      * Auto Tower
+
+    This module never starts a worker merely because it is loaded. The host
+    must call createAutoTowerFeature(deps), then explicitly call enable().
+
+    Required injected dependencies:
+      deps.invoke(name, ...) -> ok, response
+      deps.getTowerState() -> { active, runActive, status, continueOpen }
+      deps.getTowerBest() -> number
+      deps.getMoney() -> number
+      deps.getActiveChickenLevel() -> number
+      deps.getTowerFloorMoney(index) -> number
+      deps.getTowerFloorCount() -> number|nil
+      deps.getTowerMinFloor() -> number
+      deps.getTowerCostFactor() -> number
+      deps.getTowerVipDiscount() -> number
+      deps.hasElevatorVip() -> boolean
+      deps.isPaused() -> boolean
+      deps.wait(seconds)
+      deps.spawn(function(token) end)
+      deps.log(level, message)
+
+    Optional dependencies:
+      deps.setChickenOrder(order)
+      deps.onRunStarted(callback)
+      deps.onRunEnded(callback)
+      deps.isClosed() -> boolean
+      deps.getUseFrontierSkip() -> boolean
+      deps.getRetryDelay() -> number
+]=]
+
+local M = {}
+
+local function safeLog(deps, level, message)
+    if type(deps.log) == "function" then
+        pcall(deps.log, level, message)
+    end
+end
+
+local function waitFor(deps, seconds)
+    if type(deps.wait) == "function" then
+        deps.wait(seconds)
+    elseif task and type(task.wait) == "function" then
+        task.wait(seconds)
+    end
+end
+
+local function spawnFor(deps, fn)
+    if type(deps.spawn) == "function" then
+        return deps.spawn(fn)
+    end
+    if task and type(task.spawn) == "function" then
+        return task.spawn(fn)
+    end
+    local thread = coroutine.create(fn)
+    coroutine.resume(thread)
+    return thread
+end
+
+local function now()
+    return os.clock()
+end
+
+local function towerState(deps)
+    if type(deps.getTowerState) == "function" then
+        local ok, value = pcall(deps.getTowerState)
+        if ok and type(value) == "table" then
+            return value
+        end
+    end
+    return {}
+end
+
+local function isRunStarted(state)
+    return state.active == true
+        or state.runActive == true
+        or state.status == "RUNNING"
+        or state.status == "FLOOR CLEARED"
+end
+
+local function isRunEnded(state)
+    return state.active == false
+        and state.runActive ~= true
+        and state.status ~= "RUNNING"
+        and state.status ~= "FLOOR CLEARED"
+        and state.status ~= "K.O."
+        and state.continueOpen ~= true
+end
+
+local function isContinueOpen(state)
+    return state.continueOpen == true
+end
+
+local function readNumber(deps, name, fallback)
+    local fn = deps[name]
+    if type(fn) ~= "function" then return fallback end
+    local ok, value = pcall(fn)
+    value = tonumber(value)
+    return ok and value or fallback
+end
+
+local function calculateElevatorCost(deps, selectedFloor)
+    selectedFloor = math.floor(tonumber(selectedFloor) or 0)
+    if selectedFloor < 1 then return nil, "INVALID FRONTIER FLOOR" end
+
+    local sum = 0
+    for index = 1, selectedFloor - 1 do
+        if type(deps.getTowerFloorMoney) ~= "function" then
+            return nil, "TOWER FLOOR DATA UNAVAILABLE"
+        end
+        local ok, value = pcall(deps.getTowerFloorMoney, index)
+        value = tonumber(value)
+        if not ok or value == nil then
+            return nil, "TOWER FLOOR DATA UNAVAILABLE"
+        end
+        sum += value
+    end
+
+    local factor = readNumber(deps, "getTowerCostFactor", 1)
+    local vipDiscount = readNumber(deps, "getTowerVipDiscount", 0.5)
+    local vip = false
+    if type(deps.hasElevatorVip) == "function" then
+        local ok, value = pcall(deps.hasElevatorVip)
+        vip = ok and value == true
+    end
+
+    local multiplier = 1 - (vip and vipDiscount or 0)
+    local cost = math.max(0, math.floor(sum * factor * multiplier + 0.5))
+    return cost, nil
+end
+
+local function waitForRunStarted(deps, deadline, token)
+    while now() < deadline do
+        if token and token.cancelled then return false, "CANCELLED" end
+        if type(deps.isClosed) == "function" then
+            local ok, closed = pcall(deps.isClosed)
+            if ok and closed == true then return false, "CLOSED" end
+        end
+        if isRunStarted(towerState(deps)) then return true, nil end
+        waitFor(deps, 0.25)
+    end
+    return false, "TOWER START TIMEOUT"
+end
+
+local function invoke(deps, name, ...)
+    if type(deps.invoke) ~= "function" then
+        return false, nil, "INVOKER UNAVAILABLE"
+    end
+    local args = table.pack(...)
+    local ok, response = pcall(deps.invoke, name, table.unpack(args, 1, args.n))
+    if not ok then return false, nil, response end
+    return true, response, nil
+end
+
+local function responseRejected(response)
+    return type(response) == "table" and response.ok == false
+end
+
+local function createTowerEntryManager(deps)
+    deps = deps or {}
+    local manager = {}
+    local destroyed = false
+    local requestInFlight = false
+    local sequence = 0
+    local lastResult = nil
+
+    local function setResult(result)
+        lastResult = result
+        return result
+    end
+
+    local function normalStart(token, reason)
+        safeLog(deps, "INFO", "[UNO AutoTower] normal Tower start" .. (reason and (" (" .. reason .. ")") or ""))
+        if type(deps.setChickenOrder) == "function" then
+            pcall(deps.setChickenOrder, "tower")
+        end
+        local invoked, response, errorValue = invoke(deps, "TowerStart")
+        if not invoked then
+            return setResult({ ok = false, mode = "NORMAL", reason = errorValue or "TOWER START FAILED" })
+        end
+        if responseRejected(response) then
+            return setResult({ ok = false, mode = "NORMAL", reason = "TOWER START REJECTED", response = response })
+        end
+        local started, startError = waitForRunStarted(deps, now() + 6, token)
+        if started then
+            local state = towerState(deps)
+            safeLog(deps, "INFO", "[UNO AutoTower] TowerRunStarted floor=" .. tostring(state.floor or "?"))
+            return setResult({ ok = true, mode = "NORMAL", response = response, state = state })
+        end
+        return setResult({ ok = false, mode = "NORMAL", reason = startError or "TOWER START TIMEOUT", response = response })
+    end
+
+    function manager.requestTowerEntry(options)
+        options = options or {}
+        if destroyed then return setResult({ ok = false, reason = "DESTROYED" }) end
+        if requestInFlight then return setResult({ ok = false, reason = "ENTRY IN FLIGHT" }) end
+        if type(deps.isPaused) == "function" then
+            local ok, paused = pcall(deps.isPaused)
+            if ok and paused == true then
+                return setResult({ ok = false, reason = "PAUSED" })
+            end
+        end
+
+        requestInFlight = true
+        sequence += 1
+        local requestId = sequence
+        local token = options.token or { cancelled = false }
+        local useFrontier = options.useFrontier == true
+        local result
+
+        local function finish(value)
+            requestInFlight = false
+            value.requestId = requestId
+            return setResult(value)
+        end
+
+        if not useFrontier then
+            result = normalStart(token, "FRONTIER SKIP OFF")
+            requestInFlight = false
+            result.requestId = requestId
+            return result
+        end
+
+        local best = readNumber(deps, "getTowerBest", 0)
+        local floorCount = readNumber(deps, "getTowerFloorCount", nil)
+        local frontier = best + 1
+        if floorCount then frontier = math.min(frontier, floorCount) end
+        local minFloor = readNumber(deps, "getTowerMinFloor", 2)
+        local level = readNumber(deps, "getActiveChickenLevel", 0)
+        local money = readNumber(deps, "getMoney", 0)
+
+        safeLog(deps, "INFO", string.format("[UNO Frontier] best=%s", tostring(best)))
+        safeLog(deps, "INFO", string.format("[UNO Frontier] floor=%s", tostring(frontier)))
+
+        if level < 2 or best < minFloor + 1 or frontier <= 1 then
+            safeLog(deps, "INFO", "[UNO Frontier] unavailable -> NORMAL START")
+            result = normalStart(token, "FRONTIER UNAVAILABLE")
+            return finish(result)
+        end
+
+        local cost, costError = calculateElevatorCost(deps, frontier)
+        if not cost then
+            safeLog(deps, "WARN", "[UNO Frontier] unavailable -> NORMAL START: " .. tostring(costError))
+            result = normalStart(token, "FRONTIER COST UNAVAILABLE")
+            return finish(result)
+        end
+
+        safeLog(deps, "INFO", string.format("[UNO Frontier] cost=%s", tostring(cost)))
+        safeLog(deps, "INFO", string.format("[UNO Frontier] money=%s", tostring(money)))
+        if money < math.max(1, cost) then
+            safeLog(deps, "INFO", "[UNO Frontier] insufficient funds -> NORMAL START")
+            result = normalStart(token, "INSUFFICIENT FUNDS")
+            return finish(result)
+        end
+
+        local invoked, response, errorValue = invoke(deps, "TowerElevator", frontier)
+        if not invoked or responseRejected(response) then
+            safeLog(deps, "WARN", "[UNO Frontier] rejected -> NORMAL START")
+            result = normalStart(token, "FRONTIER REJECTED")
+            return finish(result)
+        end
+
+        if type(deps.setChickenOrder) == "function" then
+            pcall(deps.setChickenOrder, "tower")
+        end
+        local startedInvoked, startResponse, startError = invoke(deps, "TowerStart")
+        if not startedInvoked or responseRejected(startResponse) then
+            safeLog(deps, "WARN", "[UNO Frontier] start rejected -> NORMAL START")
+            result = normalStart(token, "FRONTIER START REJECTED")
+            return finish(result)
+        end
+
+        local started, startTimeout = waitForRunStarted(deps, now() + 6, token)
+        if started then
+            local state = towerState(deps)
+            safeLog(deps, "INFO", "[UNO Frontier] start accepted")
+            safeLog(deps, "INFO", "[UNO AutoTower] TowerRunStarted floor=" .. tostring(state.floor or "?"))
+            return finish({
+                ok = true,
+                mode = "FRONTIER",
+                requestedFloor = frontier,
+                response = response,
+                startResponse = startResponse,
+                state = state,
+            })
+        end
+
+        safeLog(deps, "WARN", "[UNO Frontier] rejected -> NORMAL START")
+        result = normalStart(token, startTimeout or startError or "FRONTIER START TIMEOUT")
+        return finish(result)
+    end
+
+    function manager.isBusy()
+        return requestInFlight
+    end
+
+    function manager.getLastResult()
+        return lastResult
+    end
+
+    function manager.destroy()
+        destroyed = true
+        sequence += 1
+        requestInFlight = false
+    end
+
+    return manager
+end
+
+function M.createTowerEntryManager(deps)
+    return createTowerEntryManager(deps)
+end
+
+function M.createAutoTowerFeature(deps)
+    deps = deps or {}
+    local manager = deps.towerEntryManager or createTowerEntryManager(deps)
+    local feature = {}
+    local state = {
+        enabled = false,
+        paused = false,
+        pauseReasons = {},
+        phase = "DISABLED",
+        generation = 0,
+        lastError = nil,
+        lastResult = nil,
+        runCount = 0,
+    }
+    local destroyed = false
+    local workerRunning = false
+    local currentToken = nil
+    local useFrontierSkip = false
+    if type(deps.getUseFrontierSkip) == "function" then
+        local ok, value = pcall(deps.getUseFrontierSkip)
+        useFrontierSkip = ok and value == true
+    end
+
+    local function log(level, message)
+        safeLog(deps, level, message)
+    end
+
+    local function setPhase(phase, errorValue)
+        state.phase = phase
+        state.lastError = errorValue
+    end
+
+    local function isPaused()
+        if state.paused or next(state.pauseReasons) ~= nil then return true end
+        if type(deps.isPaused) == "function" then
+            local ok, value = pcall(deps.isPaused)
+            if ok and value == true then return true end
+        end
+        return false
+    end
+
+    local function worker(token)
+        workerRunning = true
+        while not token.cancelled and not destroyed and state.enabled and state.generation == token.generation do
+            if isPaused() then
+                if state.phase ~= "PAUSED" then
+                    setPhase("PAUSED")
+                    log("INFO", "[UNO AutoTower] paused: coordinator")
+                end
+                waitFor(deps, 0.35)
+            else
+                if state.phase == "PAUSED" then
+                    setPhase("WAITING")
+                    log("INFO", "[UNO AutoTower] resumed")
+                end
+                local current = towerState(deps)
+                if isContinueOpen(current) then
+                    setPhase("WAITING_CONTINUE")
+                    waitFor(deps, 0.35)
+                elseif isRunStarted(current) then
+                    setPhase("TOWER_RUNNING")
+                    waitFor(deps, 0.5)
+                elseif isRunEnded(current) or current.status == "IDLE" or current.status == "ERROR" then
+                    setPhase("STARTING_TOWER")
+                    local result = manager.requestTowerEntry({
+                        useFrontier = useFrontierSkip,
+                        token = token,
+                    })
+                    state.lastResult = result
+                    if result.ok then
+                        state.runCount += 1
+                        setPhase("TOWER_RUNNING")
+                    elseif result.reason == "PAUSED" or result.reason == "CANCELLED" then
+                        setPhase("PAUSED")
+                    else
+                        setPhase("RETRY_WAIT", result.reason)
+                        waitFor(deps, readNumber(deps, "getRetryDelay", 5))
+                    end
+                else
+                    waitFor(deps, 0.4)
+                end
+            end
+        end
+        workerRunning = false
+        if not state.enabled then setPhase("DISABLED") end
+    end
+
+    local function startWorker()
+        if workerRunning or destroyed then return false end
+        state.generation += 1
+        local token = { cancelled = false, generation = state.generation }
+        currentToken = token
+        spawnFor(deps, function() worker(token) end)
+        return true
+    end
+
+    function feature.isEnabled()
+        return state.enabled and not destroyed
+    end
+
+    function feature.setPaused(reason, value)
+        if value == true then
+            return feature.pause(reason)
+        end
+        return feature.resume(reason)
+    end
+
+    function feature.enable()
+        if destroyed then return false end
+        state.enabled = true
+        state.generation += 1
+        setPhase("WAITING")
+        log("INFO", "[UNO AutoTower] ENABLED")
+        return startWorker()
+    end
+
+    function feature.disable()
+        state.enabled = false
+        state.generation += 1
+        if currentToken then currentToken.cancelled = true end
+        currentToken = nil
+        setPhase("DISABLED")
+        log("INFO", "[UNO AutoTower] DISABLED")
+        return true
+    end
+
+    function feature.pause(reason)
+        reason = tostring(reason or "COORDINATOR")
+        state.pauseReasons[reason] = true
+        return true
+    end
+
+    function feature.resume(reason)
+        reason = tostring(reason or "COORDINATOR")
+        state.pauseReasons[reason] = nil
+        return true
+    end
+
+    function feature.setUseFrontierSkip(value)
+        useFrontierSkip = value == true
+        return true
+    end
+
+    function feature.getUseFrontierSkip()
+        return useFrontierSkip
+    end
+
+    function feature.getStatus()
+        return {
+            enabled = state.enabled,
+            paused = isPaused(),
+            phase = state.phase,
+            generation = state.generation,
+            lastError = state.lastError,
+            lastResult = state.lastResult,
+            runCount = state.runCount,
+            workerRunning = workerRunning,
+        }
+    end
+
+    function feature.getEntryManager()
+        return manager
+    end
+
+    function feature.destroy()
+        if destroyed then return end
+        feature.disable()
+        destroyed = true
+        manager.destroy()
+    end
+
+    return feature
+end
+
+M.create = M.createAutoTowerFeature
+return M
+
+end
+local AutoTowerModule = createAutoTowerModule()
+env.UNO_AUTO_TOWER_FACTORY = AutoTowerModule.createAutoTowerFeature
+
 local function createBootstrap()
     local root, rootError = getRoot()
     if not root then block(rootError) return end
@@ -11092,6 +11499,148 @@ local function createBootstrap()
     backends.KRAKEN_EGG = krakenBackend
     ownedBackends.KRAKEN_EGG = krakenBackend
     log("Kraken dependencies READY")
+    local towerFolder = child(child(child(root.ReplicatedStorage, "Features"), "Battle"), "tower")
+    local towerFloor = safeRequire(towerFolder and child(towerFolder, "TowerFloor"))
+    local chickenFolder = child(child(child(root.player, "PlayerScripts"), "Features"), "Chicken")
+    local chickenController = safeRequire(child(child(chickenFolder, "controllers"), "ChickenController"))
+    local chickenMode = safeRequire(child(chickenFolder, "ChickenMode"))
+    
+    local coreRemotes = remotes
+    local looseTowerRemotes = child(root.ReplicatedStorage, "Remotes")
+    local gameConfig = integrationModules.GameConfig
+
+    local function invokeTower(name, ...)
+        local args = table.pack(...)
+        if coreRemotes and type(coreRemotes.defs) == "table" and coreRemotes.defs[name]
+            and type(coreRemotes.invoke) == "function" then
+            local def = coreRemotes.defs[name]
+            local kind = def.kind or def.type
+            if kind == "Function" then
+                local ok, response = pcall(function()
+                    return coreRemotes.invoke(def, table.unpack(args, 1, args.n))
+                end)
+                return ok, response
+            end
+        end
+        local remote = looseTowerRemotes and child(looseTowerRemotes, name)
+        if remote and remote:IsA("RemoteFunction") then
+            local ok, response = pcall(function()
+                return remote:InvokeServer(table.unpack(args, 1, args.n))
+            end)
+            return ok, response
+        end
+        return false, "missing " .. name
+    end
+
+    local function towerSnapshot()
+        local runtimeState = root.runtime.State
+        local t = runtimeState and runtimeState.tower or {}
+        local active = type(root.runtime.isTowerActive) == "function" and root.runtime.isTowerActive() == true
+        return {
+            active = active or t.runActive == true or t.status == "RUNNING" or t.status == "FLOOR CLEARED",
+            runActive = t.runActive == true,
+            status = t.status,
+            continueOpen = t.continue and t.continue.open == true,
+            floor = t.floor,
+        }
+    end
+
+    local function clientData(path)
+        local service = integrationModules.DataService
+        local client = service and service.client
+        if not client or type(client.get) ~= "function" then return nil end
+        local ok, value = pcall(client.get, client, path)
+        return ok and value or nil
+    end
+
+    local function readActiveLevel()
+        local runtimeState = root.runtime.State
+        local data = runtimeState and runtimeState.data
+        local chicken = data and data.chicken
+        if type(chicken) == "table" then
+            local level = tonumber(chicken.level)
+            if level then return level end
+        end
+        local fromClient = clientData({ "chicken" })
+        return type(fromClient) == "table" and tonumber(fromClient.level) or tonumber(fromClient) or 0
+    end
+
+    local function readBest()
+        local runtimeState = root.runtime.State
+        local data = runtimeState and runtimeState.data
+        return tonumber(data and data.towerBest) or tonumber(runtimeState and runtimeState.tower and runtimeState.tower.best) or 0
+    end
+
+    local function readMoney()
+        local runtimeState = root.runtime.State
+        local data = runtimeState and runtimeState.data
+        return tonumber(data and data.money) or tonumber(clientData({ "money" })) or 0
+    end
+
+    local function premiumValue(path, fallback)
+        local cur = gameConfig
+        for _, key in ipairs(path) do
+            cur = type(cur) == "table" and cur[key] or nil
+        end
+        return tonumber(cur) or fallback
+    end
+
+    local autoTowerOk, autoTowerBackend = pcall(AutoTowerModule.createAutoTowerFeature, {
+        invoke = invokeTower,
+        getTowerState = towerSnapshot,
+        getTowerBest = readBest,
+        getMoney = readMoney,
+        getActiveChickenLevel = readActiveLevel,
+        getTowerFloorMoney = function(index)
+            local row = towerFloor and type(towerFloor.at) == "function" and towerFloor.at(index) or nil
+            return row and row.money
+        end,
+        getTowerFloorCount = function()
+            return towerFloor and tonumber(towerFloor.count) or nil
+        end,
+        getTowerMinFloor = function() return 2 end,
+        getTowerCostFactor = function() return premiumValue({ "premium", "elevator", "costFactor" }, 1) end,
+        getTowerVipDiscount = function() return premiumValue({ "premium", "elevator", "vipDiscount" }, 0.5) end,
+        hasElevatorVip = function()
+            local owned = clientData({ "owned" })
+            return type(owned) == "table" and owned.elevatorVip == true
+        end,
+        setChickenOrder = function(order)
+            if chickenController and type(chickenController.setOrder) == "function" then
+                return chickenController:setOrder(order)
+            end
+            if chickenMode and type(chickenMode.order) == "function" then
+                return chickenMode.order(order)
+            end
+            return false
+        end,
+        isPaused = function()
+            local ufo = root.runtime.State and root.runtime.State.ufoAscension
+            return type(ufo) == "table" and (ufo.ufoActive == true or ufo.recoveryInProgress == true)
+        end,
+        isClosed = function() return root.runtime.State and root.runtime.State.closed == true end,
+        getUseFrontierSkip = function() return root.runtime.State.toggles.useFrontierSkip == true end,
+        getRetryDelay = function() return 5 end,
+        wait = task.wait,
+        spawn = task.spawn,
+        log = function(level, message) log(message) end,
+    })
+    if not autoTowerOk or type(autoTowerBackend) ~= "table" then
+        log("Auto Tower construction failed: " .. tostring(autoTowerBackend))
+    else
+        backends.AUTO_TOWER = autoTowerBackend
+        ownedBackends.AUTO_TOWER = autoTowerBackend
+        local entryManager = type(autoTowerBackend.getEntryManager) == "function"
+            and autoTowerBackend.getEntryManager()
+            or nil
+        local runtimeBound = type(root.runtime.bindAutoTowerBackend) == "function"
+            and root.runtime.bindAutoTowerBackend(autoTowerBackend, entryManager) == true
+        if not runtimeBound then
+            log("Auto Tower runtime binding unavailable; backend kept disabled")
+        end
+        log("Auto Tower dependencies READY")
+    end
+
     status = "CONNECTING_PRIORITY"
     env.UNO_HUB_BACKENDS = backends
     env.UNO_REAL_BACKENDS = backends
@@ -11154,6 +11703,20 @@ local api = {
         if not backend or type(backend.setEnabled) ~= "function" then return false end
         return backend.setEnabled(value == true)
     end,
+    setAutoTowerEnabled = function(value)
+        local backend = backends.AUTO_TOWER
+        if not backend then return false end
+        local method = value == true and backend.enable or backend.disable
+        if type(method) ~= "function" then return false end
+        return method()
+    end,
+    setUseFrontierSkip = function(value)
+        local backend = backends.AUTO_TOWER
+        if backend and type(backend.setUseFrontierSkip) == "function" then
+            return backend.setUseFrontierSkip(value == true)
+        end
+        return false
+    end,
     destroy = destroy,
 }
 
@@ -11181,6 +11744,26 @@ do
         end
         if toggles.autoKraken == true and type(phase9.setKrakenEnabled) == "function" then
             pcall(phase9.setKrakenEnabled, true)
+        end
+        if toggles.autoTower == true then
+            if toggles.autoFarmRebirth == true then
+                toggles.autoTower = false
+                if runtime.State.autoTower then
+                    runtime.State.autoTower.enabled = false
+                    runtime.State.autoTower.phase = "DISABLED"
+                end
+            elseif type(runtime.setAutoTower) == "function" then
+                pcall(runtime.setAutoTower, true)
+            elseif type(phase9.setAutoTowerEnabled) == "function" then
+                pcall(phase9.setAutoTowerEnabled, true)
+            end
+        end
+        if toggles.useFrontierSkip == true then
+            if type(runtime.setUseFrontierSkip) == "function" then
+                pcall(runtime.setUseFrontierSkip, true)
+            elseif type(phase9.setUseFrontierSkip) == "function" then
+                pcall(phase9.setUseFrontierSkip, true)
+            end
         end
     end
 end
@@ -12487,11 +13070,11 @@ do
                     -- but NORMAL_FARM must not resume while UFO remains active.
                     if type(coordinator.getCurrentOwner) == "function"
                         and type(coordinator.requestPriority) == "function"
-                        and (os.clock() - lastHoldAssertAt) >= 0.75 then
+                        and (now() - lastHoldAssertAt) >= 0.75 then
 
                         local okOwner, owner = pcall(coordinator.getCurrentOwner)
                         if okOwner and (owner == "NORMAL_FARM" or owner == nil) then
-                            lastHoldAssertAt = os.clock()
+                            lastHoldAssertAt = now()
                             pcall(coordinator.requestPriority, "UFO_ASCENSION", 75, {
                                 enabled = true,
                                 critical = critical,

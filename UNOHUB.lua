@@ -1,5 +1,5 @@
 --[[
-    UNO HUB1
+    UNO HUB
 ]]
 
 
@@ -9709,6 +9709,23 @@ safeBuild("Webhook", function()
     local webhookEnv = (getgenv and getgenv()) or _G
     local appliedRevision = -1
 
+    local function webhookWarn(label, err)
+        warn("[UNO WEBHOOK UI] " .. tostring(label) .. ": " .. tostring(err))
+    end
+
+    local function safeWebhookCall(label, fn, ...)
+        if type(fn) ~= "function" then
+            webhookWarn(label, "FUNCTION_UNAVAILABLE")
+            return false, nil
+        end
+        local ok, result = pcall(fn, ...)
+        if not ok then
+            webhookWarn(label, result)
+            return false, nil
+        end
+        return true, result
+    end
+
     local _, mainCard = card(sc, 1, "WEBHOOK")
 
     local urlLabel = text(mainCard, "Webhook URL", 12, Theme.TextSecondary)
@@ -9755,35 +9772,36 @@ safeBuild("Webhook", function()
 
     local enableSwitch, setEnableVisual
     enableSwitch, setEnableVisual = makeSwitch(enableRow, WebhookConfigState.enabled == true, function(v)
-        WebhookConfigState.enabled = v == true
-        markConfigDirty()
+        local ok, err = pcall(function()
+            WebhookConfigState.enabled = v == true
+            markConfigDirty()
 
-        local sender = webhookEnv.UNO_WEBHOOK_SENDER_V1
-        local scheduler = webhookEnv.UNO_WEBHOOK_SCHEDULER_V1
-        if type(sender) ~= "table" or type(scheduler) ~= "table" then
-            warn("[UNO WEBHOOK UI] backend unavailable")
-            return
-        end
+            local sender = webhookEnv.UNO_WEBHOOK_SENDER_V1
+            local scheduler = webhookEnv.UNO_WEBHOOK_SCHEDULER_V1
+            if type(sender) ~= "table" or type(scheduler) ~= "table" then
+                error("BACKEND_UNAVAILABLE")
+            end
 
-        if v then
-            local setResult = sender.setWebhookUrl(WebhookConfigState.url)
-            if not setResult or setResult.ok ~= true then
-                WebhookConfigState.enabled = false
-                if type(setEnableVisual) == "function" then setEnableVisual(false, false) end
-                markConfigDirty()
-                warn("[UNO WEBHOOK UI] URL rejected: " .. tostring(setResult and setResult.reason))
-                return
+            if v then
+                local _, setResult = safeWebhookCall("setWebhookUrl", sender.setWebhookUrl, WebhookConfigState.url)
+                if not setResult or setResult.ok ~= true then
+                    WebhookConfigState.enabled = false
+                    if type(setEnableVisual) == "function" then setEnableVisual(false, false) end
+                    markConfigDirty()
+                    return
+                end
+
+                local _, result = safeWebhookCall("scheduler.enable", scheduler.enable)
+                if not result or result.ok ~= true then
+                    WebhookConfigState.enabled = false
+                    if type(setEnableVisual) == "function" then setEnableVisual(false, false) end
+                    markConfigDirty()
+                end
+            else
+                safeWebhookCall("scheduler.disable", scheduler.disable)
             end
-            local result = scheduler.enable()
-            if not result or result.ok ~= true then
-                WebhookConfigState.enabled = false
-                if type(setEnableVisual) == "function" then setEnableVisual(false, false) end
-                markConfigDirty()
-                warn("[UNO WEBHOOK UI] scheduler enable failed: " .. tostring(result and result.reason))
-            end
-        else
-            scheduler.disable()
-        end
+        end)
+        if not ok then webhookWarn("Enable callback failed", err) end
     end)
     enableSwitch.Position = UDim2.new(1, -40, 0.5, -11)
 
@@ -9793,8 +9811,8 @@ safeBuild("Webhook", function()
 
     local function pushInclude()
         local sender = webhookEnv.UNO_WEBHOOK_SENDER_V1
-        if type(sender) == "table" and type(sender.setIncludeData) == "function" then
-            sender.setIncludeData(includeState)
+        if type(sender) == "table" then
+            safeWebhookCall("setIncludeData", sender.setIncludeData, includeState)
         end
     end
 
@@ -9807,9 +9825,12 @@ safeBuild("Webhook", function()
         text(f, title, 13, Theme.TextPrimary, Enum.Font.GothamMedium).Size = UDim2.new(1, -50, 1, 0)
 
         local sw, setVisual = makeSwitch(f, includeState[key] ~= false, function(v)
-            includeState[key] = v == true
-            pushInclude()
-            markConfigDirty()
+            local ok, err = pcall(function()
+                includeState[key] = v == true
+                pushInclude()
+                markConfigDirty()
+            end)
+            if not ok then webhookWarn("Include toggle " .. tostring(key), err) end
         end)
         includeVisualSetters[key] = setVisual
         sw.Position = UDim2.new(1, -40, 0.5, -11)
@@ -9828,123 +9849,134 @@ safeBuild("Webhook", function()
     local triggerRow = row(statusCard, 4, "Last Trigger")
 
     local function applyLoadedWebhookConfig()
-        local sender = webhookEnv.UNO_WEBHOOK_SENDER_V1
-        local scheduler = webhookEnv.UNO_WEBHOOK_SCHEDULER_V1
-        if type(sender) ~= "table" or type(scheduler) ~= "table" then return end
-
-        urlBox.Text = WebhookConfigState.url or ""
-        for key, setter in pairs(includeVisualSetters) do
-            if type(setter) == "function" then
-                setter(WebhookConfigState.include[key] ~= false, false)
-            end
-        end
-        pushInclude()
-
-        if type(setEnableVisual) == "function" then
-            setEnableVisual(WebhookConfigState.enabled == true, false)
-        end
-
-        if WebhookConfigState.url ~= "" then
-            local configured = sender.setWebhookUrl(WebhookConfigState.url)
-            if not configured or configured.ok ~= true then
-                WebhookConfigState.enabled = false
-                if type(setEnableVisual) == "function" then setEnableVisual(false, false) end
+        local ok, err = pcall(function()
+            local sender = webhookEnv.UNO_WEBHOOK_SENDER_V1
+            local scheduler = webhookEnv.UNO_WEBHOOK_SCHEDULER_V1
+            if type(sender) ~= "table" or type(scheduler) ~= "table" then
                 return
             end
-        end
 
-        if WebhookConfigState.enabled == true then
-            scheduler.enable()
-        else
-            scheduler.disable()
-        end
+            urlBox.Text = WebhookConfigState.url or ""
+            for key, setter in pairs(includeVisualSetters) do
+                if type(setter) == "function" then
+                    setter(WebhookConfigState.include[key] ~= false, false)
+                end
+            end
 
-        appliedRevision = WebhookConfigState.revision
+            pushInclude()
+
+            if type(setEnableVisual) == "function" then
+                setEnableVisual(WebhookConfigState.enabled == true, false)
+            end
+
+            if WebhookConfigState.url ~= "" then
+                local _, configured = safeWebhookCall("restore setWebhookUrl", sender.setWebhookUrl, WebhookConfigState.url)
+                if not configured or configured.ok ~= true then
+                    WebhookConfigState.enabled = false
+                    if type(setEnableVisual) == "function" then setEnableVisual(false, false) end
+                    appliedRevision = WebhookConfigState.revision
+                    return
+                end
+            end
+
+            if WebhookConfigState.enabled == true then
+                safeWebhookCall("restore scheduler.enable", scheduler.enable)
+            else
+                safeWebhookCall("restore scheduler.disable", scheduler.disable)
+            end
+
+            appliedRevision = WebhookConfigState.revision
+        end)
+        if not ok then webhookWarn("applyLoadedWebhookConfig failed", err) end
     end
 
     urlBox.FocusLost:Connect(function()
-        WebhookConfigState.url = tostring(urlBox.Text or "")
-        markConfigDirty()
+        local ok, err = pcall(function()
+            WebhookConfigState.url = tostring(urlBox.Text or "")
+            markConfigDirty()
 
-        local sender = webhookEnv.UNO_WEBHOOK_SENDER_V1
-        if type(sender) == "table" and WebhookConfigState.url ~= "" then
-            local result = sender.setWebhookUrl(WebhookConfigState.url)
-            if result and result.ok ~= true then
-                warn("[UNO WEBHOOK UI] URL rejected: " .. tostring(result.reason))
+            local sender = webhookEnv.UNO_WEBHOOK_SENDER_V1
+            if type(sender) == "table" and WebhookConfigState.url ~= "" then
+                safeWebhookCall("FocusLost setWebhookUrl", sender.setWebhookUrl, WebhookConfigState.url)
             end
-        end
+        end)
+        if not ok then webhookWarn("URL FocusLost failed", err) end
     end)
 
     testButton.MouseButton1Click:Connect(function()
-        local sender = webhookEnv.UNO_WEBHOOK_SENDER_V1
-        if type(sender) ~= "table" then
-            warn("[UNO WEBHOOK UI] sender unavailable")
-            return
-        end
-
-        WebhookConfigState.url = tostring(urlBox.Text or "")
-        markConfigDirty()
-
-        local configured = sender.setWebhookUrl(WebhookConfigState.url)
-        if not configured or configured.ok ~= true then
-            warn("[UNO WEBHOOK UI] Test blocked: " .. tostring(configured and configured.reason))
-            return
-        end
-
-        task.spawn(function()
-            local result = sender.testWebhook()
-            if not result or result.ok ~= true then
-                warn("[UNO WEBHOOK UI] Test failed: " .. tostring(result and result.reason))
+        local ok, err = pcall(function()
+            local sender = webhookEnv.UNO_WEBHOOK_SENDER_V1
+            if type(sender) ~= "table" then
+                error("SENDER_UNAVAILABLE")
             end
+
+            WebhookConfigState.url = tostring(urlBox.Text or "")
+            markConfigDirty()
+
+            local _, configured = safeWebhookCall("Test setWebhookUrl", sender.setWebhookUrl, WebhookConfigState.url)
+            if not configured or configured.ok ~= true then
+                return
+            end
+
+            task.spawn(function()
+                local okSend, sendErr = pcall(function()
+                    safeWebhookCall("testWebhook", sender.testWebhook)
+                end)
+                if not okSend then webhookWarn("Test worker failed", sendErr) end
+            end)
         end)
+        if not ok then webhookWarn("Test button failed", err) end
     end)
 
-    -- Apply the state that ConfigManager loaded before the UI was constructed.
-    applyLoadedWebhookConfig()
+    -- Restore after the current UI construction stack unwinds.
+    task.defer(function()
+        applyLoadedWebhookConfig()
+    end)
 
     Views.Webhook = {
         root = sc,
         update = function()
-            local sender = webhookEnv.UNO_WEBHOOK_SENDER_V1
-            local scheduler = webhookEnv.UNO_WEBHOOK_SCHEDULER_V1
-            if type(sender) ~= "table" or type(scheduler) ~= "table" then
-                setText(statusRow, "Unavailable")
-                setText(nextSend, "—")
-                setText(lastSend, "—")
-                setText(triggerRow, "—")
-                return
-            end
+            local ok, err = pcall(function()
+                local sender = webhookEnv.UNO_WEBHOOK_SENDER_V1
+                local scheduler = webhookEnv.UNO_WEBHOOK_SCHEDULER_V1
+                if type(sender) ~= "table" or type(scheduler) ~= "table" then
+                    setText(statusRow, "Unavailable")
+                    setText(nextSend, "—")
+                    setText(lastSend, "—")
+                    setText(triggerRow, "—")
+                    return
+                end
 
-            -- Configs page can load another file after this page already exists.
-            -- The loader increments revision; synchronize UI/backend on next update.
-            if appliedRevision ~= WebhookConfigState.revision then
-                applyLoadedWebhookConfig()
-            end
+                if appliedRevision ~= WebhookConfigState.revision then
+                    applyLoadedWebhookConfig()
+                end
 
-            local ss = sender.getStatus()
-            local qs = scheduler.getStatus()
-            local connected = ss and ss.webhookConfigured == true
-            local active = qs and qs.enabled == true
+                local _, ss = safeWebhookCall("sender.getStatus", sender.getStatus)
+                local _, qs = safeWebhookCall("scheduler.getStatus", scheduler.getStatus)
+                local connected = ss and ss.webhookConfigured == true
+                local active = qs and qs.enabled == true
 
-            if active and connected then
-                setText(statusRow, "Connected")
-            elseif connected then
-                setText(statusRow, "Ready")
-            else
-                setText(statusRow, "Not Configured")
-            end
+                if active and connected then
+                    setText(statusRow, "Connected")
+                elseif connected then
+                    setText(statusRow, "Ready")
+                else
+                    setText(statusRow, "Not Configured")
+                end
 
-            if qs and qs.lastSendAt then
-                local ok, clock = pcall(function()
-                    return os.date("%H:%M:%S", qs.lastSendAt)
-                end)
-                setText(lastSend, ok and clock or tostring(qs.lastSendAt))
-            else
-                setText(lastSend, "—")
-            end
+                if qs and qs.lastSendAt then
+                    local okDate, clock = pcall(function()
+                        return os.date("%H:%M:%S", qs.lastSendAt)
+                    end)
+                    setText(lastSend, okDate and clock or tostring(qs.lastSendAt))
+                else
+                    setText(lastSend, "—")
+                end
 
-            setText(nextSend, qs and qs.nextHourlyLabel or "—")
-            setText(triggerRow, qs and qs.lastSendTrigger or "—")
+                setText(nextSend, qs and qs.nextHourlyLabel or "—")
+                setText(triggerRow, qs and qs.lastSendTrigger or "—")
+            end)
+            if not ok then webhookWarn("View update failed", err) end
         end,
     }
 end)

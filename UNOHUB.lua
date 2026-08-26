@@ -5550,7 +5550,7 @@ do
 
         if HatchFeature then
             for _, methodName in ipairs({
-                "setAutoHatch", "setEggSelected", "clearEggSelection",
+                "setAutoHatch", "setEggSelected", "clearEggSelection", "selectAllAvailableEggs",
             }) do
                 wrapConfigDirty(HatchFeature, methodName)
             end
@@ -6356,6 +6356,91 @@ local function makeCollapsibleFilter(parent, order, label, buildRows)
     return rebuild
 end
 
+State._makeSummaryFilterSelector = function(parent, order, title, getSummary, buildRows)
+    local wrap = Instance.new("Frame")
+    wrap.LayoutOrder = order or 0
+    wrap.Size = UDim2.new(1, 0, 0, 0)
+    wrap.AutomaticSize = Enum.AutomaticSize.Y
+    wrap.BackgroundTransparency = 1
+    wrap.Parent = parent
+
+    local layout = Instance.new("UIListLayout")
+    layout.Padding = UDim.new(0, 5)
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.Parent = wrap
+
+    local header = Instance.new("TextButton")
+    header.LayoutOrder = 1
+    header.Size = UDim2.new(1, 0, 0, 48)
+    header.BackgroundColor3 = Theme.SurfaceElevated
+    header.BorderSizePixel = 0
+    header.Text = ""
+    header.AutoButtonColor = false
+    header.Parent = wrap
+    corner(header, 7); stroke(header)
+
+    local titleLabel = text(header, title, 12, Theme.TextSecondary, Enum.Font.GothamMedium)
+    titleLabel.Position = UDim2.fromOffset(11, 4)
+    titleLabel.Size = UDim2.new(1, -48, 0, 20)
+
+    local summaryLabel = text(header, "None selected", 10, Theme.TextMuted)
+    summaryLabel.Position = UDim2.fromOffset(11, 24)
+    summaryLabel.Size = UDim2.new(1, -48, 0, 17)
+
+    local arrow = text(header, "›", 20, Theme.TextMuted, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
+    arrow.Position = UDim2.new(1, -36, 0, 8)
+    arrow.Size = UDim2.fromOffset(26, 30)
+
+    local body = Instance.new("Frame")
+    body.LayoutOrder = 2
+    body.Size = UDim2.new(1, 0, 0, 0)
+    body.AutomaticSize = Enum.AutomaticSize.Y
+    body.BackgroundTransparency = 1
+    body.Visible = false
+    body.Parent = wrap
+
+    local bodyLayout = Instance.new("UIListLayout")
+    bodyLayout.Padding = UDim.new(0, 5)
+    bodyLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    bodyLayout.Parent = body
+
+    local built = false
+
+    local function refreshSummary()
+        local ok, value = pcall(getSummary)
+        if ok and type(value) == "string" and value ~= "" then
+            summaryLabel.Text = value
+        else
+            summaryLabel.Text = "None selected"
+        end
+    end
+
+    local function clearRows()
+        for _, child in ipairs(body:GetChildren()) do
+            if not child:IsA("UIListLayout") and not child:IsA("UIPadding") then
+                child:Destroy()
+            end
+        end
+    end
+
+    local function rebuild()
+        clearRows()
+        built = true
+        buildRows(body, refreshSummary)
+        refreshSummary()
+    end
+
+    header.MouseButton1Click:Connect(function()
+        body.Visible = not body.Visible
+        arrow.Text = body.Visible and "⌄" or "›"
+        if body.Visible and not built then rebuild() end
+        refreshSummary()
+    end)
+
+    refreshSummary()
+    return rebuild, refreshSummary
+end
+
 local function safeBuild(name, fn)
     local ok, err = pcall(fn)
     if not ok then
@@ -6609,7 +6694,16 @@ safeBuild("Auto Farm", function()
         end)
 
         local _, chickenFilters = card(chicken, 2, "Auto Sell Filters")
-        makeCollapsibleFilter(chickenFilters, 1, "Rarity", function(host)
+        State._makeSummaryFilterSelector(chickenFilters, 1, "Rarity", function()
+            local selected = AutoSellFeature.getSelectedRarities and AutoSellFeature.getSelectedRarities() or {}
+            local labels = {}
+            for _, rarityId in ipairs(selected) do
+                table.insert(labels, resolveRarityDisplayName(rarityId))
+            end
+            if #labels == 0 then return "None selected" end
+            if #labels <= 3 then return table.concat(labels, ", ") end
+            return tostring(#labels) .. " selected"
+        end, function(host, refreshSummary)
             local rarities = AutoSellFeature.getAvailableRarities()
             if #rarities == 0 then
                 rarities = { "common", "uncommon", "rare", "epic", "legendary", "mythic", "divine", "celestial", "cosmic", "secret" }
@@ -6625,12 +6719,32 @@ safeBuild("Auto Farm", function()
                         local now = not AutoSellFeature.isRaritySelected(rarityId)
                         AutoSellFeature.setRaritySelected(rarityId, now)
                         checkBtn.Text = now and "✓" or ""
+                        refreshSummary()
                     end
                 )
             end
         end)
 
-        makeCollapsibleFilter(chickenFilters, 2, "Protected Abilities", function(host)
+        State._makeSummaryFilterSelector(chickenFilters, 2, "Protected Abilities", function()
+            local selected = {}
+            local whitelist = AutoSellFeature.getAbilityWhitelist and AutoSellFeature.getAbilityWhitelist() or {}
+            local abilities = AutoSellFeature.getAvailableAbilities and AutoSellFeature.getAvailableAbilities() or {}
+            local nameById = {}
+            for _, ability in ipairs(abilities) do
+                if type(ability) == "table" and ability.id ~= nil then
+                    nameById[ability.id] = resolveAbilityDisplayName(ability)
+                end
+            end
+            for id, enabled in pairs(whitelist) do
+                if enabled == true then
+                    table.insert(selected, nameById[id] or resolveAbilityDisplayName(id))
+                end
+            end
+            table.sort(selected)
+            if #selected == 0 then return "None selected" end
+            if #selected <= 3 then return table.concat(selected, ", ") end
+            return tostring(#selected) .. " selected"
+        end, function(host, refreshSummary)
             local abilities = AutoSellFeature.getAvailableAbilities()
             table.sort(abilities, function(a, b)
                 return resolveAbilityDisplayName(a) < resolveAbilityDisplayName(b)
@@ -6647,6 +6761,7 @@ safeBuild("Auto Farm", function()
                         local now = not AutoSellFeature.isAbilityWhitelisted(abilityId)
                         AutoSellFeature.setAbilityWhitelisted(abilityId, now)
                         checkBtn.Text = now and "✓" or ""
+                        refreshSummary()
                     end
                 )
             end
@@ -6997,8 +7112,17 @@ safeBuild("Auto Farm", function()
         end)
         sameRarityTrack.Position = UDim2.new(1, -40, 0.5, -11)
 
-        local _, fuseFilters = card(fuse, 2, "Filters")
-        makeCollapsibleFilter(fuseFilters, 1, "Rarity", function(host)
+        local _, fuseFilters = card(fuse, 2, "Fuse Filters")
+        State._makeSummaryFilterSelector(fuseFilters, 1, "Rarity", function()
+            local selected = AutoFuseFeature.getSelectedRarities and AutoFuseFeature.getSelectedRarities() or {}
+            local labels = {}
+            for _, rarityId in ipairs(selected) do
+                table.insert(labels, resolveRarityDisplayName(rarityId))
+            end
+            if #labels == 0 then return "None selected" end
+            if #labels <= 3 then return table.concat(labels, ", ") end
+            return tostring(#labels) .. " selected"
+        end, function(host, refreshSummary)
             local rarities = AutoFuseFeature.getAvailableRarities()
             for i, rarityId in ipairs(rarities) do
                 makeFilterRow(
@@ -7011,6 +7135,7 @@ safeBuild("Auto Farm", function()
                         local now = not AutoFuseFeature.isRaritySelected(rarityId)
                         AutoFuseFeature.setRaritySelected(rarityId, now)
                         checkBtn.Text = now and "✓" or ""
+                        refreshSummary()
                     end
                 )
             end
@@ -7122,6 +7247,7 @@ safeBuild("Auto Hatch Egg", function()
     end)
 
     local _, filterCard = card(sc, 2, "Egg Filter")
+    local rebuildEggFilter = nil
 
     local function buildEggRows(host)
         local controls = Instance.new("Frame")
@@ -7144,6 +7270,10 @@ safeBuild("Auto Hatch Egg", function()
         selectAll.MouseButton1Click:Connect(function()
             HatchFeature.selectAllAvailableEggs()
             HatchFeature.userCustomized = true
+            markConfigDirty()
+            if type(rebuildEggFilter) == "function" then
+                task.defer(rebuildEggFilter)
+            end
         end)
 
         local clear = selectAll:Clone()
@@ -7152,6 +7282,10 @@ safeBuild("Auto Hatch Egg", function()
         clear.Parent = controls
         clear.MouseButton1Click:Connect(function()
             HatchFeature.clearEggSelection()
+            markConfigDirty()
+            if type(rebuildEggFilter) == "function" then
+                task.defer(rebuildEggFilter)
+            end
         end)
 
         refreshData()
@@ -7184,7 +7318,7 @@ safeBuild("Auto Hatch Egg", function()
         end
     end
 
-    local rebuildEggFilter = makeCollapsibleFilter(filterCard, 1, "Select Eggs", buildEggRows)
+    rebuildEggFilter = makeCollapsibleFilter(filterCard, 1, "Select Eggs", buildEggRows)
 
     uiButton(filterCard, 2, "Refresh", function()
         refreshData()

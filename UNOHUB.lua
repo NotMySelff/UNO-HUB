@@ -1,5 +1,5 @@
 --[[
-    UNO HUB
+    UNO HUB1
 ]]
 
 
@@ -4761,7 +4761,7 @@ local function afrTick(token)
     end
     if not AFR.enabled then afrSetPhase("DISABLED") end
 end
-local setToggleVisual -- forward declaration; assigned by the UI helper below
+local setToggleVisual = function() end -- safe no-op until UI helper is assigned
 
 local function setAutoFarmRebirth(on)
     on = on == true

@@ -1,5 +1,5 @@
 --[[
-    UNO HUB
+    UNO HUB1
 ]]
 
 
@@ -140,6 +140,7 @@ local State = {
         targetId = nil, targetName = "Equipped Chicken", rarity = nil,
         geneCap = nil, genome = nil, genesMax = false, ufoActive = false,
         cycleCount = 0, recoveryInProgress = false, lastError = nil,
+        goal = "max_genes", targetRarity = "secret", goalReached = false,
     },
     hotEgg = {
         enabled = false, phase = "DISABLED", generation = 0, movementMode = "Tween",
@@ -5732,6 +5733,8 @@ do
                 autoArena = State.toggles.autoArena == true,
                 autoKraken = State.toggles.autoKraken == true,
                 autoUfoAscension = State.toggles.autoUfoAscension == true,
+                ufoAscensionGoal = State.ufoAscension.goal or "max_genes",
+                ufoTargetRarity = State.ufoAscension.targetRarity or "secret",
             }
         end, function(data)
             if type(data) ~= "table" then return end
@@ -5778,6 +5781,17 @@ do
             applyToggle("autoExpandCoop", setAutoExpandCoop)
             applyToggle("autoUpgradeRecycler", setAutoUpgradeRecycler)
 
+            -- UFO goal preferences are restored now; the standalone backend is
+            -- constructed later and receives these values during its merge bridge.
+            if data.ufoAscensionGoal == "rarity" then
+                State.ufoAscension.goal = "rarity"
+            else
+                State.ufoAscension.goal = "max_genes"
+            end
+            if type(data.ufoTargetRarity) == "string" and data.ufoTargetRarity ~= "" then
+                State.ufoAscension.targetRarity = string.lower(data.ufoTargetRarity)
+            end
+
             -- Phase 9 backends are constructed later (Stage 07), so restore their
             -- desired toggle state now and apply it after bootstrap becomes READY.
             applyToggle("autoEventCapsule")
@@ -5806,6 +5820,8 @@ do
             autoArena = false,
             autoKraken = false,
             autoUfoAscension = false,
+            ufoAscensionGoal = "max_genes",
+            ufoTargetRarity = "secret",
         } })
 
         ConfigManager.registerSection("hotEgg", function()
@@ -6961,7 +6977,7 @@ State._makeSummaryFilterSelector = function(parent, order, title, getSummary, bu
     end)
 
     refreshSummary()
-    return rebuild, refreshSummary
+    return rebuild, refreshSummary, wrap
 end
 
 
@@ -7196,7 +7212,25 @@ local function setUfoAscension(v)
             markConfigDirty()
             return false
         end
-        if type(backend.isEquippedGenesMax) == "function" then
+        if type(backend.setGoal) == "function" then
+            pcall(backend.setGoal, State.ufoAscension.goal or "max_genes")
+        end
+        if type(backend.setTargetRarity) == "function" then
+            pcall(backend.setTargetRarity, State.ufoAscension.targetRarity or "secret")
+        end
+        if type(backend.isGoalReached) == "function" then
+            local okGoal, reached, reason = pcall(backend.isGoalReached)
+            if okGoal and reached == true then
+                State.toggles.autoUfoAscension = false
+                State.ufoAscension.enabled = false
+                State.ufoAscension.goalReached = true
+                State.ufoAscension.phase = "GOAL_REACHED"
+                State.ufoAscension.status = tostring(reason or "Goal Reached")
+                setToggleVisual("autoUfoAscension", false)
+                markConfigDirty()
+                return false
+            end
+        elseif State.ufoAscension.goal ~= "rarity" and type(backend.isEquippedGenesMax) == "function" then
             local okMax, isMax = pcall(backend.isEquippedGenesMax)
             if okMax and isMax == true then
                 State.toggles.autoUfoAscension = false
@@ -7313,10 +7347,70 @@ safeBuild("Auto Farm", function()
 
     local _, ufoCard = card(events, 2, "UFO Ascension")
     settingRow(ufoCard, 1, "Auto UFO Ascension", nil, "autoUfoAscension", setUfoAscension)
-    local ufoChickenLabel = row(ufoCard, 2, "Chicken")
-    local ufoTargetLabel = row(ufoCard, 3, "Target")
-    local ufoStatusLabel = row(ufoCard, 4, "Status")
-    local ufoGenesLabel = row(ufoCard, 5, "Genes")
+
+    local ufoGoalRebuild, ufoGoalRefresh, ufoTargetRarityRebuild, ufoTargetRarityRefresh, ufoTargetRarityWrap
+    local function applyUfoGoal(goal)
+        State.ufoAscension.goal = goal == "rarity" and "rarity" or "max_genes"
+        local envNow = (getgenv and getgenv()) or _G
+        local backendNow = envNow.UNO_UFO_ASCENSION
+        if type(backendNow) == "table" and type(backendNow.setGoal) == "function" then
+            pcall(backendNow.setGoal, State.ufoAscension.goal)
+        end
+        if ufoTargetRarityWrap then
+            ufoTargetRarityWrap.Visible = State.ufoAscension.goal == "rarity"
+        end
+        if ufoGoalRebuild then ufoGoalRebuild() elseif ufoGoalRefresh then ufoGoalRefresh() end
+        if ufoTargetRarityRefresh then ufoTargetRarityRefresh() end
+        markConfigDirty()
+    end
+
+    local goalRebuild, goalSummaryRefresh = State._makeSummaryFilterSelector(ufoCard, 2, "Ascension Goal", function()
+        return State.ufoAscension.goal == "rarity" and "Until Rarity" or "Until Max Genes"
+    end, function(host, refreshSummary)
+        makeFilterRow(host, 1, "Until Max Genes", nil, State.ufoAscension.goal ~= "rarity", function()
+            applyUfoGoal("max_genes")
+            refreshSummary()
+        end)
+        makeFilterRow(host, 2, "Until Rarity", nil, State.ufoAscension.goal == "rarity", function()
+            applyUfoGoal("rarity")
+            refreshSummary()
+        end)
+    end)
+    ufoGoalRebuild = goalRebuild
+    ufoGoalRefresh = goalSummaryRefresh
+
+    local rarityRebuild, raritySummaryRefresh, rarityWrap = State._makeSummaryFilterSelector(ufoCard, 3, "Target Rarity", function()
+        return resolveRarityDisplayName(State.ufoAscension.targetRarity or "secret")
+    end, function(host, refreshSummary)
+        local envNow = (getgenv and getgenv()) or _G
+        local backendNow = envNow.UNO_UFO_ASCENSION
+        local rarities = { "common", "uncommon", "rare", "epic", "legendary", "mythic", "divine", "celestial", "cosmic", "secret" }
+        if type(backendNow) == "table" and type(backendNow.getAvailableRarities) == "function" then
+            local okR, values = pcall(backendNow.getAvailableRarities)
+            if okR and type(values) == "table" and #values > 0 then rarities = values end
+        end
+        for i, rarityId in ipairs(rarities) do
+            local rid = string.lower(tostring(rarityId))
+            makeFilterRow(host, i, resolveRarityDisplayName(rid), nil, State.ufoAscension.targetRarity == rid, function()
+                State.ufoAscension.targetRarity = rid
+                if type(backendNow) == "table" and type(backendNow.setTargetRarity) == "function" then
+                    pcall(backendNow.setTargetRarity, rid)
+                end
+                if ufoTargetRarityRebuild then ufoTargetRarityRebuild() else refreshSummary() end
+                markConfigDirty()
+            end)
+        end
+    end)
+    ufoTargetRarityRebuild = rarityRebuild
+    ufoTargetRarityRefresh = raritySummaryRefresh
+    ufoTargetRarityWrap = rarityWrap
+    ufoTargetRarityWrap.Visible = State.ufoAscension.goal == "rarity"
+
+    local ufoChickenLabel = row(ufoCard, 4, "Chicken")
+    local ufoTargetLabel = row(ufoCard, 5, "Target")
+    local ufoCurrentRarityLabel = row(ufoCard, 6, "Current Rarity")
+    local ufoStatusLabel = row(ufoCard, 7, "Status")
+    local ufoGenesLabel = row(ufoCard, 8, "Genes")
 
     -- INCUBATOR
     local incubator = tabs.Incubator
@@ -7988,9 +8082,22 @@ safeBuild("Auto Farm", function()
                     State.ufoAscension.cycleCount = tonumber(us.cycleCountThisEvent) or 0
                     State.ufoAscension.recoveryInProgress = us.recoveryInProgress == true
                     State.ufoAscension.lastError = us.lastError
+                    State.ufoAscension.goal = us.goal or State.ufoAscension.goal or "max_genes"
+                    State.ufoAscension.targetRarity = us.targetRarity or State.ufoAscension.targetRarity or "secret"
+                    State.ufoAscension.goalReached = us.goalReached == true
+                    if ufoTargetRarityWrap then
+                        ufoTargetRarityWrap.Visible = State.ufoAscension.goal == "rarity"
+                    end
+                    if ufoGoalRefresh then ufoGoalRefresh() end
+                    if ufoTargetRarityRefresh then ufoTargetRarityRefresh() end
 
                     setText(ufoChickenLabel, us.equippedName or us.equippedId or "Equipped Chicken")
-                    setText(ufoTargetLabel, us.genesMax and "Genes Max" or "Until Max Genes")
+                    if State.ufoAscension.goal == "rarity" then
+                        setText(ufoTargetLabel, "Until " .. resolveRarityDisplayName(State.ufoAscension.targetRarity))
+                    else
+                        setText(ufoTargetLabel, us.genesMax and "Max Genes" or "Until Max Genes")
+                    end
+                    setText(ufoCurrentRarityLabel, resolveRarityDisplayName(us.rarity or "unknown"))
                     setText(ufoStatusLabel, us.state or "IDLE")
                     local g = us.genome
                     local cap = us.geneCap
@@ -16660,9 +16767,14 @@ local GENE_CAPS = {
     secret = 31,
 }
 
+local RARITY_ORDER_UFO = { "common", "uncommon", "rare", "epic", "legendary", "mythic", "divine", "celestial", "cosmic", "secret" }
+local RARITY_RANK_UFO = {}
+for index, rarityId in ipairs(RARITY_ORDER_UFO) do RARITY_RANK_UFO[rarityId] = index end
+
 local GENE_KEYS = { "vigor", "furia", "velocidad", "impetu", "fertility" }
 local CONTINUOUS_CYCLE_DELAY_SECONDS = 3
 local CYCLE_MUTATION_TIMEOUT_SECONDS = 20
+local COOP_RETURN_TIMEOUT_SECONDS = 10
 
 -- Conservative post-Tower stabilization window.
 -- Chosen from runtime testing: immediate/2.8s/4.0s sends were unreliable.
@@ -16698,6 +16810,12 @@ local function makeState()
         genome = nil,
         geneCap = nil,
         genesMax = false,
+        goal = "max_genes",
+        targetRarity = "secret",
+        goalReached = false,
+        goalReachedReason = nil,
+        towerStabilizedThisEvent = false,
+        waitingForCoopReturn = false,
         cycleDoneThisEvent = false,
         cycleCountThisEvent = 0,
         firstCycleCompleted = false,
@@ -16840,6 +16958,69 @@ local function areGenesMaxFor(chicken, genome)
     return true
 end
 
+local function normalizeRarityId(value)
+    return string.lower(tostring(value or ""))
+end
+
+local function rarityRank(value)
+    return RARITY_RANK_UFO[normalizeRarityId(value)]
+end
+
+local function goalReachedFor(chicken, genome)
+    if state.goal == "rarity" then
+        local currentRank = rarityRank(getRarity(chicken))
+        local targetRank = rarityRank(state.targetRarity)
+        if currentRank and targetRank and currentRank >= targetRank then
+            return true, "RARITY_REACHED"
+        end
+        return false, nil
+    end
+    if areGenesMaxFor(chicken, genome) then return true, "MAX_GENES_REACHED" end
+    return false, nil
+end
+
+local function setGoalReached(reason)
+    state.goalReached = true
+    state.goalReachedReason = reason or "GOAL_REACHED"
+    state.stopContinuousThisEvent = true
+    setState("GOAL_REACHED_WAITING_EVENT_END")
+    log("ASCENSION GOAL REACHED: " .. tostring(state.goalReachedReason))
+end
+
+local function isChickenBackInCoop(targetId)
+    local chicken, roster = getEquippedChicken()
+    local currentId = chicken and normalizeId(chicken.id or (roster and roster.activeId))
+    if not currentId or currentId ~= normalizeId(targetId) then return false end
+    if ChickenMode and type(ChickenMode.where) == "function" then
+        local ok, where = pcall(ChickenMode.where)
+        if ok then
+            where = string.lower(tostring(where or ""))
+            return where == "corral" or where == "coop"
+        end
+    end
+    return false
+end
+
+local function waitForAutomaticCoopReturn(token, targetId)
+    state.waitingForCoopReturn = true
+    setState("WAITING_FOR_COOP_RETURN")
+    local deadline = now() + COOP_RETURN_TIMEOUT_SECONDS
+    while not destroyed and state.enabled and workerToken == token and now() < deadline do
+        if isChickenBackInCoop(targetId) then
+            state.waitingForCoopReturn = false
+            log("COOP RETURN CONFIRMED target=" .. tostring(targetId))
+            return true
+        end
+        task.wait(0.20)
+    end
+    state.waitingForCoopReturn = false
+    state.lastError = "COOP_RETURN_TIMEOUT"
+    state.lastCycleFailure = "COOP_RETURN_TIMEOUT"
+    state.stopContinuousThisEvent = true
+    setState("WAITING_FOR_EVENT_END")
+    return false
+end
+
 local function genomeChanged(before, after)
     if type(before) ~= "table" or type(after) ~= "table" then return false end
     for _, key in ipairs(GENE_KEYS) do
@@ -16936,11 +17117,11 @@ end
 local function waitForTowerExit(token)
     if type(towerHooks.isTowerActive) ~= "function" then
         log("TOWER EXIT DIAG [NO_HOOK] isTowerActive hook unavailable")
-        return true
+        return true, false
     end
     if not towerIsActive() then
         logTowerExitDiagnostic("ALREADY_EXITED")
-        return true
+        return true, false
     end
 
     setState("WAITING_FOR_TOWER_EXIT")
@@ -16972,7 +17153,7 @@ local function waitForTowerExit(token)
                     logTowerExitDiagnostic("EXIT_PLUS_350MS")
                 end
             end)
-            return true
+            return true, true
         end
 
         if now() >= nextDiagAt then
@@ -16999,6 +17180,9 @@ local function captureTarget()
     state.genome = getGenome(chicken)
     state.geneCap = getGeneCap(chicken)
     state.genesMax = areGenesMaxFor(chicken, state.genome)
+    local reached, reason = goalReachedFor(chicken, state.genome)
+    state.goalReached = reached == true
+    state.goalReachedReason = reached and reason or nil
     return chicken
 end
 
@@ -17065,25 +17249,27 @@ local function confirmMutation(token, timeoutSeconds)
                     state.cycleCompletedBoundary = true
                     state.sentToChaosThisCycle = false
                     state.requestInFlight = false
-                    if state.genesMax then
-                        log("ALL GENES MAX")
-                        state.enabled = false
-                        workerToken += 1
-                        setState("GENES_MAX")
-                        local runtime = env.UNO_HUB_RUNTIME
-                        if type(runtime) == "table" then
-                            if runtime.State and runtime.State.toggles then
-                                runtime.State.toggles.autoUfoAscension = false
-                            end
-                            if type(runtime.setToggleVisual) == "function" then
-                                pcall(runtime.setToggleVisual, "autoUfoAscension", false)
-                            end
-                            if type(runtime.setUfoAscension) == "function" then
-                                pcall(runtime.setUfoAscension, false)
-                            end
-                        end
+
+                    -- The UFO/game returns the chicken to the Coop after a successful
+                    -- ascension. Do not start another Chaos cycle until that return is
+                    -- authoritative, otherwise NORMAL_FARM can race the next cycle.
+                    if not waitForAutomaticCoopReturn(token, targetIdAtRequest) then
+                        return false
+                    end
+
+                    local refreshed = getEquippedChicken()
+                    if type(refreshed) == "table" then
+                        state.rarity = getRarity(refreshed)
+                        state.genome = getGenome(refreshed) or state.genome
+                        state.geneCap = getGeneCap(refreshed)
+                        state.genesMax = areGenesMaxFor(refreshed, state.genome)
+                    end
+                    local reached, reason = goalReachedFor(refreshed or chicken, state.genome)
+                    if reached then
+                        setGoalReached(reason)
                         return true
                     end
+
                     repeatReadyAt = now() + CONTINUOUS_CYCLE_DELAY_SECONDS
                     setState("CYCLE_COMPLETE")
                     log("CYCLE #" .. tostring(state.currentCycleNumber) .. " COMPLETE")
@@ -17252,6 +17438,10 @@ local function clearEventCycleState()
     state.genome = nil
     state.geneCap = nil
     state.genesMax = false
+    state.goalReached = false
+    state.goalReachedReason = nil
+    state.towerStabilizedThisEvent = false
+    state.waitingForCoopReturn = false
     state.lastError = nil
     repeatReadyAt = nil
 end
@@ -17359,9 +17549,15 @@ local function processOnce(token)
         state.lastGeneChange = nil
         state.lastRarityChange = nil
         state.lastResultCategory = nil
+        state.goalReached = false
+        state.goalReachedReason = nil
+        state.towerStabilizedThisEvent = false
+        state.waitingForCoopReturn = false
         repeatReadyAt = nil
         setState("UFO_ACTIVE")
     elseif not active and lastEventActive then
+        local goalReachedAtEventEnd = state.goalReached == true
+        local goalReasonAtEventEnd = state.goalReachedReason
         local interrupted = state.sentToChaosThisCycle and not state.cycleCompletedBoundary and state.sessionTargetId
         if interrupted and state.requestInFlight and state.mutationSeen then
             confirmMutation(token, 3)
@@ -17388,6 +17584,20 @@ local function processOnce(token)
         state.interruptedTargetId = preservedId
         state.lastRecoveryResult = preservedResult
         state.lastRecoveryFailure = preservedFailure
+        if goalReachedAtEventEnd then
+            state.goalReached = true
+            state.goalReachedReason = goalReasonAtEventEnd
+            local runtimeGoal = env.UNO_HUB_RUNTIME
+            if type(runtimeGoal) == "table" and type(runtimeGoal.setUfoAscension) == "function" then
+                pcall(runtimeGoal.setUfoAscension, false)
+            else
+                state.enabled = false
+                workerToken += 1
+                state.workerGeneration = workerToken
+            end
+            setState(goalReasonAtEventEnd == "RARITY_REACHED" and "RARITY_REACHED" or "GENES_MAX")
+            return
+        end
         setState("WAITING_FOR_UFO")
     end
     lastEventActive = active
@@ -17423,23 +17633,9 @@ local function processOnce(token)
         return
     end
     state.sessionTargetId = previousSessionTarget or currentTargetId
-    if state.genesMax then
-        log("ALL GENES MAX")
-        state.enabled = false
-        workerToken += 1
-        setState("GENES_MAX")
-        local runtime = env.UNO_HUB_RUNTIME
-        if type(runtime) == "table" then
-            if runtime.State and runtime.State.toggles then
-                runtime.State.toggles.autoUfoAscension = false
-            end
-            if type(runtime.setToggleVisual) == "function" then
-                pcall(runtime.setToggleVisual, "autoUfoAscension", false)
-            end
-            if type(runtime.setUfoAscension) == "function" then
-                pcall(runtime.setUfoAscension, false)
-            end
-        end
+    local reached, reason = goalReachedFor(chicken, state.genome)
+    if reached then
+        setGoalReached(reason)
         return
     end
     state.currentCycle = state.cycleCountThisEvent + 1
@@ -17447,39 +17643,41 @@ local function processOnce(token)
     state.cycleStartedAt = now()
     state.cycleInProgress = true
     log("CYCLE #" .. tostring(state.currentCycleNumber) .. " START")
-    if not waitForTowerExit(token) then
+    local exitOk, surrenderedTower = waitForTowerExit(token)
+    if not exitOk then
         state.cycleInProgress = false
         state.lastCycleFailure = "TOWER_EXIT_FAILED"
         state.stopContinuousThisEvent = true
         return
     end
 
-    setState("WAITING_POST_TOWER_DELAY")
-    local delayUntil = now() + POST_TOWER_CHAOS_DELAY_SECONDS
-    log("POST-TOWER DELAY START " .. tostring(POST_TOWER_CHAOS_DELAY_SECONDS) .. "s")
+    -- The 6 second stabilization exists only for the transition from an active
+    -- Tower run into the UFO session. Repeated Chaos cycles must not pay it again.
+    if surrenderedTower and not state.towerStabilizedThisEvent then
+        setState("WAITING_POST_TOWER_DELAY")
+        local delayUntil = now() + POST_TOWER_CHAOS_DELAY_SECONDS
+        log("POST-TOWER DELAY START " .. tostring(POST_TOWER_CHAOS_DELAY_SECONDS) .. "s")
 
-    while not destroyed and state.enabled and workerToken == token and now() < delayUntil do
-        local stillActive = getCurrentEventActive()
-        if stillActive ~= true then
-            state.ufoActive = false
-            state.cycleInProgress = false
-            state.lastCycleFailure = "UFO_ENDED_DURING_POST_TOWER_DELAY"
-            setState("WAITING_FOR_UFO")
-            return
+        while not destroyed and state.enabled and workerToken == token and now() < delayUntil do
+            local stillActiveDelay = getCurrentEventActive()
+            if stillActiveDelay ~= true then
+                state.ufoActive = false
+                state.cycleInProgress = false
+                state.lastCycleFailure = "UFO_ENDED_DURING_POST_TOWER_DELAY"
+                setState("WAITING_FOR_UFO")
+                return
+            end
+            if towerIsActive() then
+                state.cycleInProgress = false
+                state.lastCycleFailure = "TOWER_REENTERED_DURING_UFO"
+                state.lastError = "TOWER_REENTERED_DURING_UFO"
+                state.stopContinuousThisEvent = true
+                setState("WAITING_FOR_EVENT_END")
+                return
+            end
+            task.wait(0.10)
         end
-
-        -- UFO owns the automation window here. If Tower somehow becomes active
-        -- again, do not let the farm continue underneath the UFO session.
-        if towerIsActive() then
-            state.cycleInProgress = false
-            state.lastCycleFailure = "TOWER_REENTERED_DURING_UFO"
-            state.lastError = "TOWER_REENTERED_DURING_UFO"
-            state.stopContinuousThisEvent = true
-            setState("WAITING_FOR_EVENT_END")
-            return
-        end
-
-        task.wait(0.10)
+        state.towerStabilizedThisEvent = true
     end
 
     local stillActive = getCurrentEventActive()
@@ -17500,7 +17698,7 @@ local function processOnce(token)
         return
     end
 
-    logTowerExitDiagnostic("AFTER_6S_BEFORE_CHAOS")
+    logTowerExitDiagnostic(state.towerStabilizedThisEvent and "AFTER_TOWER_STABILIZATION_BEFORE_CHAOS" or "NO_TOWER_DELAY_BEFORE_CHAOS")
 
     if not sendChaos(token, chicken) then
         state.cycleInProgress = false
@@ -17582,6 +17780,44 @@ function api.isEquippedGenesMax()
     local currentGenome = getGenome(chicken)
     if type(currentGenome) ~= "table" then return false, "GENOME_UNAVAILABLE" end
     return areGenesMaxFor(chicken, currentGenome) == true, nil
+end
+
+function api.setGoal(value)
+    if value == "rarity" then state.goal = "rarity" else state.goal = "max_genes" end
+    state.goalReached = false
+    state.goalReachedReason = nil
+    return true
+end
+
+function api.getGoal() return state.goal end
+
+function api.setTargetRarity(value)
+    local rarityId = normalizeRarityId(value)
+    if not RARITY_RANK_UFO[rarityId] then return false, "INVALID_RARITY" end
+    state.targetRarity = rarityId
+    state.goalReached = false
+    state.goalReachedReason = nil
+    return true
+end
+
+function api.getTargetRarity() return state.targetRarity end
+
+function api.getAvailableRarities()
+    local result = {}
+    for i, rarityId in ipairs(RARITY_ORDER_UFO) do result[i] = rarityId end
+    return result
+end
+
+function api.isGoalReached()
+    local chicken = getEquippedChicken()
+    if type(chicken) ~= "table" then return false, "EQUIPPED_CHICKEN_NOT_FOUND" end
+    local genome = getGenome(chicken)
+    local reached, reason = goalReachedFor(chicken, genome)
+    return reached == true, reason
+end
+
+function api.isUfoEventActive()
+    return getCurrentEventActive() == true
 end
 
 function api.getState()
@@ -17797,22 +18033,32 @@ do
             print("[UNO UFO MERGE] Tower hooks READY")
         end
 
+        -- Apply persisted UFO goal preferences before restoring the toggle.
+        local ufoPrefs = runtime and runtime.State and runtime.State.ufoAscension
+        if type(ufoPrefs) == "table" then
+            if type(ufoApi.setGoal) == "function" then pcall(ufoApi.setGoal, ufoPrefs.goal or "max_genes") end
+            if type(ufoApi.setTargetRarity) == "function" then pcall(ufoApi.setTargetRarity, ufoPrefs.targetRarity or "secret") end
+        end
+
         -- Restore saved UFO toggle only after the standalone backend exists.
         local toggles = runtime and runtime.State and runtime.State.toggles
         if type(toggles) == "table" and toggles.autoUfoAscension == true then
-            local maxed = false
-            if type(ufoApi.isEquippedGenesMax) == "function" then
-                local okMax, value = pcall(ufoApi.isEquippedGenesMax)
-                maxed = okMax and value == true
+            local reached = false
+            local reason = nil
+            if type(ufoApi.isGoalReached) == "function" then
+                local okGoal, value, why = pcall(ufoApi.isGoalReached)
+                reached = okGoal and value == true
+                reason = why
             end
-            if maxed then
+            if reached then
                 toggles.autoUfoAscension = false
                 if type(runtime.setToggleVisual) == "function" then
                     pcall(runtime.setToggleVisual, "autoUfoAscension", false)
                 end
                 if runtime.State.ufoAscension then
-                    runtime.State.ufoAscension.status = "Genes Max"
-                    runtime.State.ufoAscension.phase = "GENES_MAX"
+                    runtime.State.ufoAscension.status = tostring(reason or "Goal Reached")
+                    runtime.State.ufoAscension.phase = "GOAL_REACHED"
+                    runtime.State.ufoAscension.goalReached = true
                 end
             elseif type(ufoApi.setEnabled) == "function" then
                 pcall(ufoApi.setEnabled, true)
@@ -17844,11 +18090,20 @@ do
             while env.UNO_UFO_ASCENSION == ufoApi do
                 local want = false
                 local critical = false
+                local enabledNow = type(ufoApi.isEnabled) == "function" and ufoApi.isEnabled() == true
+                local eventActiveNow = false
+                if enabledNow and type(ufoApi.isUfoEventActive) == "function" then
+                    local okEvent, activeValue = pcall(ufoApi.isUfoEventActive)
+                    eventActiveNow = okEvent and activeValue == true
+                end
                 if type(ufoApi.getStatus) == "function" then
                     local ok, st = pcall(ufoApi.getStatus)
                     if ok and type(st) == "table" then
-                        want = st.enabled == true and (st.ufoActive == true or st.recoveryInProgress == true)
                         critical = st.recoveryInProgress == true
+                        -- Authoritative hold: event activity is read directly from
+                        -- LiveEventController through isUfoEventActive(), so the hold
+                        -- cannot drop during CYCLE_COMPLETE / WAITING_FOR_NEXT_CYCLE.
+                        want = enabledNow and (eventActiveNow or critical)
                     end
                 end
 

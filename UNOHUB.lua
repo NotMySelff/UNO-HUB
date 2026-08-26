@@ -5738,7 +5738,7 @@ local function uiButton(parent, order, label, onClick)
     return button
 end
 
-local function delayStepper(parent, order, title, getValue, setValue)
+State._delayStepper = function(parent, order, title, getValue, setValue)
     local holder = Instance.new("Frame")
     holder.LayoutOrder = order or 0
     holder.Size = UDim2.new(1, 0, 0, 32)
@@ -6067,7 +6067,7 @@ local function setUfoAscension(v)
     return true
 end
 
-local function setAutoTowerHost(on)
+State._setAutoTowerHost = function(on)
     on = on == true
     local envNow = (getgenv and getgenv()) or _G
     local runtimeNow = envNow.UNO_HUB_RUNTIME
@@ -6105,14 +6105,14 @@ safeBuild("Auto Farm", function()
     local farm = tabs.Farm
     local _, farmCard = card(farm, 1, "Farm")
     settingRow(farmCard, 1, "Auto Farm Rebirth", nil, "autoFarmRebirth", setAutoFarmRebirth)
-    delayStepper(farmCard, 2, "Rebirth Start Delay", function()
+    State._delayStepper(farmCard, 2, "Rebirth Start Delay", function()
         return AFR.postRebirthDelay
     end, function(value)
         AFR.postRebirthDelay = value
     end)
 
-    settingRow(farmCard, 3, "Auto Tower", nil, "autoTower", setAutoTowerHost)
-    delayStepper(farmCard, 4, "Auto Tower Start Delay", function()
+    settingRow(farmCard, 3, "Auto Tower", nil, "autoTower", State._setAutoTowerHost)
+    State._delayStepper(farmCard, 4, "Auto Tower Start Delay", function()
         return State.autoTower.startDelay
     end, function(value)
         State.autoTower.startDelay = value

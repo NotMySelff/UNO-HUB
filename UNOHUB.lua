@@ -1,5 +1,5 @@
 --[[
-    UNO HUB
+    UNO HUB1
 ]]
 
 
@@ -163,6 +163,19 @@ local State = {
         autoBuyGenerator = false, autoUpgradeGenerator = false, autoExpandCoop = false, autoUpgradeRecycler = false, autoUpgradeIncubator = false,
         antiAfk = true, autoRebirth = false, autoHotEgg = false, autoArena = false, autoEventCapsule = false, autoKraken = false, autoUfoAscension = false, showFloatingButton = true, reducedMotion = false,
     },
+}
+
+local WebhookConfigState = {
+    url = "",
+    enabled = false,
+    include = {
+        accountInfo = true,
+        chickenInfo = true,
+        eggInventory = true,
+        arenaStats = true,
+        avatar = true,
+    },
+    revision = 0,
 }
 
 local function log(level, text)
@@ -5216,6 +5229,41 @@ do
             end
         end
 
+        ConfigManager.registerSection("webhook", function()
+            return {
+                url = tostring(WebhookConfigState.url or ""),
+                enabled = WebhookConfigState.enabled == true,
+                include = {
+                    accountInfo = WebhookConfigState.include.accountInfo ~= false,
+                    chickenInfo = WebhookConfigState.include.chickenInfo ~= false,
+                    eggInventory = WebhookConfigState.include.eggInventory ~= false,
+                    arenaStats = WebhookConfigState.include.arenaStats ~= false,
+                    avatar = WebhookConfigState.include.avatar ~= false,
+                },
+            }
+        end, function(data)
+            if type(data) ~= "table" then return end
+            WebhookConfigState.url = type(data.url) == "string" and data.url or ""
+            WebhookConfigState.enabled = data.enabled == true
+            local inc = type(data.include) == "table" and data.include or {}
+            WebhookConfigState.include.accountInfo = inc.accountInfo ~= false
+            WebhookConfigState.include.chickenInfo = inc.chickenInfo ~= false
+            WebhookConfigState.include.eggInventory = inc.eggInventory ~= false
+            WebhookConfigState.include.arenaStats = inc.arenaStats ~= false
+            WebhookConfigState.include.avatar = inc.avatar ~= false
+            WebhookConfigState.revision += 1
+        end, { defaults = {
+            url = "",
+            enabled = false,
+            include = {
+                accountInfo = true,
+                chickenInfo = true,
+                eggInventory = true,
+                arenaStats = true,
+                avatar = true,
+            },
+        } })
+
         ConfigManager.registerSection("ui", function()
             return {
                 showFloatingButton = State.toggles.showFloatingButton ~= false,
@@ -9659,6 +9707,7 @@ end
 safeBuild("Webhook", function()
     local sc = createScrollPage()
     local webhookEnv = (getgenv and getgenv()) or _G
+    local appliedRevision = -1
 
     local _, mainCard = card(sc, 1, "WEBHOOK")
 
@@ -9672,7 +9721,7 @@ safeBuild("Webhook", function()
     urlBox.BackgroundColor3 = Theme.SurfaceElevated
     urlBox.BorderSizePixel = 0
     urlBox.ClearTextOnFocus = false
-    urlBox.Text = ""
+    urlBox.Text = WebhookConfigState.url or ""
     urlBox.PlaceholderText = "https://discord.com/api/webhooks/..."
     urlBox.Font = Enum.Font.Gotham
     urlBox.TextSize = 12
@@ -9704,7 +9753,11 @@ safeBuild("Webhook", function()
     enableRow.Parent = mainCard
     text(enableRow, "Enable Webhook", 13, Theme.TextPrimary, Enum.Font.GothamMedium).Size = UDim2.new(1, -50, 1, 0)
 
-    local enableSwitch = select(1, makeSwitch(enableRow, false, function(v)
+    local enableSwitch, setEnableVisual
+    enableSwitch, setEnableVisual = makeSwitch(enableRow, WebhookConfigState.enabled == true, function(v)
+        WebhookConfigState.enabled = v == true
+        markConfigDirty()
+
         local sender = webhookEnv.UNO_WEBHOOK_SENDER_V1
         local scheduler = webhookEnv.UNO_WEBHOOK_SCHEDULER_V1
         if type(sender) ~= "table" or type(scheduler) ~= "table" then
@@ -9713,29 +9766,30 @@ safeBuild("Webhook", function()
         end
 
         if v then
-            local setResult = sender.setWebhookUrl(urlBox.Text)
+            local setResult = sender.setWebhookUrl(WebhookConfigState.url)
             if not setResult or setResult.ok ~= true then
+                WebhookConfigState.enabled = false
+                if type(setEnableVisual) == "function" then setEnableVisual(false, false) end
+                markConfigDirty()
                 warn("[UNO WEBHOOK UI] URL rejected: " .. tostring(setResult and setResult.reason))
                 return
             end
             local result = scheduler.enable()
             if not result or result.ok ~= true then
+                WebhookConfigState.enabled = false
+                if type(setEnableVisual) == "function" then setEnableVisual(false, false) end
+                markConfigDirty()
                 warn("[UNO WEBHOOK UI] scheduler enable failed: " .. tostring(result and result.reason))
             end
         else
             scheduler.disable()
         end
-    end))
+    end)
     enableSwitch.Position = UDim2.new(1, -40, 0.5, -11)
 
     local _, includeCard = card(sc, 2, "INCLUDE DATA")
-    local includeState = {
-        accountInfo = true,
-        chickenInfo = true,
-        eggInventory = true,
-        arenaStats = true,
-        avatar = true,
-    }
+    local includeState = WebhookConfigState.include
+    local includeVisualSetters = {}
 
     local function pushInclude()
         local sender = webhookEnv.UNO_WEBHOOK_SENDER_V1
@@ -9751,10 +9805,13 @@ safeBuild("Webhook", function()
         f.BackgroundTransparency = 1
         f.Parent = includeCard
         text(f, title, 13, Theme.TextPrimary, Enum.Font.GothamMedium).Size = UDim2.new(1, -50, 1, 0)
-        local sw = select(1, makeSwitch(f, includeState[key], function(v)
+
+        local sw, setVisual = makeSwitch(f, includeState[key] ~= false, function(v)
             includeState[key] = v == true
             pushInclude()
-        end))
+            markConfigDirty()
+        end)
+        includeVisualSetters[key] = setVisual
         sw.Position = UDim2.new(1, -40, 0.5, -11)
     end
 
@@ -9763,7 +9820,6 @@ safeBuild("Webhook", function()
     includeToggle(3, "Egg Inventory", "eggInventory")
     includeToggle(4, "Arena Stats", "arenaStats")
     includeToggle(5, "Avatar", "avatar")
-    pushInclude()
 
     local _, statusCard = card(sc, 3, "STATUS")
     local lastSend = row(statusCard, 1, "Last Send")
@@ -9771,10 +9827,48 @@ safeBuild("Webhook", function()
     local statusRow = row(statusCard, 3, "Status")
     local triggerRow = row(statusCard, 4, "Last Trigger")
 
-    urlBox.FocusLost:Connect(function()
+    local function applyLoadedWebhookConfig()
         local sender = webhookEnv.UNO_WEBHOOK_SENDER_V1
-        if type(sender) == "table" and urlBox.Text ~= "" then
-            local result = sender.setWebhookUrl(urlBox.Text)
+        local scheduler = webhookEnv.UNO_WEBHOOK_SCHEDULER_V1
+        if type(sender) ~= "table" or type(scheduler) ~= "table" then return end
+
+        urlBox.Text = WebhookConfigState.url or ""
+        for key, setter in pairs(includeVisualSetters) do
+            if type(setter) == "function" then
+                setter(WebhookConfigState.include[key] ~= false, false)
+            end
+        end
+        pushInclude()
+
+        if type(setEnableVisual) == "function" then
+            setEnableVisual(WebhookConfigState.enabled == true, false)
+        end
+
+        if WebhookConfigState.url ~= "" then
+            local configured = sender.setWebhookUrl(WebhookConfigState.url)
+            if not configured or configured.ok ~= true then
+                WebhookConfigState.enabled = false
+                if type(setEnableVisual) == "function" then setEnableVisual(false, false) end
+                return
+            end
+        end
+
+        if WebhookConfigState.enabled == true then
+            scheduler.enable()
+        else
+            scheduler.disable()
+        end
+
+        appliedRevision = WebhookConfigState.revision
+    end
+
+    urlBox.FocusLost:Connect(function()
+        WebhookConfigState.url = tostring(urlBox.Text or "")
+        markConfigDirty()
+
+        local sender = webhookEnv.UNO_WEBHOOK_SENDER_V1
+        if type(sender) == "table" and WebhookConfigState.url ~= "" then
+            local result = sender.setWebhookUrl(WebhookConfigState.url)
             if result and result.ok ~= true then
                 warn("[UNO WEBHOOK UI] URL rejected: " .. tostring(result.reason))
             end
@@ -9787,11 +9881,16 @@ safeBuild("Webhook", function()
             warn("[UNO WEBHOOK UI] sender unavailable")
             return
         end
-        local configured = sender.setWebhookUrl(urlBox.Text)
+
+        WebhookConfigState.url = tostring(urlBox.Text or "")
+        markConfigDirty()
+
+        local configured = sender.setWebhookUrl(WebhookConfigState.url)
         if not configured or configured.ok ~= true then
             warn("[UNO WEBHOOK UI] Test blocked: " .. tostring(configured and configured.reason))
             return
         end
+
         task.spawn(function()
             local result = sender.testWebhook()
             if not result or result.ok ~= true then
@@ -9799,6 +9898,9 @@ safeBuild("Webhook", function()
             end
         end)
     end)
+
+    -- Apply the state that ConfigManager loaded before the UI was constructed.
+    applyLoadedWebhookConfig()
 
     Views.Webhook = {
         root = sc,
@@ -9811,6 +9913,12 @@ safeBuild("Webhook", function()
                 setText(lastSend, "—")
                 setText(triggerRow, "—")
                 return
+            end
+
+            -- Configs page can load another file after this page already exists.
+            -- The loader increments revision; synchronize UI/backend on next update.
+            if appliedRevision ~= WebhookConfigState.revision then
+                applyLoadedWebhookConfig()
             end
 
             local ss = sender.getStatus()

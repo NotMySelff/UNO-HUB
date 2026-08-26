@@ -1,5 +1,5 @@
 --[[
-    UNO HUB1
+    UNO HUB
 ]]
 
 
@@ -6658,79 +6658,203 @@ safeBuild("Auto Farm", function()
     (function()
         local _, favoriteCard = card(chicken, 3, "Auto Favorite")
         if State._autoFavoriteFeature then
-            settingRow(favoriteCard, 1, "Auto Favorite Chickens", nil, "autoFavorite", function(v)
-                return State._autoFavoriteFeature.setAutoFavorite(v)
-            end)
-
-            local _, favoriteFilters = card(chicken, 4, "Favorite Filters")
-            makeCollapsibleFilter(favoriteFilters, 1, "Chicken Names", function(host)
             local feature = State._autoFavoriteFeature
-            local entries = feature.getAvailableChickenTypes()
-            local rows = {}
 
-            local search = Instance.new("TextBox")
-            search.LayoutOrder = 0
-            search.Size = UDim2.new(1, 0, 0, 32)
-            search.BackgroundColor3 = Theme.SurfaceElevated
-            search.BorderSizePixel = 0
-            search.ClearTextOnFocus = false
-            search.PlaceholderText = "Search Chicken..."
-            search.Text = ""
-            search.Font = Enum.Font.Gotham
-            search.TextSize = 12
-            search.TextColor3 = Theme.TextPrimary
-            search.PlaceholderColor3 = Theme.TextMuted
-            search.TextXAlignment = Enum.TextXAlignment.Left
-            search.Parent = host
-            corner(search, 7); stroke(search); pad(search, 0, 10, 0, 10)
-
-            for i, entry in ipairs(entries) do
-                local rowFrame = makeFilterRow(
-                    host,
-                    i,
-                    entry.name,
-                    nil,
-                    feature.isTypeSelected(entry.id),
-                    function(checkBtn)
-                        local now = not feature.isTypeSelected(entry.id)
-                        feature.setTypeSelected(entry.id, now)
-                        checkBtn.Text = now and "✓" or ""
-                        markConfigDirty()
-                    end
-                )
-                table.insert(rows, { frame = rowFrame, id = entry.id, name = entry.name })
-            end
-
-            local function applySearch()
-                local query = string.lower(search.Text or "")
-                for _, item in ipairs(rows) do
-                    local haystack = string.lower(tostring(item.name) .. " " .. tostring(item.id))
-                    item.frame.Visible = query == "" or string.find(haystack, query, 1, true) ~= nil
-                end
-            end
-            search:GetPropertyChangedSignal("Text"):Connect(applySearch)
-            applySearch()
-        end)
-
-            makeCollapsibleFilter(favoriteFilters, 2, "Rarity", function(host)
-                local feature = State._autoFavoriteFeature
-                local rarities = feature.getAvailableRarities()
-                for i, rarityId in ipairs(rarities) do
-                    makeFilterRow(
-                        host,
-                        i,
-                        resolveRarityDisplayName(rarityId),
-                        nil,
-                        feature.isRaritySelected(rarityId),
-                        function(checkBtn)
-                            local now = not feature.isRaritySelected(rarityId)
-                            feature.setRaritySelected(rarityId, now)
-                            checkBtn.Text = now and "✓" or ""
-                            markConfigDirty()
-                        end
-                    )
-                end
+            settingRow(favoriteCard, 1, "Auto Favorite", nil, "autoFavorite", function(v)
+                return feature.setAutoFavorite(v)
             end)
+
+            local filterTitle = Instance.new("Frame")
+            filterTitle.LayoutOrder = 2
+            filterTitle.Size = UDim2.new(1, 0, 0, 18)
+            filterTitle.BackgroundTransparency = 1
+            filterTitle.Parent = favoriteCard
+            text(filterTitle, "Filters", 11, Theme.TextMuted, Enum.Font.GothamMedium).Size = UDim2.new(1, 0, 1, 0)
+
+            local function makeFavoriteSelector(order, title, kind)
+                local wrap = Instance.new("Frame")
+                wrap.LayoutOrder = order
+                wrap.Size = UDim2.new(1, 0, 0, 0)
+                wrap.AutomaticSize = Enum.AutomaticSize.Y
+                wrap.BackgroundTransparency = 1
+                wrap.Parent = favoriteCard
+
+                local layout = Instance.new("UIListLayout")
+                layout.Padding = UDim.new(0, 5)
+                layout.SortOrder = Enum.SortOrder.LayoutOrder
+                layout.Parent = wrap
+
+                local header = Instance.new("TextButton")
+                header.LayoutOrder = 1
+                header.Size = UDim2.new(1, 0, 0, 48)
+                header.BackgroundColor3 = Theme.SurfaceElevated
+                header.BorderSizePixel = 0
+                header.Text = ""
+                header.AutoButtonColor = false
+                header.Parent = wrap
+                corner(header, 7); stroke(header)
+
+                local titleLabel = text(header, title, 12, Theme.TextSecondary, Enum.Font.GothamMedium)
+                titleLabel.Position = UDim2.fromOffset(11, 4)
+                titleLabel.Size = UDim2.new(1, -48, 0, 20)
+
+                local summaryLabel = text(header, "None selected", 10, Theme.TextMuted)
+                summaryLabel.Position = UDim2.fromOffset(11, 24)
+                summaryLabel.Size = UDim2.new(1, -48, 0, 17)
+
+                local arrow = text(header, "›", 20, Theme.TextMuted, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
+                arrow.Position = UDim2.new(1, -36, 0, 8)
+                arrow.Size = UDim2.fromOffset(26, 30)
+
+                local body = Instance.new("Frame")
+                body.LayoutOrder = 2
+                body.Size = UDim2.new(1, 0, 0, 0)
+                body.AutomaticSize = Enum.AutomaticSize.Y
+                body.BackgroundTransparency = 1
+                body.Visible = false
+                body.Parent = wrap
+
+                local bodyLayout = Instance.new("UIListLayout")
+                bodyLayout.Padding = UDim.new(0, 5)
+                bodyLayout.SortOrder = Enum.SortOrder.LayoutOrder
+                bodyLayout.Parent = body
+
+                local selectedRows = {}
+
+                local function refreshSummary()
+                    if kind == "names" then
+                        local entries = feature.getAvailableChickenTypes()
+                        local count = 0
+                        for _, entry in ipairs(entries) do
+                            if feature.isTypeSelected(entry.id) then count += 1 end
+                        end
+                        summaryLabel.Text = count == 0 and "None selected" or (tostring(count) .. " selected")
+                    else
+                        local chosen = {}
+                        for _, rarityId in ipairs(feature.getAvailableRarities()) do
+                            if feature.isRaritySelected(rarityId) then
+                                table.insert(chosen, resolveRarityDisplayName(rarityId))
+                            end
+                        end
+                        if #chosen == 0 then
+                            summaryLabel.Text = "None selected"
+                        elseif #chosen <= 3 then
+                            summaryLabel.Text = table.concat(chosen, ", ")
+                        else
+                            summaryLabel.Text = tostring(#chosen) .. " selected"
+                        end
+                    end
+                end
+
+                if kind == "names" then
+                    local search = Instance.new("TextBox")
+                    search.LayoutOrder = 1
+                    search.Size = UDim2.new(1, 0, 0, 34)
+                    search.BackgroundColor3 = Theme.SurfaceElevated
+                    search.BorderSizePixel = 0
+                    search.ClearTextOnFocus = false
+                    search.PlaceholderText = "🔍  Search Chicken..."
+                    search.Text = ""
+                    search.Font = Enum.Font.Gotham
+                    search.TextSize = 12
+                    search.TextColor3 = Theme.TextPrimary
+                    search.PlaceholderColor3 = Theme.TextMuted
+                    search.TextXAlignment = Enum.TextXAlignment.Left
+                    search.Parent = body
+                    corner(search, 7); stroke(search); pad(search, 0, 10, 0, 10)
+
+                    local list = Instance.new("ScrollingFrame")
+                    list.LayoutOrder = 2
+                    list.Size = UDim2.new(1, 0, 0, 220)
+                    list.BackgroundColor3 = Theme.Surface
+                    list.BorderSizePixel = 0
+                    list.ScrollBarThickness = 3
+                    list.AutomaticCanvasSize = Enum.AutomaticSize.Y
+                    list.CanvasSize = UDim2.new()
+                    list.Parent = body
+                    corner(list, 7); stroke(list); pad(list, 8, 8, 8, 8)
+
+                    local listLayout = Instance.new("UIListLayout")
+                    listLayout.Padding = UDim.new(0, 4)
+                    listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+                    listLayout.Parent = list
+
+                    for i, entry in ipairs(feature.getAvailableChickenTypes()) do
+                        local rowFrame, checkBtn = makeFilterRow(
+                            list,
+                            i,
+                            entry.name,
+                            nil,
+                            feature.isTypeSelected(entry.id),
+                            function(button)
+                                local now = not feature.isTypeSelected(entry.id)
+                                feature.setTypeSelected(entry.id, now)
+                                button.Text = now and "✓" or ""
+                                refreshSummary()
+                                markConfigDirty()
+                            end
+                        )
+                        selectedRows[#selectedRows + 1] = {
+                            frame = rowFrame,
+                            id = entry.id,
+                            name = entry.name,
+                            check = checkBtn,
+                        }
+                    end
+
+                    local function applySearch()
+                        local query = string.lower(search.Text or "")
+                        for _, item in ipairs(selectedRows) do
+                            local haystack = string.lower(tostring(item.name) .. " " .. tostring(item.id))
+                            item.frame.Visible = query == "" or string.find(haystack, query, 1, true) ~= nil
+                        end
+                    end
+                    search:GetPropertyChangedSignal("Text"):Connect(applySearch)
+                else
+                    local list = Instance.new("ScrollingFrame")
+                    list.LayoutOrder = 1
+                    list.Size = UDim2.new(1, 0, 0, 220)
+                    list.BackgroundColor3 = Theme.Surface
+                    list.BorderSizePixel = 0
+                    list.ScrollBarThickness = 3
+                    list.AutomaticCanvasSize = Enum.AutomaticSize.Y
+                    list.CanvasSize = UDim2.new()
+                    list.Parent = body
+                    corner(list, 7); stroke(list); pad(list, 8, 8, 8, 8)
+
+                    local listLayout = Instance.new("UIListLayout")
+                    listLayout.Padding = UDim.new(0, 4)
+                    listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+                    listLayout.Parent = list
+
+                    for i, rarityId in ipairs(feature.getAvailableRarities()) do
+                        makeFilterRow(
+                            list,
+                            i,
+                            resolveRarityDisplayName(rarityId),
+                            nil,
+                            feature.isRaritySelected(rarityId),
+                            function(button)
+                                local now = not feature.isRaritySelected(rarityId)
+                                feature.setRaritySelected(rarityId, now)
+                                button.Text = now and "✓" or ""
+                                refreshSummary()
+                                markConfigDirty()
+                            end
+                        )
+                    end
+                end
+
+                header.MouseButton1Click:Connect(function()
+                    body.Visible = not body.Visible
+                    arrow.Text = body.Visible and "⌄" or "›"
+                end)
+
+                refreshSummary()
+            end
+
+            makeFavoriteSelector(3, "Chicken Names", "names")
+            makeFavoriteSelector(4, "Rarities", "rarities")
         else
             setText(row(favoriteCard, 1, "Status"), "Unavailable")
         end

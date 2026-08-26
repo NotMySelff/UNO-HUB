@@ -1,5 +1,5 @@
 --[[
-    UNO HUB1
+    UNO HUB
 ]]
 
 
@@ -3910,26 +3910,17 @@ local function setAutoUpgradeGenerator(on)
         local view = generatorView(before)
         if not view then State.economy.upgradeStatus = "NO DATA" return end
         local candidates = {}
-        local maxUpgradeLevel = tonumber(State.economy.maxGeneratorUpgradeLevel) or 50
-        if maxUpgradeLevel < 1 then maxUpgradeLevel = 1 end
-        if maxUpgradeLevel > 50 then maxUpgradeLevel = 50 end
-        maxUpgradeLevel = math.floor(maxUpgradeLevel + 0.5)
-
+        local maxUpgradeLevel = math.clamp(math.floor((tonumber(State.economy.maxGeneratorUpgradeLevel) or 50) + 0.5), 1, 50)
         local cappedCount = 0
         for _, gen in pairs(view.generators) do
             local level = tonumber(gen.level) or 0
             if level >= maxUpgradeLevel then
-                cappedCount += 1
+                cappedCount = cappedCount + 1
             elseif gen.canUpgrade then
                 table.insert(candidates, gen)
             end
         end
-
-        table.sort(candidates, function(a, b)
-            if a.level == b.level then return a.slot < b.slot end
-            return a.level < b.level
-        end)
-
+        table.sort(candidates, function(a, b) if a.level == b.level then return a.slot < b.slot end return a.level < b.level end)
         if #candidates == 0 then
             State.economy.upgradeStatus = cappedCount > 0 and "LIMIT REACHED" or "NONE"
             return
@@ -4959,7 +4950,7 @@ do
                 autoUpgradeIncubator = State.toggles.autoUpgradeIncubator == true,
                 autoBuyGenerator = State.toggles.autoBuyGenerator == true,
                 autoUpgradeGenerator = State.toggles.autoUpgradeGenerator == true,
-                maxGeneratorUpgradeLevel = tonumber(State.economy.maxGeneratorUpgradeLevel) or 50,
+                maxGeneratorUpgradeLevel = math.clamp(math.floor((tonumber(State.economy.maxGeneratorUpgradeLevel) or 50) + 0.5), 1, 50),
                 autoExpandCoop = State.toggles.autoExpandCoop == true,
                 autoUpgradeRecycler = State.toggles.autoUpgradeRecycler == true,
                 autoEventCapsule = State.toggles.autoEventCapsule == true,
@@ -4986,10 +4977,7 @@ do
                 State.autoTower.startDelay = math.clamp(math.floor((tonumber(data.autoTowerStartDelay) or 30) + 0.5), 0, 120)
             end
             if data.maxGeneratorUpgradeLevel ~= nil then
-                local savedMax = tonumber(data.maxGeneratorUpgradeLevel) or 50
-                if savedMax < 1 then savedMax = 1 end
-                if savedMax > 50 then savedMax = 50 end
-                State.economy.maxGeneratorUpgradeLevel = math.floor(savedMax + 0.5)
+                State.economy.maxGeneratorUpgradeLevel = math.clamp(math.floor((tonumber(data.maxGeneratorUpgradeLevel) or 50) + 0.5), 1, 50)
             end
 
             applyToggle("autoKoDismiss")
@@ -5823,6 +5811,99 @@ State._delayStepper = function(parent, order, title, getValue, setValue)
     return valueLabel
 end
 
+local function generatorMaxLevelControl(parent, order)
+    local holder = Instance.new("Frame")
+    holder.LayoutOrder = order or 0
+    holder.Size = UDim2.new(1, 0, 0, 32)
+    holder.BackgroundTransparency = 1
+    holder.Parent = parent
+
+    local label = text(holder, "Max Upgrade Level", 12, Theme.TextMuted)
+    label.Size = UDim2.new(1, -126, 1, 0)
+
+    local minus = Instance.new("TextButton")
+    minus.Size = UDim2.fromOffset(30, 26)
+    minus.Position = UDim2.new(1, -122, 0.5, -13)
+    minus.BackgroundColor3 = Theme.SurfaceElevated
+    minus.BorderSizePixel = 0
+    minus.Text = "−"
+    minus.Font = Enum.Font.GothamBold
+    minus.TextSize = 15
+    minus.TextColor3 = Theme.TextPrimary
+    minus.AutoButtonColor = false
+    minus.Parent = holder
+    corner(minus, 7)
+    stroke(minus)
+
+    local valueBox = Instance.new("TextBox")
+    valueBox.Size = UDim2.fromOffset(50, 26)
+    valueBox.Position = UDim2.new(1, -88, 0.5, -13)
+    valueBox.BackgroundColor3 = Theme.SurfaceElevated
+    valueBox.BorderSizePixel = 0
+    valueBox.ClearTextOnFocus = false
+    valueBox.Font = Enum.Font.GothamMedium
+    valueBox.TextSize = 12
+    valueBox.TextColor3 = Theme.TextPrimary
+    valueBox.TextXAlignment = Enum.TextXAlignment.Center
+    valueBox.Parent = holder
+    corner(valueBox, 7)
+    stroke(valueBox)
+
+    local plus = Instance.new("TextButton")
+    plus.Size = UDim2.fromOffset(30, 26)
+    plus.Position = UDim2.new(1, -34, 0.5, -13)
+    plus.BackgroundColor3 = Theme.SurfaceElevated
+    plus.BorderSizePixel = 0
+    plus.Text = "+"
+    plus.Font = Enum.Font.GothamBold
+    plus.TextSize = 15
+    plus.TextColor3 = Theme.TextPrimary
+    plus.AutoButtonColor = false
+    plus.Parent = holder
+    corner(plus, 7)
+    stroke(plus)
+
+    local function normalized(value)
+        return math.clamp(math.floor((tonumber(value) or 50) + 0.5), 1, 50)
+    end
+
+    local function refresh()
+        local value = normalized(State.economy.maxGeneratorUpgradeLevel)
+        State.economy.maxGeneratorUpgradeLevel = value
+        valueBox.Text = tostring(value)
+    end
+
+    local function commit(value)
+        State.economy.maxGeneratorUpgradeLevel = normalized(value)
+        refresh()
+        markConfigDirty()
+    end
+
+    minus.MouseButton1Click:Connect(function()
+        commit(normalized(State.economy.maxGeneratorUpgradeLevel) - 1)
+    end)
+
+    plus.MouseButton1Click:Connect(function()
+        commit(normalized(State.economy.maxGeneratorUpgradeLevel) + 1)
+    end)
+
+    valueBox.FocusLost:Connect(function()
+        commit(valueBox.Text)
+    end)
+
+    valueBox:GetPropertyChangedSignal("Text"):Connect(function()
+        if valueBox:IsFocused() then
+            local digits = string.gsub(valueBox.Text, "%D", "")
+            if digits ~= valueBox.Text then
+                valueBox.Text = digits
+            end
+        end
+    end)
+
+    refresh()
+    return valueBox
+end
+
 local function createTabbedPage(tabNames)
     local root = Instance.new("Frame")
     root.Size = UDim2.fromScale(1, 1)
@@ -5902,86 +5983,6 @@ local function createTabbedPage(tabNames)
 
     selectTab(tabNames[1])
     return root, bodies, function() return activeTab end
-end
-
-local function generatorMaxLevelControl(parent, order)
-    local holder = Instance.new("Frame")
-    holder.LayoutOrder = order or 0
-    holder.Size = UDim2.new(1, 0, 0, 32)
-    holder.BackgroundTransparency = 1
-    holder.Parent = parent
-
-    local caption = text(holder, "Max Upgrade Level", 12, Theme.TextMuted)
-    caption.Size = UDim2.new(1, -126, 1, 0)
-
-    local minus = Instance.new("TextButton")
-    minus.Size = UDim2.fromOffset(30, 26)
-    minus.Position = UDim2.new(1, -122, 0.5, -13)
-    minus.BackgroundColor3 = Theme.SurfaceElevated
-    minus.BorderSizePixel = 0
-    minus.Text = "-"
-    minus.Font = Enum.Font.GothamBold
-    minus.TextSize = 14
-    minus.TextColor3 = Theme.TextPrimary
-    minus.Parent = holder
-    corner(minus, 7)
-    stroke(minus)
-
-    local box = Instance.new("TextBox")
-    box.Size = UDim2.fromOffset(50, 26)
-    box.Position = UDim2.new(1, -88, 0.5, -13)
-    box.BackgroundColor3 = Theme.SurfaceElevated
-    box.BorderSizePixel = 0
-    box.ClearTextOnFocus = false
-    box.Font = Enum.Font.GothamMedium
-    box.TextSize = 12
-    box.TextColor3 = Theme.TextPrimary
-    box.TextXAlignment = Enum.TextXAlignment.Center
-    box.Parent = holder
-    corner(box, 7)
-    stroke(box)
-
-    local plus = Instance.new("TextButton")
-    plus.Size = UDim2.fromOffset(30, 26)
-    plus.Position = UDim2.new(1, -34, 0.5, -13)
-    plus.BackgroundColor3 = Theme.SurfaceElevated
-    plus.BorderSizePixel = 0
-    plus.Text = "+"
-    plus.Font = Enum.Font.GothamBold
-    plus.TextSize = 14
-    plus.TextColor3 = Theme.TextPrimary
-    plus.Parent = holder
-    corner(plus, 7)
-    stroke(plus)
-
-    local function normalize(v)
-        local n = tonumber(v) or 50
-        if n < 1 then n = 1 end
-        if n > 50 then n = 50 end
-        return math.floor(n + 0.5)
-    end
-
-    local function commit(v)
-        State.economy.maxGeneratorUpgradeLevel = normalize(v)
-        box.Text = tostring(State.economy.maxGeneratorUpgradeLevel)
-        markConfigDirty()
-    end
-
-    box.Text = tostring(normalize(State.economy.maxGeneratorUpgradeLevel))
-
-    minus.MouseButton1Click:Connect(function()
-        commit(normalize(State.economy.maxGeneratorUpgradeLevel) - 1)
-    end)
-
-    plus.MouseButton1Click:Connect(function()
-        commit(normalize(State.economy.maxGeneratorUpgradeLevel) + 1)
-    end)
-
-    box.FocusLost:Connect(function()
-        commit(box.Text)
-    end)
-
-    return box
 end
 
 local function makeCollapsibleFilter(parent, order, label, buildRows)
@@ -6283,8 +6284,9 @@ safeBuild("Auto Farm", function()
     local _, coopCard = card(coop, 1, "Coop")
     settingRow(coopCard, 1, "Auto Buy Generator", nil, "autoBuyGenerator", setAutoBuyGenerator)
     settingRow(coopCard, 2, "Auto Upgrade Generator", nil, "autoUpgradeGenerator", setAutoUpgradeGenerator)
-    settingRow(coopCard, 3, "Auto Expand Coop", nil, "autoExpandCoop", setAutoExpandCoop)
-    settingRow(coopCard, 4, "Auto Upgrade Recycler", nil, "autoUpgradeRecycler", setAutoUpgradeRecycler)
+    generatorMaxLevelControl(coopCard, 3)
+    settingRow(coopCard, 4, "Auto Expand Coop", nil, "autoExpandCoop", setAutoExpandCoop)
+    settingRow(coopCard, 5, "Auto Upgrade Recycler", nil, "autoUpgradeRecycler", setAutoUpgradeRecycler)
 
     -- CHICKEN
     local chicken = tabs.Chicken

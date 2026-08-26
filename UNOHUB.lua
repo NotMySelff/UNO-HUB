@@ -155,6 +155,7 @@ local State = {
     economy = {
         buyStatus = "IDLE", upgradeStatus = "IDLE", expandStatus = "IDLE", recyclerStatus = "IDLE",
         generatorsOwned = 0, generatorsSlots = 0, nextBuySlot = nil, nextBuyCost = nil, recyclerLevel = 0,
+        maxUpgradeGeneratorLevel = 50,
     },
     movementOwner = "NONE",
     toggles = {
@@ -3900,6 +3901,38 @@ local function setAutoBuyGenerator(on)
         else State.economy.buyStatus = "FAILED" end
     end)
 end
+local GeneratorMaxLevelVisualSetters = {}
+
+local function getGeneratorGameMaxLevel()
+    local gameConfig = Integration.modules.GameConfig
+    local generators = gameConfig and gameConfig.generators
+    local runtimeMax = generators and tonumber(generators.maxLevel)
+    return math.max(1, math.floor(runtimeMax or 50))
+end
+
+local function getMaxUpgradeGeneratorLevel()
+    local gameMax = getGeneratorGameMaxLevel()
+    local value = tonumber(State.economy.maxUpgradeGeneratorLevel) or 50
+    return math.clamp(math.floor(value + 0.5), 1, gameMax)
+end
+
+local function setMaxUpgradeGeneratorLevel(value)
+    local gameMax = getGeneratorGameMaxLevel()
+    local numeric = tonumber(value)
+    if numeric == nil then
+        numeric = getMaxUpgradeGeneratorLevel()
+    end
+    numeric = math.clamp(math.floor(numeric + 0.5), 1, gameMax)
+    State.economy.maxUpgradeGeneratorLevel = numeric
+    for _, refresh in ipairs(GeneratorMaxLevelVisualSetters) do
+        if type(refresh) == "function" then
+            pcall(refresh, numeric)
+        end
+    end
+    markConfigDirty()
+    return numeric
+end
+
 local function setAutoUpgradeGenerator(on)
     State.toggles.autoUpgradeGenerator = on
     if not on then State.economy.upgradeStatus = "IDLE" end
@@ -3909,7 +3942,13 @@ local function setAutoUpgradeGenerator(on)
         local view = generatorView(before)
         if not view then State.economy.upgradeStatus = "NO DATA" return end
         local candidates = {}
-        for _, gen in pairs(view.generators) do if gen.canUpgrade then table.insert(candidates, gen) end end
+        local configuredMaxLevel = getMaxUpgradeGeneratorLevel()
+        for _, gen in pairs(view.generators) do
+            local level = tonumber(gen.level)
+            if gen.canUpgrade and level ~= nil and level < configuredMaxLevel then
+                table.insert(candidates, gen)
+            end
+        end
         table.sort(candidates, function(a, b) if a.level == b.level then return a.slot < b.slot end return a.level < b.level end)
         if #candidates == 0 then State.economy.upgradeStatus = "NONE" return end
         local money = readMoney() or 0
@@ -4937,6 +4976,7 @@ do
                 autoUpgradeIncubator = State.toggles.autoUpgradeIncubator == true,
                 autoBuyGenerator = State.toggles.autoBuyGenerator == true,
                 autoUpgradeGenerator = State.toggles.autoUpgradeGenerator == true,
+                maxUpgradeGeneratorLevel = getMaxUpgradeGeneratorLevel(),
                 autoExpandCoop = State.toggles.autoExpandCoop == true,
                 autoUpgradeRecycler = State.toggles.autoUpgradeRecycler == true,
                 autoEventCapsule = State.toggles.autoEventCapsule == true,
@@ -4974,6 +5014,11 @@ do
             if IncubatorClaimFeature then applyToggle("autoIncubatorClaim", function(v) IncubatorClaimFeature.setAutoIncubatorClaim(v) end) end
             if AutoUpgradeIncubatorFeature then applyToggle("autoUpgradeIncubator", function(v) AutoUpgradeIncubatorFeature.setAutoUpgradeIncubator(v) end) end
             applyToggle("autoBuyGenerator", setAutoBuyGenerator)
+            if data.maxUpgradeGeneratorLevel ~= nil then
+                setMaxUpgradeGeneratorLevel(data.maxUpgradeGeneratorLevel)
+            else
+                setMaxUpgradeGeneratorLevel(50)
+            end
             applyToggle("autoUpgradeGenerator", setAutoUpgradeGenerator)
             applyToggle("autoExpandCoop", setAutoExpandCoop)
             applyToggle("autoUpgradeRecycler", setAutoUpgradeRecycler)
@@ -4999,6 +5044,7 @@ do
             autoUpgradeIncubator = false,
             autoBuyGenerator = false,
             autoUpgradeGenerator = false,
+            maxUpgradeGeneratorLevel = 50,
             autoExpandCoop = false,
             autoUpgradeRecycler = false,
             autoEventCapsule = false,
@@ -5793,6 +5839,88 @@ State._delayStepper = function(parent, order, title, getValue, setValue)
     return valueLabel
 end
 
+State._generatorMaxLevelStepper = function(parent, order)
+    local holder = Instance.new("Frame")
+    holder.LayoutOrder = order or 0
+    holder.Size = UDim2.new(1, 0, 0, 32)
+    holder.BackgroundTransparency = 1
+    holder.Parent = parent
+
+    local label = text(holder, "Max Upgrade Level", 12, Theme.TextMuted)
+    label.Size = UDim2.new(1, -148, 1, 0)
+
+    local minus = Instance.new("TextButton")
+    minus.Size = UDim2.fromOffset(30, 26)
+    minus.Position = UDim2.new(1, -142, 0.5, -13)
+    minus.BackgroundColor3 = Theme.SurfaceElevated
+    minus.BorderSizePixel = 0
+    minus.Text = "−"
+    minus.Font = Enum.Font.GothamBold
+    minus.TextSize = 15
+    minus.TextColor3 = Theme.TextPrimary
+    minus.AutoButtonColor = false
+    minus.Parent = holder
+    corner(minus, 7); stroke(minus)
+
+    local valueBox = Instance.new("TextBox")
+    valueBox.Size = UDim2.fromOffset(68, 26)
+    valueBox.Position = UDim2.new(1, -108, 0.5, -13)
+    valueBox.BackgroundColor3 = Theme.SurfaceElevated
+    valueBox.BorderSizePixel = 0
+    valueBox.ClearTextOnFocus = false
+    valueBox.Text = tostring(getMaxUpgradeGeneratorLevel())
+    valueBox.Font = Enum.Font.GothamMedium
+    valueBox.TextSize = 12
+    valueBox.TextColor3 = Theme.TextPrimary
+    valueBox.TextXAlignment = Enum.TextXAlignment.Center
+    valueBox.PlaceholderText = "50"
+    valueBox.Parent = holder
+    corner(valueBox, 7); stroke(valueBox)
+
+    local plus = Instance.new("TextButton")
+    plus.Size = UDim2.fromOffset(30, 26)
+    plus.Position = UDim2.new(1, -34, 0.5, -13)
+    plus.BackgroundColor3 = Theme.SurfaceElevated
+    plus.BorderSizePixel = 0
+    plus.Text = "+"
+    plus.Font = Enum.Font.GothamBold
+    plus.TextSize = 15
+    plus.TextColor3 = Theme.TextPrimary
+    plus.AutoButtonColor = false
+    plus.Parent = holder
+    corner(plus, 7); stroke(plus)
+
+    local function refresh(value)
+        if not valueBox or not valueBox.Parent then return end
+        local normalized = tonumber(value) or getMaxUpgradeGeneratorLevel()
+        valueBox.Text = tostring(math.floor(normalized + 0.5))
+    end
+
+    table.insert(GeneratorMaxLevelVisualSetters, refresh)
+
+    local function commitText()
+        local typed = tonumber(valueBox.Text)
+        if typed == nil then
+            refresh(getMaxUpgradeGeneratorLevel())
+            return
+        end
+        setMaxUpgradeGeneratorLevel(typed)
+    end
+
+    minus.MouseButton1Click:Connect(function()
+        setMaxUpgradeGeneratorLevel(getMaxUpgradeGeneratorLevel() - 1)
+    end)
+    plus.MouseButton1Click:Connect(function()
+        setMaxUpgradeGeneratorLevel(getMaxUpgradeGeneratorLevel() + 1)
+    end)
+    valueBox.FocusLost:Connect(function()
+        commitText()
+    end)
+
+    refresh(getMaxUpgradeGeneratorLevel())
+    return valueBox
+end
+
 local function createTabbedPage(tabNames)
     local root = Instance.new("Frame")
     root.Size = UDim2.fromScale(1, 1)
@@ -6173,8 +6301,9 @@ safeBuild("Auto Farm", function()
     local _, coopCard = card(coop, 1, "Coop")
     settingRow(coopCard, 1, "Auto Buy Generator", nil, "autoBuyGenerator", setAutoBuyGenerator)
     settingRow(coopCard, 2, "Auto Upgrade Generator", nil, "autoUpgradeGenerator", setAutoUpgradeGenerator)
-    settingRow(coopCard, 3, "Auto Expand Coop", nil, "autoExpandCoop", setAutoExpandCoop)
-    settingRow(coopCard, 4, "Auto Upgrade Recycler", nil, "autoUpgradeRecycler", setAutoUpgradeRecycler)
+    State._generatorMaxLevelStepper(coopCard, 3)
+    settingRow(coopCard, 4, "Auto Expand Coop", nil, "autoExpandCoop", setAutoExpandCoop)
+    settingRow(coopCard, 5, "Auto Upgrade Recycler", nil, "autoUpgradeRecycler", setAutoUpgradeRecycler)
 
     -- CHICKEN
     local chicken = tabs.Chicken
@@ -6935,8 +7064,9 @@ safeBuild("Coop", function()
     local _, auto = card(sc, 2, "AUTOMATION")
     settingRow(auto, 1, "Auto Buy Generator", nil, "autoBuyGenerator", setAutoBuyGenerator)
     settingRow(auto, 2, "Auto Upgrade Generator", nil, "autoUpgradeGenerator", setAutoUpgradeGenerator)
-    settingRow(auto, 3, "Auto Expand Coop", nil, "autoExpandCoop", setAutoExpandCoop)
-    settingRow(auto, 4, "Auto Upgrade Recycler", nil, "autoUpgradeRecycler", setAutoUpgradeRecycler)
+    State._generatorMaxLevelStepper(auto, 3)
+    settingRow(auto, 4, "Auto Expand Coop", nil, "autoExpandCoop", setAutoExpandCoop)
+    settingRow(auto, 5, "Auto Upgrade Recycler", nil, "autoUpgradeRecycler", setAutoUpgradeRecycler)
 
     local _, incCard = card(sc, 3, "INCUBATOR")
     settingRow(incCard, 1, "Auto Upgrade Incubator", nil, "autoUpgradeIncubator", function(v)

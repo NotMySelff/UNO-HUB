@@ -7867,7 +7867,10 @@ safeBuild("Auto Farm", function()
             end, function(host, refreshSummary)
                 local items = targetFeature.getAvailableLocks()
                 for i, item in ipairs(items) do
-                    local suffix = item.available and nil or "Unavailable on target"
+                    local suffix = nil
+                    if item.available ~= true then
+                        suffix = "Unavailable on target"
+                    end
                     makeFilterRow(host, i, item.label, suffix, targetFeature.isLockSelected(item.field), function(button)
                         if not item.available and not targetFeature.isLockSelected(item.field) then return end
                         local now = not targetFeature.isLockSelected(item.field)

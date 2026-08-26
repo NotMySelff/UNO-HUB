@@ -1,5 +1,5 @@
 --[[
-    UNO HUB1
+    UNO HUB
 ]]
 
 
@@ -4761,6 +4761,8 @@ local function afrTick(token)
     end
     if not AFR.enabled then afrSetPhase("DISABLED") end
 end
+local setToggleVisual -- forward declaration; assigned by the UI helper below
+
 local function setAutoFarmRebirth(on)
     on = on == true
     if on and State.autoTower and State.autoTower.enabled then
@@ -5778,7 +5780,7 @@ local function row(parent, order, left)
 end
 local ToggleVisualSetters = {}
 
-local function setToggleVisual(key, value)
+setToggleVisual = function(key, value)
     local setters = ToggleVisualSetters[key]
     if type(setters) ~= "table" then return end
     for _, setter in ipairs(setters) do
@@ -12485,11 +12487,11 @@ do
                     -- but NORMAL_FARM must not resume while UFO remains active.
                     if type(coordinator.getCurrentOwner) == "function"
                         and type(coordinator.requestPriority) == "function"
-                        and (now() - lastHoldAssertAt) >= 0.75 then
+                        and (os.clock() - lastHoldAssertAt) >= 0.75 then
 
                         local okOwner, owner = pcall(coordinator.getCurrentOwner)
                         if okOwner and (owner == "NORMAL_FARM" or owner == nil) then
-                            lastHoldAssertAt = now()
+                            lastHoldAssertAt = os.clock()
                             pcall(coordinator.requestPriority, "UFO_ASCENSION", 75, {
                                 enabled = true,
                                 critical = critical,

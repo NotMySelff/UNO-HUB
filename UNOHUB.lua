@@ -161,7 +161,7 @@ local State = {
     movementOwner = "NONE",
     toggles = {
         autoFarmRebirth = false, autoTower = false, useFrontierSkip = true, autoKoDismiss = true, autoHatch = false, autoCollectEgg = false,
-        autoIncubatorClaim = false, autoSell = false, autoFavorite = false, autoFuse = false,
+        autoIncubatorClaim = false, autoSell = false, autoFavorite = false, autoFuse = false, autoTargetFuse = false,
         autoBuyGenerator = false, autoUpgradeGenerator = false, autoExpandCoop = false, autoUpgradeRecycler = false, autoUpgradeIncubator = false,
         antiAfk = true, autoRebirth = false, autoHotEgg = false, autoArena = false, autoEventCapsule = false, autoKraken = false, autoUfoAscension = false, showFloatingButton = true, reducedMotion = false,
     },
@@ -3595,6 +3595,487 @@ do
     end
 end
 
+
+--------------------------------------------------------------------
+-- TARGET FUSE (single exact target + safe materials + Fusion Locks)
+-- Runtime research validated:
+--   * exact owned instance identity = chicken.id
+--   * FuseChickens(targetId, materialId, locks, nil, "a")
+--   * result continuity = response.data.chickenId (new instance ID)
+--   * lock item shape = { field = <key>, from = <source chicken id> }
+--------------------------------------------------------------------
+State._targetFuseFeature = (function()
+    local Remotes = Integration.modules.Remotes
+    local DataController = Integration.modules.DataController
+    local Catalog = Integration.modules.Catalog
+    local FusionRules = Integration.modules.FusionRules
+    local GameConfig = Integration.modules.GameConfig
+    local Products = safeRequire(findPath(ReplicatedStorage, {"Content", "Products"}))
+
+    if type(Remotes) ~= "table" or type(Remotes.invoke) ~= "function"
+        or type(Remotes.defs) ~= "table" or Remotes.defs.FuseChickens == nil
+        or type(DataController) ~= "table" or type(DataController.roster) ~= "function"
+        or type(Catalog) ~= "table" or type(FusionRules) ~= "table"
+        or type(FusionRules.cost) ~= "function" then
+        State.diagnostics["TargetFuse.Feature"] = "MISSING DEPENDENCY"
+        return nil
+    end
+
+    local config = {
+        enabled = false,
+        targetId = nil,
+        selectedRarities = {},
+        selectedLocks = {},
+    }
+    local life = {
+        destroyed = false,
+        generation = 0,
+        inFlight = false,
+    }
+    local runtime = {
+        status = "DISABLED",
+        lastError = nil,
+        lastResponse = nil,
+        lastResultId = nil,
+        lastMaterialId = nil,
+        lastCost = nil,
+        confirmed = 0,
+    }
+
+    local rarityOrder = {
+        "common", "uncommon", "rare", "epic", "legendary",
+        "mythic", "divine", "celestial", "cosmic", "secret",
+    }
+    local rarityRank = {}
+    for i, rarity in ipairs(rarityOrder) do rarityRank[rarity] = i end
+
+    local function setStatus(value, err)
+        runtime.status = tostring(value or "IDLE")
+        runtime.lastError = err
+        if err ~= nil then
+            log("TARGET FUSE", runtime.status .. " " .. tostring(err))
+        end
+    end
+
+    local function roster()
+        local ok, value = pcall(DataController.roster)
+        return ok and type(value) == "table" and value or nil
+    end
+
+    local function findChicken(r, id)
+        if type(r) ~= "table" or type(r.chickens) ~= "table" or id == nil then return nil end
+        for _, chicken in pairs(r.chickens) do
+            if type(chicken) == "table" and tostring(chicken.id) == tostring(id) then
+                return chicken
+            end
+        end
+        return nil
+    end
+
+    local function resolvedRarity(chicken)
+        if type(chicken) ~= "table" then return nil end
+        if chicken.rarity ~= nil then return string.lower(tostring(chicken.rarity)) end
+        local defs = Catalog.chickenTypes
+        local def = type(defs) == "table" and defs[chicken.typeId] or nil
+        return type(def) == "table" and def.rarity and string.lower(tostring(def.rarity)) or nil
+    end
+
+    local function speciesName(chicken)
+        if type(chicken) ~= "table" then return "Unknown" end
+        local defs = Catalog.chickenTypes
+        local def = type(defs) == "table" and defs[chicken.typeId] or nil
+        if type(def) == "table" and type(def.name) == "string" and def.name ~= "" then return def.name end
+        return titleCaseId(chicken.typeId or "Unknown")
+    end
+
+    local function displayName(chicken)
+        if type(chicken) ~= "table" then return "No target" end
+        if type(chicken.nickname) == "string" and chicken.nickname ~= "" then return chicken.nickname end
+        return speciesName(chicken)
+    end
+
+    local function availableRarities()
+        local out, seen = {}, {}
+        local rarity = Catalog.Rarity or Catalog.rarity
+        if type(rarity) == "table" and type(rarity.rank) == "table" then
+            for id in pairs(rarity.rank) do
+                id = string.lower(tostring(id))
+                if id ~= "" and not seen[id] then seen[id] = true; table.insert(out, id) end
+            end
+            table.sort(out, function(a,b)
+                local ar = tonumber(rarity.rank[a]) or math.huge
+                local br = tonumber(rarity.rank[b]) or math.huge
+                return ar == br and a < b or ar < br
+            end)
+        end
+        if #out == 0 then for _, id in ipairs(rarityOrder) do table.insert(out, id) end end
+        return out
+    end
+
+    local function purchases()
+        return readAtom(DataController, "purchases")
+    end
+
+    local function lockCapacity()
+        local slots = GameConfig and GameConfig.fusion and GameConfig.fusion.lockSlots
+        local free = slots and tonumber(slots.free) or 2
+        local cap = slots and tonumber(slots.cap) or 8
+        local purchaseState = purchases()
+        local ownedPasses = 0
+        local passes = type(purchaseState) == "table" and purchaseState.passes or nil
+        for productId, product in pairs(type(Products) == "table" and Products.passes or {}) do
+            if type(product) == "table" and product.fusionSlot == true and type(passes) == "table"
+                and (passes[productId] == true or passes[product.id] == true) then
+                ownedPasses += 1
+            end
+        end
+        local credits = type(purchaseState) == "table" and math.max(0, tonumber(purchaseState.fusionLocks) or 0) or 0
+        local permanent = math.min(cap, free + ownedPasses)
+        local allowed = math.min(cap, permanent + credits)
+        return allowed, free, cap, permanent, credits
+    end
+
+    local function selectedLockCount()
+        local n = 0
+        for _, enabled in pairs(config.selectedLocks) do if enabled == true then n += 1 end end
+        return n
+    end
+
+    local function availableLocks(target)
+        local list = {
+            { field = "level", label = "Level", available = target ~= nil and target.level ~= nil },
+            { field = "ability", label = "Ability", available = target ~= nil and target.ability ~= nil and target.ability ~= "" },
+            { field = "eggs", label = "Eggs / Lays", available = target ~= nil and type(target.eggs) == "table" },
+        }
+        local slots = FusionRules.LOOK_SLOTS or { "color", "hat", "mask", "feet", "aura" }
+        local labels = { color = "Color", hat = "Hat", mask = "Mask", feet = "Feet", aura = "Aura" }
+        local seen = {}
+        for _, slot in ipairs(slots) do
+            slot = tostring(slot)
+            if slot ~= "rig" and not seen[slot] then
+                seen[slot] = true
+                table.insert(list, {
+                    field = "cos:" .. slot,
+                    label = labels[slot] or titleCaseId(slot),
+                    available = target ~= nil and type(target.look) == "table" and target.look[slot] ~= nil,
+                })
+            end
+        end
+        return list
+    end
+
+    local function lockLabel(field)
+        for _, item in ipairs(availableLocks(findChicken(roster(), config.targetId))) do
+            if item.field == field then return item.label end
+        end
+        return tostring(field)
+    end
+
+    local function targetSnapshot()
+        local r = roster()
+        local chicken = findChicken(r, config.targetId)
+        if not chicken then return nil end
+        return {
+            id = chicken.id,
+            typeId = chicken.typeId,
+            nickname = chicken.nickname,
+            displayName = displayName(chicken),
+            speciesName = speciesName(chicken),
+            level = tonumber(chicken.level) or 1,
+            rarity = resolvedRarity(chicken),
+            favorite = chicken.favorite == true,
+            mutation = chicken.mutation,
+            active = r and tostring(r.activeId) == tostring(chicken.id) or false,
+            ability = chicken.ability,
+            eggs = chicken.eggs,
+            look = chicken.look,
+        }
+    end
+
+    local function inventory(search)
+        local r = roster()
+        local out = {}
+        local query = string.lower(tostring(search or ""))
+        for _, chicken in pairs(type(r) == "table" and r.chickens or {}) do
+            if type(chicken) == "table" and chicken.id ~= nil then
+                local species = speciesName(chicken)
+                local nick = type(chicken.nickname) == "string" and chicken.nickname or ""
+                local hay = string.lower(table.concat({ tostring(chicken.id), tostring(chicken.typeId), species, nick }, " "))
+                if query == "" or string.find(hay, query, 1, true) then
+                    table.insert(out, {
+                        id = tostring(chicken.id),
+                        typeId = chicken.typeId,
+                        nickname = chicken.nickname,
+                        displayName = displayName(chicken),
+                        speciesName = species,
+                        level = tonumber(chicken.level) or 1,
+                        rarity = resolvedRarity(chicken),
+                        favorite = chicken.favorite == true,
+                        mutation = chicken.mutation,
+                        active = r and tostring(r.activeId) == tostring(chicken.id) or false,
+                    })
+                end
+            end
+        end
+        table.sort(out, function(a,b)
+            local an, bn = string.lower(a.displayName), string.lower(b.displayName)
+            if an ~= bn then return an < bn end
+            if a.level ~= b.level then return a.level > b.level end
+            return a.id < b.id
+        end)
+        return out
+    end
+
+    local function buildLocks(target)
+        local allowed = lockCapacity()
+        if selectedLockCount() > allowed then return nil, "LOCK CAPACITY EXCEEDED" end
+        local available = {}
+        for _, item in ipairs(availableLocks(target)) do available[item.field] = item.available == true end
+        local result = {}
+        for field, enabled in pairs(config.selectedLocks) do
+            if enabled == true then
+                if available[field] ~= true then return nil, "LOCK UNAVAILABLE: " .. tostring(field) end
+                table.insert(result, { field = field, from = target.id })
+            end
+        end
+        table.sort(result, function(a,b) return tostring(a.field) < tostring(b.field) end)
+        return result
+    end
+
+    local function moneyEnough(money, cost)
+        if money == nil or cost == nil then return false end
+        if type(money) == "table" and type(money.moreEquals) == "function" then
+            local ok, yes = pcall(function() return money:moreEquals(cost) end)
+            return ok and yes == true
+        end
+        return tonumber(money) ~= nil and tonumber(cost) ~= nil and tonumber(money) >= tonumber(cost)
+    end
+
+    local function materialCandidates(r, target)
+        local list = {}
+        local occupantId = nil
+        local inc = State.data.incubator
+        if type(inc) == "table" then occupantId = inc.occupantId or inc.chickenId or inc.activeId end
+        for _, chicken in pairs(type(r) == "table" and r.chickens or {}) do
+            if type(chicken) == "table" and chicken.id ~= nil
+                and tostring(chicken.id) ~= tostring(target.id)
+                and tostring(chicken.id) ~= tostring(r.activeId)
+                and (occupantId == nil or tostring(chicken.id) ~= tostring(occupantId))
+                and chicken.favorite ~= true
+                and (chicken.mutation == nil or chicken.mutation == "") then
+                local rarity = resolvedRarity(chicken)
+                if rarity and config.selectedRarities[rarity] == true then
+                    table.insert(list, chicken)
+                end
+            end
+        end
+        table.sort(list, function(a,b)
+            local ar, br = rarityRank[resolvedRarity(a)] or math.huge, rarityRank[resolvedRarity(b)] or math.huge
+            if ar ~= br then return ar < br end
+            local al, bl = tonumber(a.level) or 1, tonumber(b.level) or 1
+            if al ~= bl then return al < bl end
+            return tostring(a.id) < tostring(b.id)
+        end)
+        return list
+    end
+
+    local function waitForResult(oldTargetId, materialId, resultId, generation)
+        local deadline = os.clock() + 10
+        while os.clock() < deadline and not life.destroyed and life.generation == generation do
+            local r = roster()
+            if r then
+                local result = findChicken(r, resultId)
+                if result and not findChicken(r, oldTargetId) and not findChicken(r, materialId) then
+                    return result
+                end
+            end
+            task.wait(0.4)
+        end
+        return nil
+    end
+
+    local function tick(generation)
+        while config.enabled and not life.destroyed and life.generation == generation do
+            if config.targetId == nil or config.targetId == "" then
+                setStatus("NO TARGET SELECTED")
+                task.wait(0.8)
+                continue
+            end
+            local r = roster()
+            local target = findChicken(r, config.targetId)
+            if not r or not target then
+                config.enabled = false
+                State.toggles.autoTargetFuse = false
+                setStatus("TARGET MISSING — STOPPED")
+                break
+            end
+            if tostring(r.activeId) == tostring(target.id) then
+                setStatus("TARGET ACTIVE / EQUIPPED")
+                task.wait(1)
+                continue
+            end
+            local hasRarity = false
+            for _, enabled in pairs(config.selectedRarities) do if enabled == true then hasRarity = true break end end
+            if not hasRarity then
+                setStatus("NO MATERIAL RARITY")
+                task.wait(0.8)
+                continue
+            end
+            local locks, lockError = buildLocks(target)
+            if not locks then
+                setStatus("LOCK ERROR", lockError)
+                task.wait(1)
+                continue
+            end
+            local materials = materialCandidates(r, target)
+            if #materials == 0 then
+                setStatus("NO SAFE MATERIAL")
+                task.wait(1)
+                continue
+            end
+            local material = materials[1]
+            local okCost, cost = pcall(FusionRules.cost, fuseMakeSpec(target), fuseMakeSpec(material))
+            if not okCost then
+                setStatus("COST ERROR", cost)
+                task.wait(1)
+                continue
+            end
+            runtime.lastCost = cost
+            if not moneyEnough(fuseReadMoney(DataController), cost) then
+                setStatus("WAITING FOR MONEY")
+                task.wait(1)
+                continue
+            end
+            life.inFlight = true
+            runtime.lastMaterialId = material.id
+            setStatus("FUSING")
+            local requestOk, response = pcall(function()
+                return Remotes.invoke(Remotes.defs.FuseChickens, target.id, material.id, locks, nil, "a")
+            end)
+            life.inFlight = false
+            if not config.enabled or life.destroyed or life.generation ~= generation then break end
+            runtime.lastResponse = response
+            if not requestOk or type(response) ~= "table" or response.ok ~= true or type(response.data) ~= "table"
+                or response.data.chickenId == nil then
+                runtime.lastError = requestOk and (type(response) == "table" and response.error or "BAD RESPONSE") or tostring(response)
+                setStatus("FUSE ERROR", runtime.lastError)
+                task.wait(1.2)
+                continue
+            end
+            local newId = tostring(response.data.chickenId)
+            setStatus("WAITING RESULT")
+            local result = waitForResult(target.id, material.id, newId, generation)
+            if not result then
+                config.enabled = false
+                State.toggles.autoTargetFuse = false
+                setStatus("RESULT NOT CONFIRMED — STOPPED")
+                break
+            end
+            config.targetId = newId
+            runtime.lastResultId = newId
+            runtime.confirmed += 1
+            runtime.lastError = nil
+            setStatus("CONFIRMED")
+            markConfigDirty()
+            task.wait(0.45)
+        end
+        if not config.enabled and runtime.status ~= "TARGET MISSING — STOPPED" and runtime.status ~= "RESULT NOT CONFIRMED — STOPPED" then
+            setStatus("DISABLED")
+        end
+    end
+
+    local api = {}
+    function api.setEnabled(enabled)
+        enabled = enabled == true
+        if life.destroyed then return false end
+        if enabled == config.enabled then return true end
+        config.enabled = enabled
+        State.toggles.autoTargetFuse = enabled
+        life.generation += 1
+        if enabled then
+            local generation = life.generation
+            task.spawn(function()
+                local ok, err = xpcall(function() tick(generation) end, function(e) return debug.traceback(tostring(e), 2) end)
+                if not ok and life.generation == generation then
+                    config.enabled = false
+                    State.toggles.autoTargetFuse = false
+                    setStatus("ERROR", err)
+                end
+            end)
+        else
+            setStatus("DISABLED")
+        end
+        return true
+    end
+    function api.isEnabled() return config.enabled == true end
+    function api.getStatus() return runtime.status end
+    function api.getLastError() return runtime.lastError end
+    function api.getRuntime() return runtime end
+    function api.setTargetId(id)
+        id = id ~= nil and tostring(id) or nil
+        if id == "" then id = nil end
+        if id ~= nil and not findChicken(roster(), id) then return false, "TARGET ID MISSING" end
+        config.targetId = id
+        return true
+    end
+    function api.getTargetId() return config.targetId end
+    function api.getTarget() return targetSnapshot() end
+    function api.getInventory(search) return inventory(search) end
+    function api.refreshInventory() return inventory("") end
+    function api.getAvailableRarities() return availableRarities() end
+    function api.isRaritySelected(id) return config.selectedRarities[string.lower(tostring(id))] == true end
+    function api.setRaritySelected(id, enabled)
+        id = string.lower(tostring(id or "")); if id == "" then return false end
+        config.selectedRarities[id] = enabled == true or nil
+        return true
+    end
+    function api.clearRarities() config.selectedRarities = {} end
+    function api.getSelectedRarities()
+        local out = {}
+        for _, id in ipairs(availableRarities()) do if config.selectedRarities[id] then table.insert(out, id) end end
+        return out
+    end
+    function api.getLockCapacity() return lockCapacity() end
+    function api.getAvailableLocks()
+        return availableLocks(findChicken(roster(), config.targetId))
+    end
+    function api.isLockSelected(field) return config.selectedLocks[tostring(field)] == true end
+    function api.setLockSelected(field, enabled)
+        field = tostring(field or "")
+        if field == "" then return false, "INVALID LOCK" end
+        if enabled == true and not config.selectedLocks[field] then
+            local allowed = lockCapacity()
+            if selectedLockCount() >= allowed then return false, "LOCK CAPACITY REACHED" end
+            local found = false
+            for _, item in ipairs(availableLocks(findChicken(roster(), config.targetId))) do
+                if item.field == field and item.available == true then found = true break end
+            end
+            if not found then return false, "LOCK UNAVAILABLE" end
+            config.selectedLocks[field] = true
+        else
+            config.selectedLocks[field] = nil
+        end
+        return true
+    end
+    function api.clearLocks() config.selectedLocks = {} end
+    function api.getSelectedLocks()
+        local out = {}
+        for field, enabled in pairs(config.selectedLocks) do if enabled then table.insert(out, field) end end
+        table.sort(out)
+        return out
+    end
+    function api.getLockLabel(field) return lockLabel(field) end
+    function api.destroy()
+        config.enabled = false
+        State.toggles.autoTargetFuse = false
+        life.generation += 1
+        life.destroyed = true
+        setStatus("DISABLED")
+    end
+    State.diagnostics["TargetFuse.Feature"] = "READY"
+    return api
+end)()
+
 --------------------------------------------------------------------
 -- AUTO HATCH (resilient roster + Catalog display names)
 --------------------------------------------------------------------
@@ -5482,6 +5963,40 @@ do
             matchMode = nil,
         } })
 
+
+        ConfigManager.registerSection("targetFuse", function()
+            local feature = State._targetFuseFeature
+            if not feature then return { enabled = false, targetId = "", rarities = "", locks = "" } end
+            return {
+                enabled = feature.isEnabled and feature.isEnabled() or false,
+                targetId = tostring((feature.getTargetId and feature.getTargetId()) or ""),
+                rarities = table.concat((feature.getSelectedRarities and feature.getSelectedRarities()) or {}, "\n"),
+                locks = table.concat((feature.getSelectedLocks and feature.getSelectedLocks()) or {}, "\n"),
+            }
+        end, function(data, meta)
+            local feature = State._targetFuseFeature
+            if type(data) ~= "table" or not feature then return end
+            if feature.setEnabled then pcall(feature.setEnabled, false) end
+            State.toggles.autoTargetFuse = false
+            if feature.clearRarities then pcall(feature.clearRarities) end
+            if type(data.rarities) == "string" and feature.setRaritySelected then
+                for id in string.gmatch(data.rarities, "[^\n]+") do pcall(feature.setRaritySelected, id, true) end
+            end
+            if data.targetId ~= nil and feature.setTargetId then
+                local id = tostring(data.targetId)
+                if id ~= "" then pcall(feature.setTargetId, id) end
+            end
+            if feature.clearLocks then pcall(feature.clearLocks) end
+            if type(data.locks) == "string" and feature.setLockSelected then
+                for field in string.gmatch(data.locks, "[^\n]+") do pcall(feature.setLockSelected, field, true) end
+            end
+            local mayRestore = type(meta) == "table" and meta.restoredDestructiveAutomation == true
+            if mayRestore and data.enabled == true and feature.setEnabled then
+                State.toggles.autoTargetFuse = true
+                pcall(feature.setEnabled, true)
+            end
+        end, { defaults = { enabled = false, targetId = "", rarities = "", locks = "" } })
+
         ConfigManager.registerSection("performance", function()
             if not PerformanceManager then return {} end
             return {
@@ -6441,6 +6956,135 @@ State._makeSummaryFilterSelector = function(parent, order, title, getSummary, bu
     return rebuild, refreshSummary
 end
 
+
+State._makeSingleSearchSelector = function(parent, order, title, getSummary, getItems, getSelectedId, onSelect)
+    local wrap = Instance.new("Frame")
+    wrap.LayoutOrder = order
+    wrap.Size = UDim2.new(1, 0, 0, 0)
+    wrap.AutomaticSize = Enum.AutomaticSize.Y
+    wrap.BackgroundTransparency = 1
+    wrap.Parent = parent
+    local layout = Instance.new("UIListLayout")
+    layout.Padding = UDim.new(0, 5)
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.Parent = wrap
+
+    local header = Instance.new("TextButton")
+    header.LayoutOrder = 1
+    header.Size = UDim2.new(1, 0, 0, 54)
+    header.BackgroundColor3 = Theme.SurfaceElevated
+    header.BorderSizePixel = 0
+    header.Text = ""
+    header.AutoButtonColor = false
+    header.Parent = wrap
+    corner(header, 6)
+    local titleLabel = text(header, title, 12, Theme.TextPrimary, Enum.Font.GothamMedium)
+    titleLabel.Position = UDim2.fromOffset(12, 4)
+    titleLabel.Size = UDim2.new(1, -54, 0, 22)
+    local summaryLabel = text(header, "No chicken selected", 10, Theme.TextMuted, Enum.Font.Gotham)
+    summaryLabel.Position = UDim2.fromOffset(12, 27)
+    summaryLabel.Size = UDim2.new(1, -54, 0, 20)
+    local arrow = text(header, "›", 18, Theme.TextSecondary, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
+    arrow.Position = UDim2.new(1, -36, 0, 8)
+    arrow.Size = UDim2.fromOffset(26, 38)
+
+    local body = Instance.new("Frame")
+    body.LayoutOrder = 2
+    body.Size = UDim2.new(1, 0, 0, 0)
+    body.AutomaticSize = Enum.AutomaticSize.Y
+    body.BackgroundTransparency = 1
+    body.Visible = false
+    body.Parent = wrap
+    local bodyLayout = Instance.new("UIListLayout")
+    bodyLayout.Padding = UDim.new(0, 5)
+    bodyLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    bodyLayout.Parent = body
+
+    local search = Instance.new("TextBox")
+    search.LayoutOrder = 1
+    search.Size = UDim2.new(1, 0, 0, 32)
+    search.BackgroundColor3 = Theme.SurfaceElevated
+    search.BorderSizePixel = 0
+    search.ClearTextOnFocus = false
+    search.PlaceholderText = "Search Chicken..."
+    search.Text = ""
+    search.Font = Enum.Font.Gotham
+    search.TextSize = 11
+    search.TextColor3 = Theme.TextPrimary
+    search.PlaceholderColor3 = Theme.TextMuted
+    search.Parent = body
+    corner(search, 6)
+
+    local list = Instance.new("ScrollingFrame")
+    list.LayoutOrder = 2
+    list.Size = UDim2.new(1, 0, 0, 220)
+    list.BackgroundTransparency = 1
+    list.BorderSizePixel = 0
+    list.ScrollBarThickness = 3
+    list.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    list.CanvasSize = UDim2.new()
+    list.Parent = body
+    local listLayout = Instance.new("UIListLayout")
+    listLayout.Padding = UDim.new(0, 4)
+    listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    listLayout.Parent = list
+
+    local function refreshSummary()
+        local ok, value = pcall(getSummary)
+        summaryLabel.Text = ok and type(value) == "string" and value ~= "" and value or "No chicken selected"
+    end
+    local function rebuild()
+        for _, child in ipairs(list:GetChildren()) do if not child:IsA("UIListLayout") then child:Destroy() end end
+        local ok, items = pcall(getItems, search.Text)
+        items = ok and type(items) == "table" and items or {}
+        local selectedId = tostring((getSelectedId and getSelectedId()) or "")
+        for i, item in ipairs(items) do
+            local rowFrame = Instance.new("TextButton")
+            rowFrame.LayoutOrder = i
+            rowFrame.Size = UDim2.new(1, -4, 0, 52)
+            rowFrame.BackgroundColor3 = Theme.SurfaceElevated
+            rowFrame.BorderSizePixel = 0
+            rowFrame.Text = ""
+            rowFrame.AutoButtonColor = false
+            rowFrame.Parent = list
+            corner(rowFrame, 6)
+            local selected = tostring(item.id) == selectedId
+            local radio = text(rowFrame, selected and "●" or "○", 14, selected and Theme.Success or Theme.TextMuted, Enum.Font.GothamBold, Enum.TextXAlignment.Center)
+            radio.Position = UDim2.fromOffset(7, 0)
+            radio.Size = UDim2.fromOffset(24, 52)
+            local main = text(rowFrame, tostring(item.displayName or item.speciesName or item.id), 12, Theme.TextPrimary, Enum.Font.GothamMedium)
+            main.Position = UDim2.fromOffset(36, 4)
+            main.Size = UDim2.new(1, -46, 0, 22)
+            local details = "Lv." .. tostring(item.level or 1) .. " • " .. resolveRarityDisplayName(item.rarity or "unknown")
+            if item.nickname and item.nickname ~= "" and item.speciesName and item.speciesName ~= item.nickname then
+                details = tostring(item.speciesName) .. " • " .. details
+            end
+            if item.favorite then details ..= " • Favorite" end
+            if item.mutation ~= nil and item.mutation ~= "" then details ..= " • Mutated" end
+            if item.active then details ..= " • Active" end
+            local sub = text(rowFrame, details, 10, Theme.TextMuted, Enum.Font.Gotham)
+            sub.Position = UDim2.fromOffset(36, 26)
+            sub.Size = UDim2.new(1, -46, 0, 20)
+            rowFrame.MouseButton1Click:Connect(function()
+                pcall(onSelect, item.id)
+                refreshSummary()
+                rebuild()
+                markConfigDirty()
+            end)
+        end
+        refreshSummary()
+    end
+    search:GetPropertyChangedSignal("Text"):Connect(function() if body.Visible then rebuild() end end)
+    header.MouseButton1Click:Connect(function()
+        body.Visible = not body.Visible
+        arrow.Text = body.Visible and "⌄" or "›"
+        if body.Visible then rebuild() end
+        refreshSummary()
+    end)
+    refreshSummary()
+    return rebuild, refreshSummary
+end
+
 local function safeBuild(name, fn)
     local ok, err = pcall(fn)
     if not ok then
@@ -6991,6 +7635,7 @@ safeBuild("Auto Farm", function()
         local setAutoFuseVisual = nil
         local setSameChickenVisual = nil
         local setSameRarityVisual = nil
+        local setTargetFuseVisual = nil
 
         -- Do not inherit an old enabled state without an explicit V2 mode choice.
         if AutoFuseFeature.isEnabled and AutoFuseFeature.isEnabled() then
@@ -7028,6 +7673,11 @@ safeBuild("Auto Farm", function()
             end
 
             fuseRequirement.Text = ""
+            if v and State._targetFuseFeature and State._targetFuseFeature.isEnabled and State._targetFuseFeature.isEnabled() then
+                pcall(State._targetFuseFeature.setEnabled, false)
+                State.toggles.autoTargetFuse = false
+                if setTargetFuseVisual then setTargetFuseVisual(false, true) end
+            end
             State.toggles.autoFuse = v == true
             AutoFuseFeature.setAutoFuse(v == true)
             markConfigDirty()
@@ -7140,6 +7790,138 @@ safeBuild("Auto Farm", function()
                 )
             end
         end)
+
+        -- TARGET FUSE — separate from legacy Auto Fuse; exact single target only.
+        local targetFeature = State._targetFuseFeature
+        local _, targetCard = card(fuse, 3, "Target Fuse")
+        if targetFeature then
+            local targetRow = Instance.new("Frame")
+            targetRow.LayoutOrder = 1
+            targetRow.Size = UDim2.new(1, 0, 0, 34)
+            targetRow.BackgroundTransparency = 1
+            targetRow.Parent = targetCard
+            local targetLabel = text(targetRow, "Auto Target Fuse", 13, Theme.TextPrimary, Enum.Font.GothamMedium)
+            targetLabel.Size = UDim2.new(1, -50, 1, 0)
+            local targetTrack
+            targetTrack, setTargetFuseVisual = makeSwitch(targetRow, false, function(v)
+                if v then
+                    State.toggles.autoFuse = false
+                    pcall(AutoFuseFeature.setAutoFuse, false)
+                    if setAutoFuseVisual then setAutoFuseVisual(false, true) end
+                end
+                State.toggles.autoTargetFuse = v == true
+                pcall(targetFeature.setEnabled, v == true)
+                markConfigDirty()
+            end)
+            targetTrack.Position = UDim2.new(1, -40, 0.5, -11)
+
+            local lockRebuild, lockSummaryRefresh
+            local targetRebuild, targetSummaryRefresh = State._makeSingleSearchSelector(
+                targetCard, 2, "Target Chicken",
+                function()
+                    local t = targetFeature.getTarget()
+                    if not t then return "No chicken selected" end
+                    local primary = tostring(t.displayName or t.speciesName or t.id)
+                    local details = "Lv." .. tostring(t.level or 1) .. " • " .. resolveRarityDisplayName(t.rarity or "unknown")
+                    if t.nickname and t.nickname ~= "" and t.speciesName and t.speciesName ~= t.nickname then
+                        return primary .. " — " .. tostring(t.speciesName) .. " • " .. details
+                    end
+                    return primary .. " — " .. details
+                end,
+                function(search) return targetFeature.getInventory(search) end,
+                function() return targetFeature.getTargetId() end,
+                function(id)
+                    targetFeature.setTargetId(id)
+                    if lockRebuild then lockRebuild() end
+                    if lockSummaryRefresh then lockSummaryRefresh() end
+                end
+            )
+
+            State._makeSummaryFilterSelector(targetCard, 3, "Material Rarities", function()
+                local selected = targetFeature.getSelectedRarities()
+                local labels = {}
+                for _, rarityId in ipairs(selected) do table.insert(labels, resolveRarityDisplayName(rarityId)) end
+                if #labels == 0 then return "None selected" end
+                if #labels <= 3 then return table.concat(labels, ", ") end
+                return tostring(#labels) .. " selected"
+            end, function(host, refreshSummary)
+                for i, rarityId in ipairs(targetFeature.getAvailableRarities()) do
+                    makeFilterRow(host, i, resolveRarityDisplayName(rarityId), nil, targetFeature.isRaritySelected(rarityId), function(button)
+                        local now = not targetFeature.isRaritySelected(rarityId)
+                        targetFeature.setRaritySelected(rarityId, now)
+                        button.Text = now and "✓" or ""
+                        refreshSummary()
+                        markConfigDirty()
+                    end)
+                end
+            end)
+
+            lockRebuild, lockSummaryRefresh = State._makeSummaryFilterSelector(targetCard, 4, "Fusion Locks", function()
+                local selected = targetFeature.getSelectedLocks()
+                local labels = {}
+                for _, field in ipairs(selected) do table.insert(labels, targetFeature.getLockLabel(field)) end
+                local allowed = targetFeature.getLockCapacity()
+                if #labels == 0 then return "None selected • 0/" .. tostring(allowed) end
+                local prefix = #labels <= 2 and table.concat(labels, ", ") or tostring(#labels) .. " selected"
+                return prefix .. " • " .. tostring(#labels) .. "/" .. tostring(allowed)
+            end, function(host, refreshSummary)
+                local items = targetFeature.getAvailableLocks()
+                for i, item in ipairs(items) do
+                    local suffix = item.available and nil or "Unavailable on target"
+                    makeFilterRow(host, i, item.label, suffix, targetFeature.isLockSelected(item.field), function(button)
+                        if not item.available and not targetFeature.isLockSelected(item.field) then return end
+                        local now = not targetFeature.isLockSelected(item.field)
+                        local ok = targetFeature.setLockSelected(item.field, now)
+                        if ok then
+                            button.Text = now and "✓" or ""
+                            refreshSummary()
+                            markConfigDirty()
+                        end
+                    end)
+                end
+            end)
+
+            local capacityLabel = row(targetCard, 5, "Lock Capacity")
+            local statusLabel = row(targetCard, 6, "Status")
+            setText(row(targetCard, 7, "Safety"), "Target / Favorite / Mutated materials protected")
+
+            local refreshButton = Instance.new("TextButton")
+            refreshButton.LayoutOrder = 8
+            refreshButton.Size = UDim2.new(1, 0, 0, 30)
+            refreshButton.BackgroundColor3 = Theme.SurfaceElevated
+            refreshButton.BorderSizePixel = 0
+            refreshButton.Text = "Refresh Inventory"
+            refreshButton.Font = Enum.Font.GothamMedium
+            refreshButton.TextSize = 11
+            refreshButton.TextColor3 = Theme.TextPrimary
+            refreshButton.AutoButtonColor = false
+            refreshButton.Parent = targetCard
+            corner(refreshButton, 6)
+            refreshButton.MouseButton1Click:Connect(function()
+                targetFeature.refreshInventory()
+                targetRebuild()
+                targetSummaryRefresh()
+                lockRebuild()
+                lockSummaryRefresh()
+            end)
+
+            task.spawn(function()
+                while not State.closed and targetCard.Parent do
+                    local allowed = targetFeature.getLockCapacity()
+                    local selected = #targetFeature.getSelectedLocks()
+                    setText(capacityLabel, tostring(selected) .. " / " .. tostring(allowed))
+                    setText(statusLabel, targetFeature.getStatus())
+                    if targetSummaryRefresh then pcall(targetSummaryRefresh) end
+                    if lockSummaryRefresh then pcall(lockSummaryRefresh) end
+                    if setTargetFuseVisual and targetFeature.isEnabled then
+                        setTargetFuseVisual(targetFeature.isEnabled(), true)
+                    end
+                    task.wait(0.5)
+                end
+            end)
+        else
+            setText(row(targetCard, 1, "Status"), State.diagnostics["TargetFuse.Feature"] or "Unavailable")
+        end
     else
         setText(row(fuseCard, 1, "Status"), "Unavailable")
     end

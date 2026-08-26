@@ -1,5 +1,5 @@
 --[[
-    UNO HUB
+    UNO HUB1
 ]]
 
 
@@ -7120,37 +7120,37 @@ local LocalPlayer = Players.LocalPlayer
 
 local function safeRequire(instance)
 
-    if not instance then return nil end
+    if not instance then return nil end
 
-    local ok, value = pcall(require, instance)
+    local ok, value = pcall(require, instance)
 
-    return ok and value or nil
+    return ok and value or nil
 
 end
 
 local function findPath(root, path)
 
-    local current = root
+    local current = root
 
-    for _, name in ipairs(path) do
+    for _, name in ipairs(path) do
 
-        if not current then return nil end
+        if not current then return nil end
 
-        current = current:FindFirstChild(name)
+        current = current:FindFirstChild(name)
 
-    end
+    end
 
-    return current
+    return current
 
 end
 
 local function readAtom(atom)
 
-    if type(atom) ~= "function" then return nil end
+    if type(atom) ~= "function" then return nil end
 
-    local ok, value = pcall(atom)
+    local ok, value = pcall(atom)
 
-    return ok and value or nil
+    return ok and value or nil
 
 end
 
@@ -7170,589 +7170,589 @@ local ArenaFormat = safeRequire(findPath(LocalPlayer, { "PlayerScripts", "UI", "
 
 local SUFFIXES = {
 
-    "", "K", "M", "B", "T", "Qa", "Qi", "Sx", "Sp", "Oc", "No", "Dc",
+    "", "K", "M", "B", "T", "Qa", "Qi", "Sx", "Sp", "Oc", "No", "Dc",
 
-    "Ud", "Dd", "Td", "Qad", "Qid", "Sxd", "Spd", "Ocd", "Nod", "Vg",
+    "Ud", "Dd", "Td", "Qad", "Qid", "Sxd", "Spd", "Ocd", "Nod", "Vg",
 
 }
 
 local function compactNumber(value)
 
-    local number = tonumber(value)
+    local number = tonumber(value)
 
-    if not number then return nil end
+    if not number then return nil end
 
-    if number == 0 then return "0" end
+    if number == 0 then return "0" end
 
-    local negative = number < 0
+    local negative = number < 0
 
-    number = math.abs(number)
+    number = math.abs(number)
 
-    local index = 1
+    local index = 1
 
-    while number >= 1000 and index < #SUFFIXES do
+    while number >= 1000 and index < #SUFFIXES do
 
-        number /= 1000
+        number /= 1000
 
-        index += 1
+        index += 1
 
-    end
+    end
 
-    local text
+    local text
 
-    if index == 1 then
+    if index == 1 then
 
-        text = string.format("%.0f", number)
+        text = string.format("%.0f", number)
 
-    elseif number >= 100 then
+    elseif number >= 100 then
 
-        text = string.format("%.0f", number)
+        text = string.format("%.0f", number)
 
-    elseif number >= 10 then
+    elseif number >= 10 then
 
-        text = string.format("%.1f", number)
+        text = string.format("%.1f", number)
 
-    else
+    else
 
-        text = string.format("%.1f", number)
+        text = string.format("%.1f", number)
 
-    end
+    end
 
-    text = text:gsub("%.0$", "")
+    text = text:gsub("%.0$", "")
 
-    return (negative and "-" or "") .. text .. SUFFIXES[index]
+    return (negative and "-" or "") .. text .. SUFFIXES[index]
 
 end
 
 local function numericValue(value)
 
-    if type(value) == "number" then return value end
+    if type(value) == "number" then return value end
 
-    if type(value) == "table" and type(value.toNumber) == "function" then
+    if type(value) == "table" and type(value.toNumber) == "function" then
 
-        local ok, number = pcall(value.toNumber, value)
+        local ok, number = pcall(value.toNumber, value)
 
-        if ok and type(number) == "number" then return number end
+        if ok and type(number) == "number" then return number end
 
-    end
+    end
 
-    return tonumber(value)
+    return tonumber(value)
 
 end
 
 local function getActiveSeasonKey()
 
-    if not RankData or type(RankData.GetSeasonKey) ~= "function" then
+    if not RankData or type(RankData.GetSeasonKey) ~= "function" then
 
-        return nil, "RankData.GetSeasonKey unavailable"
+        return nil, "RankData.GetSeasonKey unavailable"
 
-    end
+    end
 
-    local ok, key = pcall(RankData.GetSeasonKey)
+    local ok, key = pcall(RankData.GetSeasonKey)
 
-    if not ok or type(key) ~= "string" or key == "" then
+    if not ok or type(key) ~= "string" or key == "" then
 
-        return nil, tostring(key)
+        return nil, tostring(key)
 
-    end
+    end
 
-    return key, nil
+    return key, nil
 
 end
 
 local function getAvailableSeasonKeys(ranked)
 
-    local keys = {}
+    local keys = {}
 
-    if type(ranked) ~= "table" or type(ranked.seasons) ~= "table" then return keys end
+    if type(ranked) ~= "table" or type(ranked.seasons) ~= "table" then return keys end
 
-    for key in pairs(ranked.seasons) do keys[#keys + 1] = tostring(key) end
+    for key in pairs(ranked.seasons) do keys[#keys + 1] = tostring(key) end
 
-    table.sort(keys)
+    table.sort(keys)
 
-    return keys
+    return keys
 
 end
 
 local function getSeasonRecord(ranked, seasonKey)
 
-    if not seasonKey or type(ranked) ~= "table" or type(ranked.seasons) ~= "table" then return nil end
+    if not seasonKey or type(ranked) ~= "table" or type(ranked.seasons) ~= "table" then return nil end
 
-    local record = ranked.seasons[seasonKey]
+    local record = ranked.seasons[seasonKey]
 
-    return type(record) == "table" and record or nil
+    return type(record) == "table" and record or nil
 
 end
 
 local function resolveRankObject(currentRankName, trophies, topPercent)
 
-    if type(currentRankName) == "string" and currentRankName ~= "" and RankedIds and ArenaView then
+    if type(currentRankName) == "string" and currentRankName ~= "" and RankedIds and ArenaView then
 
-        local okId, rankId = pcall(RankedIds.fromName, currentRankName)
+        local okId, rankId = pcall(RankedIds.fromName, currentRankName)
 
-        if okId and rankId and type(ArenaView.rankById) == "function" then
+        if okId and rankId and type(ArenaView.rankById) == "function" then
 
-            local okRank, rank = pcall(ArenaView.rankById, rankId)
+            local okRank, rank = pcall(ArenaView.rankById, rankId)
 
-            if okRank and type(rank) == "table" then return rank end
+            if okRank and type(rank) == "table" then return rank end
 
-        end
+        end
 
-    end
+    end
 
-    if ArenaView and type(ArenaView.rankFor) == "function" and type(trophies) == "number" then
+    if ArenaView and type(ArenaView.rankFor) == "function" and type(trophies) == "number" then
 
-        local okRank, rank = pcall(ArenaView.rankFor, trophies, topPercent)
+        local okRank, rank = pcall(ArenaView.rankFor, trophies, topPercent)
 
-        if okRank and type(rank) == "table" then return rank end
+        if okRank and type(rank) == "table" then return rank end
 
-    end
+    end
 
-    return nil
+    return nil
 
 end
 
 local function resolveNextRank(currentRank, trophies, topPercent)
 
-    if currentRank and ArenaView and type(ArenaView.nextRank) == "function" then
+    if currentRank and ArenaView and type(ArenaView.nextRank) == "function" then
 
-        local okNext, nextRank = pcall(ArenaView.nextRank, currentRank)
+        local okNext, nextRank = pcall(ArenaView.nextRank, currentRank)
 
-        if okNext and type(nextRank) == "table" then return nextRank end
+        if okNext and type(nextRank) == "table" then return nextRank end
 
-    end
+    end
 
-    local rank = resolveRankObject(nil, trophies, topPercent)
+    local rank = resolveRankObject(nil, trophies, topPercent)
 
-    if rank and ArenaView and type(ArenaView.nextRank) == "function" then
+    if rank and ArenaView and type(ArenaView.nextRank) == "function" then
 
-        local okNext, nextRank = pcall(ArenaView.nextRank, rank)
+        local okNext, nextRank = pcall(ArenaView.nextRank, rank)
 
-        if okNext and type(nextRank) == "table" then return nextRank end
+        if okNext and type(nextRank) == "table" then return nextRank end
 
-    end
+    end
 
-    return nil
+    return nil
 
 end
 
 local function progressText(trophies, threshold)
 
-    if type(trophies) ~= "number" then return nil end
+    if type(trophies) ~= "number" then return nil end
 
-    if type(threshold) ~= "number" then return tostring(math.floor(trophies)) end
+    if type(threshold) ~= "number" then return tostring(math.floor(trophies)) end
 
-    if ArenaFormat and type(ArenaFormat.progress) == "function" then
+    if ArenaFormat and type(ArenaFormat.progress) == "function" then
 
-        local ok, text = pcall(ArenaFormat.progress, trophies, threshold)
+        local ok, text = pcall(ArenaFormat.progress, trophies, threshold)
 
-        if ok and type(text) == "string" then return text end
+        if ok and type(text) == "string" then return text end
 
-    end
+    end
 
-    return string.format("%d / %d", trophies, threshold)
+    return string.format("%d / %d", trophies, threshold)
 
 end
 
 local function getChicken(roster)
 
-    local primary = readAtom(DataController and DataController.chicken)
+    local primary = readAtom(DataController and DataController.chicken)
 
-    if type(primary) == "table" then return primary, "DataController.chicken()" end
+    if type(primary) == "table" then return primary, "DataController.chicken()" end
 
-    if type(roster) == "table" and type(roster.chickens) == "table" then
+    if type(roster) == "table" and type(roster.chickens) == "table" then
 
-        for _, chicken in ipairs(roster.chickens) do
+        for _, chicken in ipairs(roster.chickens) do
 
-            if type(chicken) == "table" and chicken.id == roster.activeId then
+            if type(chicken) == "table" and chicken.id == roster.activeId then
 
-                return chicken, "DataController.roster().activeId + .chickens"
+                return chicken, "DataController.roster().activeId + .chickens"
 
-            end
+            end
 
-        end
+        end
 
-    end
+    end
 
-    return nil, nil
+    return nil, nil
 
 end
 
 local function chickenName(chicken)
 
-    if type(chicken) ~= "table" or type(Catalog) ~= "table" or type(Catalog.chickenTypes) ~= "table" then return nil end
+    if type(chicken) ~= "table" or type(Catalog) ~= "table" or type(Catalog.chickenTypes) ~= "table" then return nil end
 
-    local entry = Catalog.chickenTypes[chicken.typeId]
+    local entry = Catalog.chickenTypes[chicken.typeId]
 
-    return type(entry) == "table" and entry.name or nil
+    return type(entry) == "table" and entry.name or nil
 
 end
 
 local function readEggs(roster)
 
-    local result = {}
+    local result = {}
 
-    local eggs = type(roster) == "table" and roster.eggs or nil
+    local eggs = type(roster) == "table" and roster.eggs or nil
 
-    local eggCatalog = type(Catalog) == "table" and Catalog.eggs or nil
+    local eggCatalog = type(Catalog) == "table" and Catalog.eggs or nil
 
-    if type(eggs) ~= "table" then return result end
+    if type(eggs) ~= "table" then return result end
 
-    for id, rawCount in pairs(eggs) do
+    for id, rawCount in pairs(eggs) do
 
-        local count = tonumber(rawCount)
+        local count = tonumber(rawCount)
 
-        if count and count > 0 then
+        if count and count > 0 then
 
-            local entry = type(eggCatalog) == "table" and eggCatalog[id] or nil
+            local entry = type(eggCatalog) == "table" and eggCatalog[id] or nil
 
-            result[#result + 1] = {
+            result[#result + 1] = {
 
-                id = tostring(id),
+                id = tostring(id),
 
-                name = type(entry) == "table" and entry.name or nil,
+                name = type(entry) == "table" and entry.name or nil,
 
-                count = count,
+                count = count,
 
-            }
+            }
 
-        end
+        end
 
-    end
+    end
 
-    table.sort(result, function(a, b)
+    table.sort(result, function(a, b)
 
-        local left = tostring(a.name or a.id):lower()
+        local left = tostring(a.name or a.id):lower()
 
-        local right = tostring(b.name or b.id):lower()
+        local right = tostring(b.name or b.id):lower()
 
-        if left == right then return a.id < b.id end
+        if left == right then return a.id < b.id end
 
-        return left < right
+        return left < right
 
-    end)
+    end)
 
-    return result
+    return result
 
 end
 
 local function readAvatar()
 
-    if not LocalPlayer then return nil end
+    if not LocalPlayer then return nil end
 
-    local ok, imageUrl, isReady = pcall(
+    local ok, imageUrl, isReady = pcall(
 
-        Players.GetUserThumbnailAsync,
+        Players.GetUserThumbnailAsync,
 
-        Players,
+        Players,
 
-        LocalPlayer.UserId,
+        LocalPlayer.UserId,
 
-        Enum.ThumbnailType.AvatarThumbnail,
+        Enum.ThumbnailType.AvatarThumbnail,
 
-        Enum.ThumbnailSize.Size420x420
+        Enum.ThumbnailSize.Size420x420
 
-    )
+    )
 
-    if not ok or type(imageUrl) ~= "string" or imageUrl == "" then return nil end
+    if not ok or type(imageUrl) ~= "string" or imageUrl == "" then return nil end
 
-    return {
+    return {
 
-        imageUrl = imageUrl,
+        imageUrl = imageUrl,
 
-        isReady = isReady == true,
+        isReady = isReady == true,
 
-        thumbnailType = "AvatarThumbnail",
+        thumbnailType = "AvatarThumbnail",
 
-    }
+    }
 
 end
 
 local function collectSnapshot()
 
-    *-- Mutable atoms are intentionally read here, not captured at module load.*
+    *-- Mutable atoms are intentionally read here, not captured at module load.*
 
-    local moneyObject = readAtom(DataController and DataController.money)
+    local moneyObject = readAtom(DataController and DataController.money)
 
-    local rebirthObject = readAtom(DataController and DataController.rebirth)
+    local rebirthObject = readAtom(DataController and DataController.rebirth)
 
-    local roster = readAtom(DataController and DataController.roster)
+    local roster = readAtom(DataController and DataController.roster)
 
-    local ranked = readAtom(DataController and DataController.ranked)
+    local ranked = readAtom(DataController and DataController.ranked)
 
-    local arenaView = readAtom(ArenaState and ArenaState.view)
+    local arenaView = readAtom(ArenaState and ArenaState.view)
 
-    local chicken, chickenSource = getChicken(roster)
+    local chicken, chickenSource = getChicken(roster)
 
-    local activeSeasonKey, seasonError = getActiveSeasonKey()
+    local activeSeasonKey, seasonError = getActiveSeasonKey()
 
-    local season = getSeasonRecord(ranked, activeSeasonKey)
+    local season = getSeasonRecord(ranked, activeSeasonKey)
 
-    local trophies = season and numericValue(season.trophies) or nil
+    local trophies = season and numericValue(season.trophies) or nil
 
-    local topPercent = type(arenaView) == "table" and numericValue(arenaView.topPercent) or nil
+    local topPercent = type(arenaView) == "table" and numericValue(arenaView.topPercent) or nil
 
-    local currentRankName = season and season.currentRank or nil
+    local currentRankName = season and season.currentRank or nil
 
-    local currentRank = resolveRankObject(currentRankName, trophies, topPercent)
+    local currentRank = resolveRankObject(currentRankName, trophies, topPercent)
 
-    local nextRank = resolveNextRank(currentRank, trophies, topPercent)
+    local nextRank = resolveNextRank(currentRank, trophies, topPercent)
 
-    local nextThreshold = nextRank and numericValue(nextRank.trophies) or nil
+    local nextThreshold = nextRank and numericValue(nextRank.trophies) or nil
 
-    local moneyRaw = numericValue(moneyObject)
+    local moneyRaw = numericValue(moneyObject)
 
-    local rebirth = type(rebirthObject) == "table" and numericValue(rebirthObject.count) or nil
+    local rebirth = type(rebirthObject) == "table" and numericValue(rebirthObject.count) or nil
 
-    local avatar = readAvatar()
+    local avatar = readAvatar()
 
-    local arenaStatus = "ACTIVE_SEASON_SELECTOR_UNRESOLVED"
+    local arenaStatus = "ACTIVE_SEASON_SELECTOR_UNRESOLVED"
 
-    if activeSeasonKey then
+    if activeSeasonKey then
 
-        arenaStatus = season and "SOURCE_BACKED_NOT_RUNTIME_VALIDATED" or "ARENA_DATA_NOT_INITIALIZED"
+        arenaStatus = season and "SOURCE_BACKED_NOT_RUNTIME_VALIDATED" or "ARENA_DATA_NOT_INITIALIZED"
 
-    end
+    end
 
-    local snapshot = {
+    local snapshot = {
 
-        account = {
+        account = {
 
-            username = LocalPlayer and LocalPlayer.Name or nil,
+            username = LocalPlayer and LocalPlayer.Name or nil,
 
-            userId = LocalPlayer and LocalPlayer.UserId or nil,
+            userId = LocalPlayer and LocalPlayer.UserId or nil,
 
-            cashRaw = moneyRaw,
+            cashRaw = moneyRaw,
 
-            cashFormatted = compactNumber(moneyRaw),
+            cashFormatted = compactNumber(moneyRaw),
 
-            rebirth = rebirth,
+            rebirth = rebirth,
 
-            rebirthFormatted = compactNumber(rebirth),
+            rebirthFormatted = compactNumber(rebirth),
 
-        },
+        },
 
-        chicken = {
+        chicken = {
 
-            id = chicken and chicken.id or nil,
+            id = chicken and chicken.id or nil,
 
-            typeId = chicken and chicken.typeId or nil,
+            typeId = chicken and chicken.typeId or nil,
 
-            name = chickenName(chicken),
+            name = chickenName(chicken),
 
-            level = chicken and numericValue(chicken.level) or nil,
+            level = chicken and numericValue(chicken.level) or nil,
 
-        },
+        },
 
-        eggs = readEggs(roster),
+        eggs = readEggs(roster),
 
-        arena = {
+        arena = {
 
-            seasonId = activeSeasonKey,
+            seasonId = activeSeasonKey,
 
-            trophies = trophies,
+            trophies = trophies,
 
-            currentRank = type(currentRankName) == "string" and currentRankName or (currentRank and currentRank.name or nil),
+            currentRank = type(currentRankName) == "string" and currentRankName or (currentRank and currentRank.name or nil),
 
-            bestRank = season and season.bestRank or nil,
+            bestRank = season and season.bestRank or nil,
 
-            seasonWins = season and numericValue(season.numWins or season.wins) or nil,
+            seasonWins = season and numericValue(season.numWins or season.wins) or nil,
 
-            nextRank = nextRank and nextRank.name or nil,
+            nextRank = nextRank and nextRank.name or nil,
 
-            nextThreshold = nextThreshold,
+            nextThreshold = nextThreshold,
 
-            progressText = progressText(trophies, nextThreshold),
+            progressText = progressText(trophies, nextThreshold),
 
-        },
+        },
 
-        avatar = avatar,
+        avatar = avatar,
 
-        meta = {
+        meta = {
 
-            collectedAt = os.time(),
+            collectedAt = os.time(),
 
-            readOnly = true,
+            readOnly = true,
 
-            webhookSent = false,
+            webhookSent = false,
 
-            gameplayRemotesCalled = false,
+            gameplayRemotesCalled = false,
 
-        },
+        },
 
-    }
+    }
 
-    local sources = {
+    local sources = {
 
-        account = "SOURCE_BACKED_RUNTIME_VALIDATED_BY_PRIOR_DIAGNOSTICS",
+        account = "SOURCE_BACKED_RUNTIME_VALIDATED_BY_PRIOR_DIAGNOSTICS",
 
-        chicken = chickenSource and "SOURCE_BACKED_RUNTIME_VALIDATED_BY_PRIOR_DIAGNOSTICS" or "UNRESOLVED",
+        chicken = chickenSource and "SOURCE_BACKED_RUNTIME_VALIDATED_BY_PRIOR_DIAGNOSTICS" or "UNRESOLVED",
 
-        eggs = type(roster) == "table" and "SOURCE_BACKED_RUNTIME_VALIDATED_BY_PRIOR_DIAGNOSTICS" or "UNRESOLVED",
+        eggs = type(roster) == "table" and "SOURCE_BACKED_RUNTIME_VALIDATED_BY_PRIOR_DIAGNOSTICS" or "UNRESOLVED",
 
-        avatar = avatar and "SOURCE_BACKED_RUNTIME_VALIDATED_BY_PRIOR_DIAGNOSTICS" or "UNRESOLVED",
+        avatar = avatar and "SOURCE_BACKED_RUNTIME_VALIDATED_BY_PRIOR_DIAGNOSTICS" or "UNRESOLVED",
 
-        arena = arenaStatus,
+        arena = arenaStatus,
 
-        arenaSeasonSelector = activeSeasonKey and "SOURCE_BACKED" or "ACTIVE_SEASON_SELECTOR_UNRESOLVED",
+        arenaSeasonSelector = activeSeasonKey and "SOURCE_BACKED" or "ACTIVE_SEASON_SELECTOR_UNRESOLVED",
 
-    }
+    }
 
-    return snapshot, {
+    return snapshot, {
 
-        sources = sources,
+        sources = sources,
 
-        activeSeasonError = seasonError,
+        activeSeasonError = seasonError,
 
-        availableSeasonKeys = getAvailableSeasonKeys(ranked),
+        availableSeasonKeys = getAvailableSeasonKeys(ranked),
 
-        ranked = ranked,
+        ranked = ranked,
 
-        arenaView = arenaView,
+        arenaView = arenaView,
 
-        currentRankObject = currentRank,
+        currentRankObject = currentRank,
 
-        nextRankObject = nextRank,
+        nextRankObject = nextRank,
 
-        readOnly = true,
+        readOnly = true,
 
-        webhookSent = false,
+        webhookSent = false,
 
-        gameplayRemotesCalled = false,
+        gameplayRemotesCalled = false,
 
-        httpRequestsMade = false,
+        httpRequestsMade = false,
 
-    }
+    }
 
 end
 
 local function getSnapshot()
 
-    local snapshot = collectSnapshot()
+    local snapshot = collectSnapshot()
 
-    return snapshot
+    return snapshot
 
 end
 
 local function printEggs(eggs)
 
-    if #eggs == 0 then
+    if #eggs == 0 then
 
-        print("(none)")
+        print("(none)")
 
-        return
+        return
 
-    end
+    end
 
-    for _, egg in ipairs(eggs) do
+    for _, egg in ipairs(eggs) do
 
-        print(tostring(egg.name or egg.id) .. " x" .. tostring(egg.count))
+        print(tostring(egg.name or egg.id) .. " x" .. tostring(egg.count))
 
-    end
+    end
 
 end
 
 local function printSnapshot()
 
-    local snapshot, diagnostics = collectSnapshot()
+    local snapshot, diagnostics = collectSnapshot()
 
-    print("========== UNO WEBHOOK SNAPSHOT V2 ==========")
+    print("========== UNO WEBHOOK SNAPSHOT V2 ==========")
 
-    print("ACCOUNT")
+    print("ACCOUNT")
 
-    print("Username: " .. tostring(snapshot.account.username))
+    print("Username: " .. tostring(snapshot.account.username))
 
-    print("UserId: " .. tostring(snapshot.account.userId))
+    print("UserId: " .. tostring(snapshot.account.userId))
 
-    print("Cash Raw: " .. tostring(snapshot.account.cashRaw))
+    print("Cash Raw: " .. tostring(snapshot.account.cashRaw))
 
-    print("Cash Display: " .. tostring(snapshot.account.cashFormatted))
+    print("Cash Display: " .. tostring(snapshot.account.cashFormatted))
 
-    print("Rebirth: " .. tostring(snapshot.account.rebirth))
+    print("Rebirth: " .. tostring(snapshot.account.rebirth))
 
-    print("CHICKEN")
+    print("CHICKEN")
 
-    print("Name: " .. tostring(snapshot.chicken.name))
+    print("Name: " .. tostring(snapshot.chicken.name))
 
-    print("ID: " .. tostring(snapshot.chicken.id))
+    print("ID: " .. tostring(snapshot.chicken.id))
 
-    print("TypeId: " .. tostring(snapshot.chicken.typeId))
+    print("TypeId: " .. tostring(snapshot.chicken.typeId))
 
-    print("Level: " .. tostring(snapshot.chicken.level))
+    print("Level: " .. tostring(snapshot.chicken.level))
 
-    print("EGG INVENTORY")
+    print("EGG INVENTORY")
 
-    printEggs(snapshot.eggs)
+    printEggs(snapshot.eggs)
 
-    print("ARENA")
+    print("ARENA")
 
-    print("Season: " .. tostring(snapshot.arena.seasonId))
+    print("Season: " .. tostring(snapshot.arena.seasonId))
 
-    print("Current Rank: " .. tostring(snapshot.arena.currentRank))
+    print("Current Rank: " .. tostring(snapshot.arena.currentRank))
 
-    print("Trophies: " .. tostring(snapshot.arena.trophies))
+    print("Trophies: " .. tostring(snapshot.arena.trophies))
 
-    print("Progress: " .. tostring(snapshot.arena.progressText))
+    print("Progress: " .. tostring(snapshot.arena.progressText))
 
-    print("Next Rank: " .. tostring(snapshot.arena.nextRank))
+    print("Next Rank: " .. tostring(snapshot.arena.nextRank))
 
-    print("Next Threshold: " .. tostring(snapshot.arena.nextThreshold))
+    print("Next Threshold: " .. tostring(snapshot.arena.nextThreshold))
 
-    print("Season Wins: " .. tostring(snapshot.arena.seasonWins))
+    print("Season Wins: " .. tostring(snapshot.arena.seasonWins))
 
-    print("Best Rank: " .. tostring(snapshot.arena.bestRank))
+    print("Best Rank: " .. tostring(snapshot.arena.bestRank))
 
-    print("AVATAR")
+    print("AVATAR")
 
-    print("Ready: " .. tostring(snapshot.avatar and snapshot.avatar.isReady or false))
+    print("Ready: " .. tostring(snapshot.avatar and snapshot.avatar.isReady or false))
 
-    print("URL: " .. tostring(snapshot.avatar and snapshot.avatar.imageUrl or nil))
+    print("URL: " .. tostring(snapshot.avatar and snapshot.avatar.imageUrl or nil))
 
-    print("VALIDATION")
+    print("VALIDATION")
 
-    print("Account: " .. tostring(diagnostics.sources.account))
+    print("Account: " .. tostring(diagnostics.sources.account))
 
-    print("Chicken: " .. tostring(diagnostics.sources.chicken))
+    print("Chicken: " .. tostring(diagnostics.sources.chicken))
 
-    print("Eggs: " .. tostring(diagnostics.sources.eggs))
+    print("Eggs: " .. tostring(diagnostics.sources.eggs))
 
-    print("Arena: " .. tostring(diagnostics.sources.arena))
+    print("Arena: " .. tostring(diagnostics.sources.arena))
 
-    print("Arena season selector: " .. tostring(diagnostics.sources.arenaSeasonSelector))
+    print("Arena season selector: " .. tostring(diagnostics.sources.arenaSeasonSelector))
 
-    print("Available season keys: " .. table.concat(diagnostics.availableSeasonKeys, ", "))
+    print("Available season keys: " .. table.concat(diagnostics.availableSeasonKeys, ", "))
 
-    if diagnostics.activeSeasonError then print("Season selector error: " .. tostring(diagnostics.activeSeasonError)) end
+    if diagnostics.activeSeasonError then print("Season selector error: " .. tostring(diagnostics.activeSeasonError)) end
 
-    print("Read only: " .. tostring(snapshot.meta.readOnly))
+    print("Read only: " .. tostring(snapshot.meta.readOnly))
 
-    print("Webhook sent: " .. tostring(snapshot.meta.webhookSent))
+    print("Webhook sent: " .. tostring(snapshot.meta.webhookSent))
 
-    print("Gameplay remotes called: " .. tostring(snapshot.meta.gameplayRemotesCalled))
+    print("Gameplay remotes called: " .. tostring(snapshot.meta.gameplayRemotesCalled))
 
-    print("=============================================")
+    print("=============================================")
 
-    return snapshot
+    return snapshot
 
 end
 
 local function debugSources()
 
-    local _, diagnostics = collectSnapshot()
+    local _, diagnostics = collectSnapshot()
 
-    return diagnostics
+    return diagnostics
 
 end
 
 local API = {
 
-    getSnapshot = getSnapshot,
+    getSnapshot = getSnapshot,
 
-    printSnapshot = printSnapshot,
+    printSnapshot = printSnapshot,
 
-    debugSources = debugSources,
+    debugSources = debugSources,
 
-    compactNumber = compactNumber,
+    compactNumber = compactNumber,
 
 }
 
@@ -7784,29 +7784,29 @@ local env = (getgenv and getgenv()) or _G
 
 local state = {
 
-    webhookUrl = nil,
+    webhookUrl = nil,
 
-    include = {
+    include = {
 
-        accountInfo = true,
+        accountInfo = true,
 
-        chickenInfo = true,
+        chickenInfo = true,
 
-        eggInventory = true,
+        eggInventory = true,
 
-        arenaStats = true,
+        arenaStats = true,
 
-        avatar = true,
+        avatar = true,
 
-    },
+    },
 
-    inFlight = false,
+    inFlight = false,
 
-    destroyed = false,
+    destroyed = false,
 
-    lastResult = nil,
+    lastResult = nil,
 
-    lastPreview = nil,
+    lastPreview = nil,
 
 }
 
@@ -7830,829 +7830,829 @@ local MAX_TOTAL_CHARS = 6000
 
 local function safeToString(value, fallback)
 
-    if value == nil then return fallback or "—" end
+    if value == nil then return fallback or "—" end
 
-    local text = tostring(value)
+    local text = tostring(value)
 
-    return text ~= "" and text or (fallback or "—")
+    return text ~= "" and text or (fallback or "—")
 
 end
 
 local function trim(text)
 
-    return tostring(text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    return tostring(text or ""):gsub("^%s+", ""):gsub("%s+$", "")
 
 end
 
 local function compact(value)
 
-    local number = tonumber(value)
+    local number = tonumber(value)
 
-    if not number then return safeToString(value) end
+    if not number then return safeToString(value) end
 
-    if number == 0 then return "0" end
+    if number == 0 then return "0" end
 
-    local negative = number < 0
+    local negative = number < 0
 
-    number = math.abs(number)
+    number = math.abs(number)
 
-    local suffixes = { "", "K", "M", "B", "T", "Qa", "Qi", "Sx", "Sp", "Oc", "No", "Dc", "Ud", "Dd", "Td" }
+    local suffixes = { "", "K", "M", "B", "T", "Qa", "Qi", "Sx", "Sp", "Oc", "No", "Dc", "Ud", "Dd", "Td" }
 
-    local index = 1
+    local index = 1
 
-    while number >= 1000 and index < #suffixes do
+    while number >= 1000 and index < #suffixes do
 
-        number /= 1000
+        number /= 1000
 
-        index += 1
+        index += 1
 
-    end
+    end
 
-    local text
+    local text
 
-    if index == 1 or number >= 100 then
+    if index == 1 or number >= 100 then
 
-        text = string.format("%.0f", number)
+        text = string.format("%.0f", number)
 
-    else
+    else
 
-        text = string.format("%.1f", number)
+        text = string.format("%.1f", number)
 
-    end
+    end
 
-    text = text:gsub("%.0$", "")
+    text = text:gsub("%.0$", "")
 
-    return (negative and "-" or "") .. text .. suffixes[index]
+    return (negative and "-" or "") .. text .. suffixes[index]
 
 end
 
 local function redactUrl(url)
 
-    if type(url) ~= "string" then return nil end
+    if type(url) ~= "string" then return nil end
 
-    local scheme, host, id = url:match("^(https?)://([^/]+)/api/webhooks/([^/]+)")
+    local scheme, host, id = url:match("^(https?)://([^/]+)/api/webhooks/([^/]+)")
 
-    if not scheme then return "<invalid-or-unset>" end
+    if not scheme then return "<invalid-or-unset>" end
 
-    return scheme .. "://" .. host .. "/api/webhooks/" .. id .. "/[REDACTED]"
+    return scheme .. "://" .. host .. "/api/webhooks/" .. id .. "/[REDACTED]"
 
 end
 
 local function validateWebhookUrl(url)
 
-    if type(url) ~= "string" then return false, "WEBHOOK_URL_REQUIRED" end
+    if type(url) ~= "string" then return false, "WEBHOOK_URL_REQUIRED" end
 
-    url = trim(url)
+    url = trim(url)
 
-    if #url > 2048 then return false, "WEBHOOK_URL_TOO_LONG" end
+    if #url > 2048 then return false, "WEBHOOK_URL_TOO_LONG" end
 
-    local scheme, host, id, token = url:match("^(https?)://([^/]+)/api/webhooks/([^/]+)/([^/?#]+)")
+    local scheme, host, id, token = url:match("^(https?)://([^/]+)/api/webhooks/([^/]+)/([^/?#]+)")
 
-    if scheme ~= "https" then return false, "WEBHOOK_URL_MUST_USE_HTTPS" end
+    if scheme ~= "https" then return false, "WEBHOOK_URL_MUST_USE_HTTPS" end
 
-    host = host and host:lower() or ""
+    host = host and host:lower() or ""
 
-    if host ~= "discord.com" and host ~= "discordapp.com" and host ~= "canary.discord.com" and host ~= "ptb.discord.com" then
+    if host ~= "discord.com" and host ~= "discordapp.com" and host ~= "canary.discord.com" and host ~= "ptb.discord.com" then
 
-        return false, "NOT_A_DISCORD_WEBHOOK_HOST"
+        return false, "NOT_A_DISCORD_WEBHOOK_HOST"
 
-    end
+    end
 
-    if not id or not id:match("^%d+$") then return false, "WEBHOOK_ID_INVALID" end
+    if not id or not id:match("^%d+$") then return false, "WEBHOOK_ID_INVALID" end
 
-    if not token or #token < 8 then return false, "WEBHOOK_TOKEN_INVALID" end
+    if not token or #token < 8 then return false, "WEBHOOK_TOKEN_INVALID" end
 
-    return true, nil
+    return true, nil
 
 end
 
 local function resolveTransport()
 
-    local candidates = {
+    local candidates = {
 
-        { name = "request", fn = env.request },
+        { name = "request", fn = env.request },
 
-        { name = "http_request", fn = env.http_request },
+        { name = "http_request", fn = env.http_request },
 
-        { name = "syn.request", fn = type(env.syn) == "table" and env.syn.request or nil },
+        { name = "syn.request", fn = type(env.syn) == "table" and env.syn.request or nil },
 
-        { name = "fluxus.request", fn = type(env.fluxus) == "table" and env.fluxus.request or nil },
+        { name = "fluxus.request", fn = type(env.fluxus) == "table" and env.fluxus.request or nil },
 
-        { name = "krnl.request", fn = type(env.krnl) == "table" and env.krnl.request or nil },
+        { name = "krnl.request", fn = type(env.krnl) == "table" and env.krnl.request or nil },
 
-    }
+    }
 
-    for _, candidate in ipairs(candidates) do
+    for _, candidate in ipairs(candidates) do
 
-        if type(candidate.fn) == "function" then
+        if type(candidate.fn) == "function" then
 
-            return candidate
+            return candidate
 
-        end
+        end
 
-    end
+    end
 
-    return nil
+    return nil
 
 end
 
 local function safeSnapshot()
 
-    local snapshotApi = env.UNO_WEBHOOK_SNAPSHOT_V2
+    local snapshotApi = env.UNO_WEBHOOK_SNAPSHOT_V2
 
-    if type(snapshotApi) ~= "table" or type(snapshotApi.getSnapshot) ~= "function" then
+    if type(snapshotApi) ~= "table" or type(snapshotApi.getSnapshot) ~= "function" then
 
-        return nil, "SNAPSHOT_V2_UNAVAILABLE"
+        return nil, "SNAPSHOT_V2_UNAVAILABLE"
 
-    end
+    end
 
-    local ok, snapshot = pcall(snapshotApi.getSnapshot)
+    local ok, snapshot = pcall(snapshotApi.getSnapshot)
 
-    if not ok or type(snapshot) ~= "table" then
+    if not ok or type(snapshot) ~= "table" then
 
-        return nil, "SNAPSHOT_ACQUISITION_FAILED"
+        return nil, "SNAPSHOT_ACQUISITION_FAILED"
 
-    end
+    end
 
-    return snapshot, nil
+    return snapshot, nil
 
 end
 
 local function truncate(text, limit)
 
-    text = safeToString(text, "")
+    text = safeToString(text, "")
 
-    if #text <= limit then return text end
+    if #text <= limit then return text end
 
-    if limit <= 3 then return text:sub(1, limit) end
+    if limit <= 3 then return text:sub(1, limit) end
 
-    return text:sub(1, limit - 3) .. "..."
+    return text:sub(1, limit - 3) .. "..."
 
 end
 
 local function field(name, value, inline)
 
-    return {
+    return {
 
-        name = truncate(name, MAX_FIELD_NAME),
+        name = truncate(name, MAX_FIELD_NAME),
 
-        value = truncate(value, MAX_FIELD_VALUE),
+        value = truncate(value, MAX_FIELD_VALUE),
 
-        inline = inline == true,
+        inline = inline == true,
 
-    }
+    }
 
 end
 
 local function countEmbedChars(embed)
 
-    local total = #(embed.title or "") + #(embed.description or "")
+    local total = #(embed.title or "") + #(embed.description or "")
 
-    if embed.footer then total += #(embed.footer.text or "") end
+    if embed.footer then total += #(embed.footer.text or "") end
 
-    if embed.author then total += #(embed.author.name or "") end
+    if embed.author then total += #(embed.author.name or "") end
 
-    for _, item in ipairs(embed.fields or {}) do
+    for _, item in ipairs(embed.fields or {}) do
 
-        total += #(item.name or "") + #(item.value or "")
+        total += #(item.name or "") + #(item.value or "")
 
-    end
+    end
 
-    return total
+    return total
 
 end
 
 local function splitLines(lines, fieldName)
 
-    local chunks = {}
+    local chunks = {}
 
-    local current = {}
+    local current = {}
 
-    local currentLength = #fieldName
+    local currentLength = #fieldName
 
-    for _, line in ipairs(lines) do
+    for _, line in ipairs(lines) do
 
-        local addition = #line + (#current > 0 and 1 or 0)
+        local addition = #line + (#current > 0 and 1 or 0)
 
-        if #current > 0 and currentLength + addition > MAX_FIELD_VALUE then
+        if #current > 0 and currentLength + addition > MAX_FIELD_VALUE then
 
-            chunks[#chunks + 1] = current
+            chunks[#chunks + 1] = current
 
-            current = {}
+            current = {}
 
-            currentLength = #fieldName
+            currentLength = #fieldName
 
-        end
+        end
 
-        current[#current + 1] = line
+        current[#current + 1] = line
 
-        currentLength += addition
+        currentLength += addition
 
-    end
+    end
 
-    if #current > 0 or #chunks == 0 then chunks[#chunks + 1] = current end
+    if #current > 0 or #chunks == 0 then chunks[#chunks + 1] = current end
 
-    return chunks
+    return chunks
 
 end
 
 local function eggLines(snapshot)
 
-    local lines = {}
+    local lines = {}
 
-    for _, egg in ipairs(snapshot.eggs or {}) do
+    for _, egg in ipairs(snapshot.eggs or {}) do
 
-        local name = safeToString(egg.name, safeToString(egg.id, "Unknown Egg"))
+        local name = safeToString(egg.name, safeToString(egg.id, "Unknown Egg"))
 
-        lines[#lines + 1] = name .. ": " .. compact(egg.count) .. "x"
+        lines[#lines + 1] = name .. ": " .. compact(egg.count) .. "x"
 
-    end
+    end
 
-    return lines
+    return lines
 
 end
 
 local function resolvePublicAvatar(snapshot, transport)
 
-    local avatar = snapshot.avatar
+    local avatar = snapshot.avatar
 
-    if type(avatar) ~= "table" or avatar.isReady ~= true then
+    if type(avatar) ~= "table" or avatar.isReady ~= true then
 
-        return nil, "AVATAR_NOT_READY"
+        return nil, "AVATAR_NOT_READY"
 
-    end
+    end
 
-    local imageUrl = avatar.imageUrl
+    local imageUrl = avatar.imageUrl
 
-    if type(imageUrl) == "string" and imageUrl:match("^https://") then
+    if type(imageUrl) == "string" and imageUrl:match("^https://") then
 
-        return imageUrl, nil
+        return imageUrl, nil
 
-    end
+    end
 
-    if type(imageUrl) ~= "string" or not imageUrl:match("^rbxthumb://") then
+    if type(imageUrl) ~= "string" or not imageUrl:match("^rbxthumb://") then
 
-        return nil, "AVATAR_URL_NOT_HTTPS"
+        return nil, "AVATAR_URL_NOT_HTTPS"
 
-    end
+    end
 
-    if not transport then return nil, "HTTP_TRANSPORT_UNAVAILABLE_FOR_AVATAR" end
+    if not transport then return nil, "HTTP_TRANSPORT_UNAVAILABLE_FOR_AVATAR" end
 
-    local userId = snapshot.account and snapshot.account.userId
+    local userId = snapshot.account and snapshot.account.userId
 
-    if not userId then return nil, "AVATAR_USER_ID_UNAVAILABLE" end
+    if not userId then return nil, "AVATAR_USER_ID_UNAVAILABLE" end
 
-    local endpoint = "https://thumbnails.roblox.com/v1/users/avatar?userIds=" .. tostring(userId) .. "&size=420x420&format=Png&isCircular=false"
+    local endpoint = "https://thumbnails.roblox.com/v1/users/avatar?userIds=" .. tostring(userId) .. "&size=420x420&format=Png&isCircular=false"
 
-    local okRequest, response = pcall(transport.fn, {
+    local okRequest, response = pcall(transport.fn, {
 
-        Url = endpoint,
+        Url = endpoint,
 
-        Method = "GET",
+        Method = "GET",
 
-        Headers = { ["Accept"] = "application/json" },
+        Headers = { ["Accept"] = "application/json" },
 
-    })
+    })
 
-    if not okRequest or type(response) ~= "table" then return nil, "AVATAR_RESOLUTION_REQUEST_FAILED" end
+    if not okRequest or type(response) ~= "table" then return nil, "AVATAR_RESOLUTION_REQUEST_FAILED" end
 
-    local body = response.Body or response.body
+    local body = response.Body or response.body
 
-    if type(body) ~= "string" then return nil, "AVATAR_RESOLUTION_EMPTY" end
+    if type(body) ~= "string" then return nil, "AVATAR_RESOLUTION_EMPTY" end
 
-    local okDecode, decoded = pcall(HttpService.JSONDecode, HttpService, body)
+    local okDecode, decoded = pcall(HttpService.JSONDecode, HttpService, body)
 
-    if not okDecode or type(decoded) ~= "table" or type(decoded.data) ~= "table" then return nil, "AVATAR_RESOLUTION_BAD_JSON" end
+    if not okDecode or type(decoded) ~= "table" or type(decoded.data) ~= "table" then return nil, "AVATAR_RESOLUTION_BAD_JSON" end
 
-    local first = decoded.data[1]
+    local first = decoded.data[1]
 
-    local resolved = type(first) == "table" and first.imageUrl or nil
+    local resolved = type(first) == "table" and first.imageUrl or nil
 
-    if type(resolved) ~= "string" or not resolved:match("^https://") then return nil, "AVATAR_RESOLUTION_NO_HTTPS_URL" end
+    if type(resolved) ~= "string" or not resolved:match("^https://") then return nil, "AVATAR_RESOLUTION_NO_HTTPS_URL" end
 
-    return resolved, nil
+    return resolved, nil
 
 end
 
 local function buildPayload(snapshot, allowAvatarResolution)
 
-    local embeds = {}
+    local embeds = {}
 
-    local fields = {}
+    local fields = {}
 
-    local sections = {
+    local sections = {
 
-        account = state.include.accountInfo,
+        account = state.include.accountInfo,
 
-        chicken = state.include.chickenInfo,
+        chicken = state.include.chickenInfo,
 
-        arena = state.include.arenaStats,
+        arena = state.include.arenaStats,
 
-        eggs = state.include.eggInventory,
+        eggs = state.include.eggInventory,
 
-        avatar = state.include.avatar,
+        avatar = state.include.avatar,
 
-    }
+    }
 
-    if sections.account then
+    if sections.account then
 
-        local account = snapshot.account or {}
+        local account = snapshot.account or {}
 
-        fields[#fields + 1] = field("👤 ACCOUNT", "User: " .. safeToString(account.username) .. "\nCash: " .. safeToString(account.cashFormatted) .. "\nRebirth: " .. safeToString(account.rebirth), true)
+        fields[#fields + 1] = field("👤 ACCOUNT", "User: " .. safeToString(account.username) .. "\nCash: " .. safeToString(account.cashFormatted) .. "\nRebirth: " .. safeToString(account.rebirth), true)
 
-    end
+    end
 
-    if sections.chicken then
+    if sections.chicken then
 
-        local chicken = snapshot.chicken or {}
+        local chicken = snapshot.chicken or {}
 
-        fields[#fields + 1] = field("🐔 CHICKEN", "Equipped: " .. safeToString(chicken.name) .. "\nLevel: " .. safeToString(chicken.level), true)
+        fields[#fields + 1] = field("🐔 CHICKEN", "Equipped: " .. safeToString(chicken.name) .. "\nLevel: " .. safeToString(chicken.level), true)
 
-    end
+    end
 
-    if sections.arena then
+    if sections.arena then
 
-        local arena = snapshot.arena or {}
+        local arena = snapshot.arena or {}
 
-        local trophyText = arena.trophies ~= nil and safeToString(arena.trophies) or "—"
+        local trophyText = arena.trophies ~= nil and safeToString(arena.trophies) or "—"
 
-        if arena.nextThreshold ~= nil then trophyText = trophyText .. " / " .. safeToString(arena.nextThreshold) end
+        if arena.nextThreshold ~= nil then trophyText = trophyText .. " / " .. safeToString(arena.nextThreshold) end
 
-        fields[#fields + 1] = field("🏆 ARENA", "Rank: " .. safeToString(arena.currentRank) .. "\nTrophies: " .. trophyText .. "\nSeason Wins: " .. safeToString(arena.seasonWins), true)
+        fields[#fields + 1] = field("🏆 ARENA", "Rank: " .. safeToString(arena.currentRank) .. "\nTrophies: " .. trophyText .. "\nSeason Wins: " .. safeToString(arena.seasonWins), true)
 
-    end
+    end
 
-    local base = {
+    local base = {
 
-        title = "Grow A Chicken Fighter",
+        title = "Grow A Chicken Fighter",
 
-        fields = fields,
+        fields = fields,
 
-        color = 16763904,
+        color = 16763904,
 
-    }
+    }
 
-    local avatarResolution = nil
+    local avatarResolution = nil
 
-    if sections.avatar then
+    if sections.avatar then
 
-        if allowAvatarResolution then
+        if allowAvatarResolution then
 
-            local transport = resolveTransport()
+            local transport = resolveTransport()
 
-            local url, reason = resolvePublicAvatar(snapshot, transport)
+            local url, reason = resolvePublicAvatar(snapshot, transport)
 
-            if url then base.thumbnail = { url = url } end
+            if url then base.thumbnail = { url = url } end
 
-            avatarResolution = { included = url ~= nil, reason = reason, transport = transport and transport.name or nil }
+            avatarResolution = { included = url ~= nil, reason = reason, transport = transport and transport.name or nil }
 
-        else
+        else
 
-            local imageUrl = snapshot.avatar and snapshot.avatar.imageUrl
+            local imageUrl = snapshot.avatar and snapshot.avatar.imageUrl
 
-            if type(imageUrl) == "string" and imageUrl:match("^https://") and snapshot.avatar.isReady == true then
+            if type(imageUrl) == "string" and imageUrl:match("^https://") and snapshot.avatar.isReady == true then
 
-                base.thumbnail = { url = imageUrl }
+                base.thumbnail = { url = imageUrl }
 
-                avatarResolution = { included = true, reason = nil, pendingResolution = false }
+                avatarResolution = { included = true, reason = nil, pendingResolution = false }
 
-            else
+            else
 
-                avatarResolution = { included = false, reason = "AVATAR_PUBLIC_HTTPS_RESOLUTION_DEFERRED", pendingResolution = true }
+                avatarResolution = { included = false, reason = "AVATAR_PUBLIC_HTTPS_RESOLUTION_DEFERRED", pendingResolution = true }
 
-            end
+            end
 
-        end
+        end
 
-    end
+    end
 
-    local eggChunks = {}
+    local eggChunks = {}
 
-    if sections.eggs then eggChunks = splitLines(eggLines(snapshot), "🥚 EGG INVENTORY") end
+    if sections.eggs then eggChunks = splitLines(eggLines(snapshot), "🥚 EGG INVENTORY") end
 
-    local firstFields = {}
+    local firstFields = {}
 
-    for _, item in ipairs(fields) do firstFields[#firstFields + 1] = item end
+    for _, item in ipairs(fields) do firstFields[#firstFields + 1] = item end
 
-    for index, lines in ipairs(eggChunks) do
+    for index, lines in ipairs(eggChunks) do
 
-        local name = index == 1 and "🥚 EGG INVENTORY" or "🥚 EGG INVENTORY (" .. tostring(index) .. ")"
+        local name = index == 1 and "🥚 EGG INVENTORY" or "🥚 EGG INVENTORY (" .. tostring(index) .. ")"
 
-        firstFields[#firstFields + 1] = field(name, #lines > 0 and table.concat(lines, "\n") or "(none)", false)
+        firstFields[#firstFields + 1] = field(name, #lines > 0 and table.concat(lines, "\n") or "(none)", false)
 
-    end
+    end
 
-    local function makeEmbed(embedFields)
+    local function makeEmbed(embedFields)
 
-        local copy = {
+        local copy = {
 
-            title = base.title,
+            title = base.title,
 
-            fields = embedFields,
+            fields = embedFields,
 
-            color = base.color,
+            color = base.color,
 
-        }
+        }
 
-        if base.thumbnail then copy.thumbnail = base.thumbnail end
+        if base.thumbnail then copy.thumbnail = base.thumbnail end
 
-        return copy
+        return copy
 
-    end
+    end
 
-    local current = {}
+    local current = {}
 
-    local currentHasTitle = false
+    local currentHasTitle = false
 
-    local function flush()
+    local function flush()
 
-        if #current > 0 or not currentHasTitle then
+        if #current > 0 or not currentHasTitle then
 
-            embeds[#embeds + 1] = makeEmbed(current)
+            embeds[#embeds + 1] = makeEmbed(current)
 
-            current = {}
+            current = {}
 
-            currentHasTitle = true
+            currentHasTitle = true
 
-        end
+        end
 
-    end
+    end
 
-    for _, item in ipairs(firstFields) do
+    for _, item in ipairs(firstFields) do
 
-        if #current >= MAX_FIELDS_PER_EMBED then flush() end
+        if #current >= MAX_FIELDS_PER_EMBED then flush() end
 
-        current[#current + 1] = item
+        current[#current + 1] = item
 
-    end
+    end
 
-    flush()
+    flush()
 
-    local totalChars = 0
+    local totalChars = 0
 
-    for _, embed in ipairs(embeds) do totalChars += countEmbedChars(embed) end
+    for _, embed in ipairs(embeds) do totalChars += countEmbedChars(embed) end
 
-    local limitSafe = #embeds <= MAX_EMBEDS and totalChars <= MAX_TOTAL_CHARS
+    local limitSafe = #embeds <= MAX_EMBEDS and totalChars <= MAX_TOTAL_CHARS
 
-    local payload = { username = "UnO Hub - Grow A Chicken Fighter", embeds = embeds, allowed_mentions = { parse = {} } }
+    local payload = { username = "UnO Hub - Grow A Chicken Fighter", embeds = embeds, allowed_mentions = { parse = {} } }
 
-    return payload, {
+    return payload, {
 
-        sections = sections,
+        sections = sections,
 
-        topRowOrder = (function()
+        topRowOrder = (function()
 
-            local order = {}
+            local order = {}
 
-            if sections.account then order[#order + 1] = "ACCOUNT" end
+            if sections.account then order[#order + 1] = "ACCOUNT" end
 
-            if sections.chicken then order[#order + 1] = "CHICKEN" end
+            if sections.chicken then order[#order + 1] = "CHICKEN" end
 
-            if sections.arena then order[#order + 1] = "ARENA" end
+            if sections.arena then order[#order + 1] = "ARENA" end
 
-            return order
+            return order
 
-        end)(),
+        end)(),
 
-        eggEntryCount = #eggLines(snapshot),
+        eggEntryCount = #eggLines(snapshot),
 
-        eggFieldCount = #eggChunks,
+        eggFieldCount = #eggChunks,
 
-        fieldCount = #fields + #eggChunks,
+        fieldCount = #fields + #eggChunks,
 
-        embedCount = #embeds,
+        embedCount = #embeds,
 
-        totalChars = totalChars,
+        totalChars = totalChars,
 
-        limitSafe = limitSafe,
+        limitSafe = limitSafe,
 
-        overflow = not limitSafe,
+        overflow = not limitSafe,
 
-        avatar = avatarResolution,
+        avatar = avatarResolution,
 
-        snapshotCollectedAt = snapshot.meta and snapshot.meta.collectedAt or nil,
+        snapshotCollectedAt = snapshot.meta and snapshot.meta.collectedAt or nil,
 
-    }
+    }
 
 end
 
 local function statusResult(ok, reason, extra)
 
-    local result = extra or {}
+    local result = extra or {}
 
-    result.ok = ok
+    result.ok = ok
 
-    result.reason = reason
+    result.reason = reason
 
-    result.webhookUrl = nil
+    result.webhookUrl = nil
 
-    return result
+    return result
 
 end
 
 local function preview()
 
-    if state.destroyed then return statusResult(false, "DESTROYED") end
+    if state.destroyed then return statusResult(false, "DESTROYED") end
 
-    local snapshot, snapshotError = safeSnapshot()
+    local snapshot, snapshotError = safeSnapshot()
 
-    if not snapshot then return statusResult(false, snapshotError) end
+    if not snapshot then return statusResult(false, snapshotError) end
 
-    local payload, details = buildPayload(snapshot, false)
+    local payload, details = buildPayload(snapshot, false)
 
-    local jsonOk, encoded = pcall(HttpService.JSONEncode, HttpService, payload)
+    local jsonOk, encoded = pcall(HttpService.JSONEncode, HttpService, payload)
 
-    if not jsonOk then return statusResult(false, "JSON_ENCODE_FAILED", { details = details }) end
+    if not jsonOk then return statusResult(false, "JSON_ENCODE_FAILED", { details = details }) end
 
-    local result = {
+    local result = {
 
-        ok = details.limitSafe,
+        ok = details.limitSafe,
 
-        reason = details.limitSafe and nil or "PAYLOAD_TOO_LARGE",
+        reason = details.limitSafe and nil or "PAYLOAD_TOO_LARGE",
 
-        payload = payload,
+        payload = payload,
 
-        json = encoded,
+        json = encoded,
 
-        details = details,
+        details = details,
 
-        enabledSections = details.sections,
+        enabledSections = details.sections,
 
-        topRowOrder = details.topRowOrder,
+        topRowOrder = details.topRowOrder,
 
-        eggEntryCount = details.eggEntryCount,
+        eggEntryCount = details.eggEntryCount,
 
-        embedCount = details.embedCount,
+        embedCount = details.embedCount,
 
-        fieldCount = details.fieldCount,
+        fieldCount = details.fieldCount,
 
-        totalChars = details.totalChars,
+        totalChars = details.totalChars,
 
-        splittingNecessary = details.eggFieldCount > 1,
+        splittingNecessary = details.eggFieldCount > 1,
 
-        avatarThumbnailIncluded = details.avatar and details.avatar.included or false,
+        avatarThumbnailIncluded = details.avatar and details.avatar.included or false,
 
-        avatarResolution = details.avatar,
+        avatarResolution = details.avatar,
 
-        httpPerformed = false,
+        httpPerformed = false,
 
-    }
+    }
 
-    state.lastPreview = result
+    state.lastPreview = result
 
-    print("[UNO_WEBHOOK_SENDER_V1] preview ok=" .. tostring(result.ok) .. " embeds=" .. tostring(result.embedCount) .. " fields=" .. tostring(result.fieldCount) .. " chars=" .. tostring(result.totalChars) .. " top=" .. table.concat(result.topRowOrder, ",") .. " avatar=" .. tostring(result.avatarThumbnailIncluded))
+    print("[UNO_WEBHOOK_SENDER_V1] preview ok=" .. tostring(result.ok) .. " embeds=" .. tostring(result.embedCount) .. " fields=" .. tostring(result.fieldCount) .. " chars=" .. tostring(result.totalChars) .. " top=" .. table.concat(result.topRowOrder, ",") .. " avatar=" .. tostring(result.avatarThumbnailIncluded))
 
-    return result
+    return result
 
 end
 
 local function testWebhook()
 
-    if state.destroyed then return statusResult(false, "DESTROYED") end
+    if state.destroyed then return statusResult(false, "DESTROYED") end
 
-    if state.inFlight then return statusResult(false, "TEST_SEND_IN_FLIGHT") end
+    if state.inFlight then return statusResult(false, "TEST_SEND_IN_FLIGHT") end
 
-    local valid, urlReason = validateWebhookUrl(state.webhookUrl)
+    local valid, urlReason = validateWebhookUrl(state.webhookUrl)
 
-    if not valid then return statusResult(false, urlReason) end
+    if not valid then return statusResult(false, urlReason) end
 
-    local transport = resolveTransport()
+    local transport = resolveTransport()
 
-    if not transport then return statusResult(false, "HTTP_TRANSPORT_UNAVAILABLE", { sentAt = os.time() }) end
+    if not transport then return statusResult(false, "HTTP_TRANSPORT_UNAVAILABLE", { sentAt = os.time() }) end
 
-    state.inFlight = true
+    state.inFlight = true
 
-    local snapshot, snapshotError = safeSnapshot()
+    local snapshot, snapshotError = safeSnapshot()
 
-    if not snapshot then
+    if not snapshot then
 
-        state.inFlight = false
+        state.inFlight = false
 
-        return statusResult(false, snapshotError)
+        return statusResult(false, snapshotError)
 
-    end
+    end
 
-    local payload, details = buildPayload(snapshot, true)
+    local payload, details = buildPayload(snapshot, true)
 
-    if not details.limitSafe then
+    if not details.limitSafe then
 
-        state.inFlight = false
+        state.inFlight = false
 
-        return statusResult(false, "PAYLOAD_TOO_LARGE", { sentAt = os.time(), sections = details.sections, details = details })
+        return statusResult(false, "PAYLOAD_TOO_LARGE", { sentAt = os.time(), sections = details.sections, details = details })
 
-    end
+    end
 
-    local jsonOk, body = pcall(HttpService.JSONEncode, HttpService, payload)
+    local jsonOk, body = pcall(HttpService.JSONEncode, HttpService, payload)
 
-    if not jsonOk then
+    if not jsonOk then
 
-        state.inFlight = false
+        state.inFlight = false
 
-        return statusResult(false, "JSON_ENCODE_FAILED", { sentAt = os.time(), sections = details.sections })
+        return statusResult(false, "JSON_ENCODE_FAILED", { sentAt = os.time(), sections = details.sections })
 
-    end
+    end
 
-    local okRequest, response = pcall(transport.fn, {
+    local okRequest, response = pcall(transport.fn, {
 
-        Url = state.webhookUrl .. "?wait=true",
+        Url = state.webhookUrl .. "?wait=true",
 
-        Method = "POST",
+        Method = "POST",
 
-        Headers = { ["Content-Type"] = "application/json" },
+        Headers = { ["Content-Type"] = "application/json" },
 
-        Body = body,
+        Body = body,
 
-    })
+    })
 
-    state.inFlight = false
+    state.inFlight = false
 
-    local sentAt = os.time()
+    local sentAt = os.time()
 
-    local rawHttpStatus = type(response) == "table" and (response.StatusCode or response.status_code or response.Status) or nil
+    local rawHttpStatus = type(response) == "table" and (response.StatusCode or response.status_code or response.Status) or nil
 
-    local httpStatus = tonumber(rawHttpStatus)
+    local httpStatus = tonumber(rawHttpStatus)
 
-    local ok = okRequest and httpStatus ~= nil and httpStatus >= 200 and httpStatus <= 299
+    local ok = okRequest and httpStatus ~= nil and httpStatus >= 200 and httpStatus <= 299
 
-    local reason = nil
+    local reason = nil
 
-    if not ok then
+    if not ok then
 
-        if not okRequest then
+        if not okRequest then
 
-            reason = "HTTP_REQUEST_FAILED"
+            reason = "HTTP_REQUEST_FAILED"
 
-        elseif httpStatus == 429 then
+        elseif httpStatus == 429 then
 
-            reason = "DISCORD_RATE_LIMITED"
+            reason = "DISCORD_RATE_LIMITED"
 
-        elseif httpStatus == 404 then
+        elseif httpStatus == 404 then
 
-            reason = "WEBHOOK_NOT_FOUND"
+            reason = "WEBHOOK_NOT_FOUND"
 
-        else
+        else
 
-            reason = "DISCORD_HTTP_ERROR"
+            reason = "DISCORD_HTTP_ERROR"
 
-        end
+        end
 
-    end
+    end
 
-    local result = {
+    local result = {
 
-        ok = ok,
+        ok = ok,
 
-        httpStatus = httpStatus,
+        httpStatus = httpStatus,
 
-        reason = reason,
+        reason = reason,
 
-        sentAt = sentAt,
+        sentAt = sentAt,
 
-        transport = transport.name,
+        transport = transport.name,
 
-        sections = details.sections,
+        sections = details.sections,
 
-        embedCount = details.embedCount,
+        embedCount = details.embedCount,
 
-        fieldCount = details.fieldCount,
+        fieldCount = details.fieldCount,
 
-        totalChars = details.totalChars,
+        totalChars = details.totalChars,
 
-        avatarResolution = details.avatar,
+        avatarResolution = details.avatar,
 
-        redactedWebhookUrl = redactUrl(state.webhookUrl),
+        redactedWebhookUrl = redactUrl(state.webhookUrl),
 
-    }
+    }
 
-    state.lastResult = result
+    state.lastResult = result
 
-    print("[UNO_WEBHOOK_SENDER_V1] testWebhook ok=" .. tostring(ok) .. " status=" .. tostring(httpStatus) .. " reason=" .. tostring(reason) .. " transport=" .. transport.name .. " webhook=" .. tostring(result.redactedWebhookUrl))
+    print("[UNO_WEBHOOK_SENDER_V1] testWebhook ok=" .. tostring(ok) .. " status=" .. tostring(httpStatus) .. " reason=" .. tostring(reason) .. " transport=" .. transport.name .. " webhook=" .. tostring(result.redactedWebhookUrl))
 
-    return result
+    return result
 
 end
 
 local function setWebhookUrl(url)
 
-    local valid, reason = validateWebhookUrl(url)
+    local valid, reason = validateWebhookUrl(url)
 
-    if not valid then
+    if not valid then
 
-        state.webhookUrl = nil
+        state.webhookUrl = nil
 
-        return statusResult(false, reason, { redactedWebhookUrl = redactUrl(url) })
+        return statusResult(false, reason, { redactedWebhookUrl = redactUrl(url) })
 
-    end
+    end
 
-    state.webhookUrl = trim(url)
+    state.webhookUrl = trim(url)
 
-    return { ok = true, redactedWebhookUrl = redactUrl(state.webhookUrl), reason = nil }
+    return { ok = true, redactedWebhookUrl = redactUrl(state.webhookUrl), reason = nil }
 
 end
 
 local function setIncludeData(options)
 
-    if type(options) ~= "table" then return statusResult(false, "INCLUDE_OPTIONS_REQUIRED") end
+    if type(options) ~= "table" then return statusResult(false, "INCLUDE_OPTIONS_REQUIRED") end
 
-    for key, value in pairs(state.include) do
+    for key, value in pairs(state.include) do
 
-        if options[key] ~= nil then state.include[key] = value == true end
+        if options[key] ~= nil then state.include[key] = value == true end
 
-    end
+    end
 
-    return { ok = true, include = {
+    return { ok = true, include = {
 
-        accountInfo = state.include.accountInfo,
+        accountInfo = state.include.accountInfo,
 
-        chickenInfo = state.include.chickenInfo,
+        chickenInfo = state.include.chickenInfo,
 
-        eggInventory = state.include.eggInventory,
+        eggInventory = state.include.eggInventory,
 
-        arenaStats = state.include.arenaStats,
+        arenaStats = state.include.arenaStats,
 
-        avatar = state.include.avatar,
+        avatar = state.include.avatar,
 
-    } }
+    } }
 
 end
 
 local function getStatus()
 
-    local transport = resolveTransport()
+    local transport = resolveTransport()
 
-    return {
+    return {
 
-        destroyed = state.destroyed,
+        destroyed = state.destroyed,
 
-        inFlight = state.inFlight,
+        inFlight = state.inFlight,
 
-        webhookConfigured = state.webhookUrl ~= nil,
+        webhookConfigured = state.webhookUrl ~= nil,
 
-        redactedWebhookUrl = redactUrl(state.webhookUrl),
+        redactedWebhookUrl = redactUrl(state.webhookUrl),
 
-        transport = transport and transport.name or nil,
+        transport = transport and transport.name or nil,
 
-        include = {
+        include = {
 
-            accountInfo = state.include.accountInfo,
+            accountInfo = state.include.accountInfo,
 
-            chickenInfo = state.include.chickenInfo,
+            chickenInfo = state.include.chickenInfo,
 
-            eggInventory = state.include.eggInventory,
+            eggInventory = state.include.eggInventory,
 
-            arenaStats = state.include.arenaStats,
+            arenaStats = state.include.arenaStats,
 
-            avatar = state.include.avatar,
+            avatar = state.include.avatar,
 
-        },
+        },
 
-        lastResult = state.lastResult,
+        lastResult = state.lastResult,
 
-        lastPreview = state.lastPreview and {
+        lastPreview = state.lastPreview and {
 
-            ok = state.lastPreview.ok,
+            ok = state.lastPreview.ok,
 
-            reason = state.lastPreview.reason,
+            reason = state.lastPreview.reason,
 
-            embedCount = state.lastPreview.embedCount,
+            embedCount = state.lastPreview.embedCount,
 
-            fieldCount = state.lastPreview.fieldCount,
+            fieldCount = state.lastPreview.fieldCount,
 
-            totalChars = state.lastPreview.totalChars,
+            totalChars = state.lastPreview.totalChars,
 
-        } or nil,
+        } or nil,
 
-    }
+    }
 
 end
 
 local function destroy()
 
-    state.destroyed = true
+    state.destroyed = true
 
-    state.webhookUrl = nil
+    state.webhookUrl = nil
 
-    state.lastResult = nil
+    state.lastResult = nil
 
-    state.lastPreview = nil
+    state.lastPreview = nil
 
-    return { ok = true, destroyed = true }
+    return { ok = true, destroyed = true }
 
 end
 
 local API = {
 
-    setWebhookUrl = setWebhookUrl,
+    setWebhookUrl = setWebhookUrl,
 
-    setIncludeData = setIncludeData,
+    setIncludeData = setIncludeData,
 
-    preview = preview,
+    preview = preview,
 
-    testWebhook = testWebhook,
+    testWebhook = testWebhook,
 
-    getStatus = getStatus,
+    getStatus = getStatus,
 
-    destroy = destroy,
+    destroy = destroy,
 
 }
 
@@ -8692,557 +8692,557 @@ local PHASE_ERROR = "ERROR"
 
 local state = {
 
-    enabled = false,
+    enabled = false,
 
-    workerRunning = false,
+    workerRunning = false,
 
-    generation = 0,
+    generation = 0,
 
-    destroyed = false,
+    destroyed = false,
 
-    lastObservedRebirth = nil,
+    lastObservedRebirth = nil,
 
-    startupBaselineRebirth = nil,
+    startupBaselineRebirth = nil,
 
-    lastSentMilestone = nil,
+    lastSentMilestone = nil,
 
-    lastHourlyKey = nil,
+    lastHourlyKey = nil,
 
-    lastSendAt = nil,
+    lastSendAt = nil,
 
-    lastSendTrigger = nil,
+    lastSendTrigger = nil,
 
-    lastSendResult = nil,
+    lastSendResult = nil,
 
-    nextHourlyAt = nil,
+    nextHourlyAt = nil,
 
-    phase = PHASE_DISABLED,
+    phase = PHASE_DISABLED,
 
-    lastError = nil,
+    lastError = nil,
 
-    pendingTrigger = nil,
+    pendingTrigger = nil,
 
 }
 
 local function setPhase(phase)
 
-    state.phase = phase
+    state.phase = phase
 
 end
 
 local function snapshotApi()
 
-    local api = env.UNO_WEBHOOK_SNAPSHOT_V2
+    local api = env.UNO_WEBHOOK_SNAPSHOT_V2
 
-    if type(api) ~= "table" or type(api.getSnapshot) ~= "function" then
+    if type(api) ~= "table" or type(api.getSnapshot) ~= "function" then
 
-        return nil
+        return nil
 
-    end
+    end
 
-    return api
+    return api
 
 end
 
 local function senderApi()
 
-    local api = env.UNO_WEBHOOK_SENDER_V1
+    local api = env.UNO_WEBHOOK_SENDER_V1
 
-    if type(api) ~= "table" or type(api.testWebhook) ~= "function" or type(api.getStatus) ~= "function" then
+    if type(api) ~= "table" or type(api.testWebhook) ~= "function" or type(api.getStatus) ~= "function" then
 
-        return nil
+        return nil
 
-    end
+    end
 
-    return api
+    return api
 
 end
 
 local function safeNumber(value)
 
-    local number = tonumber(value)
+    local number = tonumber(value)
 
-    if not number then return nil end
+    if not number then return nil end
 
-    if number ~= number or number == math.huge or number == -math.huge then return nil end
+    if number ~= number or number == math.huge or number == -math.huge then return nil end
 
-    return math.floor(number)
+    return math.floor(number)
 
 end
 
 local function localClock()
 
-    *-- os.date("*t") is evaluated directly in the client-local wall-clock context.*
+    *-- os.date("*t") is evaluated directly in the client-local wall-clock context.*
 
-    *-- The protected closure avoids the Luau analyzer warning from passing os.date*
+    *-- The protected closure avoids the Luau analyzer warning from passing os.date*
 
-    *-- itself through pcall with a variadic argument list.*
+    *-- itself through pcall with a variadic argument list.*
 
-    local ok, clock = pcall(function()
+    local ok, clock = pcall(function()
 
-        return os.date("*t")
+        return os.date("*t")
 
-    end)
+    end)
 
-    if not ok or type(clock) ~= "table" then return nil end
+    if not ok or type(clock) ~= "table" then return nil end
 
-    return clock
+    return clock
 
 end
 
 local function hourKey(clock)
 
-    if type(clock) ~= "table" then return nil end
+    if type(clock) ~= "table" then return nil end
 
-    return string.format("%04d-%02d-%02d-%02d", clock.year, clock.month, clock.day, clock.hour)
+    return string.format("%04d-%02d-%02d-%02d", clock.year, clock.month, clock.day, clock.hour)
 
 end
 
 local function currentLocalTime(clock)
 
-    if type(clock) ~= "table" then return nil end
+    if type(clock) ~= "table" then return nil end
 
-    return string.format("%02d:%02d:%02d", clock.hour, clock.min, clock.sec)
+    return string.format("%02d:%02d:%02d", clock.hour, clock.min, clock.sec)
 
 end
 
 local function nextHourlyLabel(clock)
 
-    if type(clock) ~= "table" then return nil end
+    if type(clock) ~= "table" then return nil end
 
-    return string.format("%02d:00", (clock.hour + 1) % 24)
+    return string.format("%02d:00", (clock.hour + 1) % 24)
 
 end
 
 local function secondsUntilNextHourly(clock)
 
-    if type(clock) ~= "table" then return nil end
+    if type(clock) ~= "table" then return nil end
 
-    return (59 - clock.min) * 60 + (60 - clock.sec)
+    return (59 - clock.min) * 60 + (60 - clock.sec)
 
 end
 
 local function evaluateClock(clock, lastKey)
 
-    local currentKey = hourKey(clock)
+    local currentKey = hourKey(clock)
 
-    local hourlyWindow = type(clock) == "table" and clock.min == 0
+    local hourlyWindow = type(clock) == "table" and clock.min == 0
 
-    return {
+    return {
 
-        currentHourKey = currentKey,
+        currentHourKey = currentKey,
 
-        hourlyWindow = hourlyWindow,
+        hourlyWindow = hourlyWindow,
 
-        hourlyDue = hourlyWindow and currentKey ~= lastKey or false,
+        hourlyDue = hourlyWindow and currentKey ~= lastKey or false,
 
-        currentLocalTime = currentLocalTime(clock),
+        currentLocalTime = currentLocalTime(clock),
 
-        nextHourlyLabel = nextHourlyLabel(clock),
+        nextHourlyLabel = nextHourlyLabel(clock),
 
-        secondsUntilNextHourly = secondsUntilNextHourly(clock),
+        secondsUntilNextHourly = secondsUntilNextHourly(clock),
 
-    }
+    }
 
 end
 
 local function nextHourlyEstimate(now, clock)
 
-    local seconds = secondsUntilNextHourly(clock)
+    local seconds = secondsUntilNextHourly(clock)
 
-    if not seconds then return nil end
+    if not seconds then return nil end
 
-    return now + seconds
+    return now + seconds
 
 end
 
 local function highestCrossedMilestone(previousRebirth, currentRebirth, lastSentMilestone)
 
-    local previous = safeNumber(previousRebirth)
+    local previous = safeNumber(previousRebirth)
 
-    local current = safeNumber(currentRebirth)
+    local current = safeNumber(currentRebirth)
 
-    if not previous or not current or current <= previous or current < 100 then return nil end
+    if not previous or not current or current <= previous or current < 100 then return nil end
 
-    local highest = math.floor(current / 100) * 100
+    local highest = math.floor(current / 100) * 100
 
-    if highest < 100 or highest <= previous then return nil end
+    if highest < 100 or highest <= previous then return nil end
 
-    if lastSentMilestone and highest <= lastSentMilestone then return nil end
+    if lastSentMilestone and highest <= lastSentMilestone then return nil end
 
-    return highest
+    return highest
 
 end
 
 local function evaluateDecision(previousRebirth, currentRebirth, hourlyDue, lastSentMilestone)
 
-    local milestone = highestCrossedMilestone(previousRebirth, currentRebirth, lastSentMilestone)
+    local milestone = highestCrossedMilestone(previousRebirth, currentRebirth, lastSentMilestone)
 
-    local hourly = hourlyDue == true
+    local hourly = hourlyDue == true
 
-    return {
+    return {
 
-        milestone = milestone,
+        milestone = milestone,
 
-        hourlyDue = hourly,
+        hourlyDue = hourly,
 
-        shouldSend = hourly or milestone ~= nil,
+        shouldSend = hourly or milestone ~= nil,
 
-        sendCount = (hourly or milestone ~= nil) and 1 or 0,
+        sendCount = (hourly or milestone ~= nil) and 1 or 0,
 
-        trigger = hourly and milestone and ("Hourly Report + Rebirth Milestone " .. tostring(milestone))
+        trigger = hourly and milestone and ("Hourly Report + Rebirth Milestone " .. tostring(milestone))
 
-            or milestone and ("Rebirth Milestone " .. tostring(milestone))
+            or milestone and ("Rebirth Milestone " .. tostring(milestone))
 
-            or hourly and "Hourly Report"
+            or hourly and "Hourly Report"
 
-            or nil,
+            or nil,
 
-    }
+    }
 
 end
 
 local function mergeTrigger(existing, incoming)
 
-    if not existing then return incoming end
+    if not existing then return incoming end
 
-    if not incoming then return existing end
+    if not incoming then return existing end
 
-    if existing.milestone == nil then existing.milestone = incoming.milestone end
+    if existing.milestone == nil then existing.milestone = incoming.milestone end
 
-    if existing.hourlyKey == nil then existing.hourlyKey = incoming.hourlyKey end
+    if existing.hourlyKey == nil then existing.hourlyKey = incoming.hourlyKey end
 
-    if existing.hourlyDue or incoming.hourlyDue then existing.hourlyDue = true end
+    if existing.hourlyDue or incoming.hourlyDue then existing.hourlyDue = true end
 
-    if existing.milestone and existing.hourlyDue then
+    if existing.milestone and existing.hourlyDue then
 
-        existing.trigger = "Hourly Report + Rebirth Milestone " .. tostring(existing.milestone)
+        existing.trigger = "Hourly Report + Rebirth Milestone " .. tostring(existing.milestone)
 
-    elseif existing.milestone then
+    elseif existing.milestone then
 
-        existing.trigger = "Rebirth Milestone " .. tostring(existing.milestone)
+        existing.trigger = "Rebirth Milestone " .. tostring(existing.milestone)
 
-    else
+    else
 
-        existing.trigger = "Hourly Report"
+        existing.trigger = "Hourly Report"
 
-    end
+    end
 
-    return existing
+    return existing
 
 end
 
 local function getSafeSenderStatus(sender)
 
-    local ok, result = pcall(sender.getStatus)
+    local ok, result = pcall(sender.getStatus)
 
-    if not ok or type(result) ~= "table" then
+    if not ok or type(result) ~= "table" then
 
-        return { webhookConfigured = false, inFlight = false, transport = nil, destroyed = nil }
+        return { webhookConfigured = false, inFlight = false, transport = nil, destroyed = nil }
 
-    end
+    end
 
-    return {
+    return {
 
-        webhookConfigured = result.webhookConfigured == true,
+        webhookConfigured = result.webhookConfigured == true,
 
-        inFlight = result.inFlight == true,
+        inFlight = result.inFlight == true,
 
-        transport = result.transport,
+        transport = result.transport,
 
-        destroyed = result.destroyed == true,
+        destroyed = result.destroyed == true,
 
-    }
+    }
 
 end
 
 local function sendTrigger(trigger)
 
-    local sender = senderApi()
+    local sender = senderApi()
 
-    if not sender then
+    if not sender then
 
-        state.lastError = "SENDER_UNAVAILABLE"
+        state.lastError = "SENDER_UNAVAILABLE"
 
-        setPhase(PHASE_ERROR)
+        setPhase(PHASE_ERROR)
 
-        return false, state.lastError
+        return false, state.lastError
 
-    end
+    end
 
-    local senderStatus = getSafeSenderStatus(sender)
+    local senderStatus = getSafeSenderStatus(sender)
 
-    if senderStatus.destroyed then
+    if senderStatus.destroyed then
 
-        state.lastError = "SENDER_DESTROYED"
+        state.lastError = "SENDER_DESTROYED"
 
-        setPhase(PHASE_ERROR)
+        setPhase(PHASE_ERROR)
 
-        return false, state.lastError
+        return false, state.lastError
 
-    end
+    end
 
-    if not senderStatus.webhookConfigured then
+    if not senderStatus.webhookConfigured then
 
-        setPhase(PHASE_WAITING_FOR_WEBHOOK)
+        setPhase(PHASE_WAITING_FOR_WEBHOOK)
 
-        return false, "WAITING_FOR_WEBHOOK"
+        return false, "WAITING_FOR_WEBHOOK"
 
-    end
+    end
 
-    if senderStatus.inFlight then
+    if senderStatus.inFlight then
 
-        state.lastError = "SENDER_IN_FLIGHT"
+        state.lastError = "SENDER_IN_FLIGHT"
 
-        setPhase(PHASE_WAITING)
+        setPhase(PHASE_WAITING)
 
-        return false, state.lastError
+        return false, state.lastError
 
-    end
+    end
 
-    setPhase(PHASE_SENDING)
+    setPhase(PHASE_SENDING)
 
-    local okCall, result = pcall(sender.testWebhook)
+    local okCall, result = pcall(sender.testWebhook)
 
-    if not okCall then
+    if not okCall then
 
-        result = { ok = false, reason = "SENDER_CALL_FAILED" }
+        result = { ok = false, reason = "SENDER_CALL_FAILED" }
 
-    elseif type(result) ~= "table" then
+    elseif type(result) ~= "table" then
 
-        result = { ok = false, reason = "SENDER_BAD_RESULT" }
+        result = { ok = false, reason = "SENDER_BAD_RESULT" }
 
-    end
+    end
 
-    state.lastSendAt = os.time()
+    state.lastSendAt = os.time()
 
-    state.lastSendTrigger = trigger.trigger
+    state.lastSendTrigger = trigger.trigger
 
-    state.lastSendResult = result
+    state.lastSendResult = result
 
-    if result.ok == true then
+    if result.ok == true then
 
-        state.lastError = nil
+        state.lastError = nil
 
-        setPhase(PHASE_WAITING)
+        setPhase(PHASE_WAITING)
 
-        return true, nil
+        return true, nil
 
-    end
+    end
 
-    state.lastError = result.reason or "SENDER_REJECTED"
+    state.lastError = result.reason or "SENDER_REJECTED"
 
-    setPhase(PHASE_ERROR)
+    setPhase(PHASE_ERROR)
 
-    return false, state.lastError
+    return false, state.lastError
 
 end
 
 local function consumeTrigger(trigger)
 
-    if trigger.milestone then state.lastSentMilestone = trigger.milestone end
+    if trigger.milestone then state.lastSentMilestone = trigger.milestone end
 
-    if trigger.hourlyKey then state.lastHourlyKey = trigger.hourlyKey end
+    if trigger.hourlyKey then state.lastHourlyKey = trigger.hourlyKey end
 
 end
 
 local function processTrigger(trigger, now)
 
-    if not trigger then return { shouldSend = false, sendCount = 0 } end
+    if not trigger then return { shouldSend = false, sendCount = 0 } end
 
-    if state.pendingTrigger then
+    if state.pendingTrigger then
 
-        state.pendingTrigger = mergeTrigger(state.pendingTrigger, trigger)
+        state.pendingTrigger = mergeTrigger(state.pendingTrigger, trigger)
 
-        trigger = state.pendingTrigger
+        trigger = state.pendingTrigger
 
-    end
+    end
 
-    local sender = senderApi()
+    local sender = senderApi()
 
-    local senderStatus = sender and getSafeSenderStatus(sender) or { webhookConfigured = false }
+    local senderStatus = sender and getSafeSenderStatus(sender) or { webhookConfigured = false }
 
-    if not senderStatus.webhookConfigured then
+    if not senderStatus.webhookConfigured then
 
-        state.pendingTrigger = trigger
+        state.pendingTrigger = trigger
 
-        consumeTrigger(trigger)
+        consumeTrigger(trigger)
 
-        setPhase(PHASE_WAITING_FOR_WEBHOOK)
+        setPhase(PHASE_WAITING_FOR_WEBHOOK)
 
-        return { shouldSend = true, sendCount = 0, deferred = true, trigger = trigger.trigger }
+        return { shouldSend = true, sendCount = 0, deferred = true, trigger = trigger.trigger }
 
-    end
+    end
 
-    if state.lastSendAt and now - state.lastSendAt <= COLLISION_WINDOW then
+    if state.lastSendAt and now - state.lastSendAt <= COLLISION_WINDOW then
 
-        consumeTrigger(trigger)
+        consumeTrigger(trigger)
 
-        if state.lastSendTrigger and state.lastSendTrigger ~= trigger.trigger then
+        if state.lastSendTrigger and state.lastSendTrigger ~= trigger.trigger then
 
-            state.lastSendTrigger = state.lastSendTrigger .. " + " .. trigger.trigger
+            state.lastSendTrigger = state.lastSendTrigger .. " + " .. trigger.trigger
 
-        else
+        else
 
-            state.lastSendTrigger = trigger.trigger
+            state.lastSendTrigger = trigger.trigger
 
-        end
+        end
 
-        state.pendingTrigger = nil
+        state.pendingTrigger = nil
 
-        setPhase(PHASE_WAITING)
+        setPhase(PHASE_WAITING)
 
-        return { shouldSend = true, sendCount = 0, coalesced = true, trigger = state.lastSendTrigger }
+        return { shouldSend = true, sendCount = 0, coalesced = true, trigger = state.lastSendTrigger }
 
-    end
+    end
 
-    consumeTrigger(trigger)
+    consumeTrigger(trigger)
 
-    state.pendingTrigger = nil
+    state.pendingTrigger = nil
 
-    local sent, reason = sendTrigger(trigger)
+    local sent, reason = sendTrigger(trigger)
 
-    if not sent and reason == "SENDER_IN_FLIGHT" then
+    if not sent and reason == "SENDER_IN_FLIGHT" then
 
-        *-- Keep one deferred decision for a sender operation already in progress.*
+        *-- Keep one deferred decision for a sender operation already in progress.*
 
-        state.pendingTrigger = trigger
+        state.pendingTrigger = trigger
 
-    end
+    end
 
-    return { shouldSend = true, sendCount = sent and 1 or 0, sent = sent, reason = reason, trigger = trigger.trigger }
+    return { shouldSend = true, sendCount = sent and 1 or 0, sent = sent, reason = reason, trigger = trigger.trigger }
 
 end
 
 local function readRebirth()
 
-    local api = snapshotApi()
+    local api = snapshotApi()
 
-    if not api then return nil, "SNAPSHOT_V2_UNAVAILABLE" end
+    if not api then return nil, "SNAPSHOT_V2_UNAVAILABLE" end
 
-    local ok, snapshot = pcall(api.getSnapshot)
+    local ok, snapshot = pcall(api.getSnapshot)
 
-    if not ok or type(snapshot) ~= "table" then return nil, "SNAPSHOT_ACQUISITION_FAILED" end
+    if not ok or type(snapshot) ~= "table" then return nil, "SNAPSHOT_ACQUISITION_FAILED" end
 
-    local account = snapshot.account
+    local account = snapshot.account
 
-    local rebirth = type(account) == "table" and safeNumber(account.rebirth) or nil
+    local rebirth = type(account) == "table" and safeNumber(account.rebirth) or nil
 
-    if rebirth == nil then return nil, "REBIRTH_UNAVAILABLE" end
+    if rebirth == nil then return nil, "REBIRTH_UNAVAILABLE" end
 
-    return rebirth, nil
+    return rebirth, nil
 
 end
 
 local function tick(now)
 
-    now = tonumber(now) or os.time()
+    now = tonumber(now) or os.time()
 
-    local clock = localClock()
+    local clock = localClock()
 
-    if not clock then
+    if not clock then
 
-        state.lastError = "LOCAL_CLOCK_UNAVAILABLE"
+        state.lastError = "LOCAL_CLOCK_UNAVAILABLE"
 
-        setPhase(PHASE_ERROR)
+        setPhase(PHASE_ERROR)
 
-        return { ok = false, reason = state.lastError }
+        return { ok = false, reason = state.lastError }
 
-    end
+    end
 
-    local clockState = evaluateClock(clock, state.lastHourlyKey)
+    local clockState = evaluateClock(clock, state.lastHourlyKey)
 
-    state.nextHourlyAt = nextHourlyEstimate(now, clock)
+    state.nextHourlyAt = nextHourlyEstimate(now, clock)
 
-    local currentKey = clockState.currentHourKey
+    local currentKey = clockState.currentHourKey
 
-    local hourlyDue = clockState.hourlyDue
+    local hourlyDue = clockState.hourlyDue
 
-    local rebirth, rebirthError = readRebirth()
+    local rebirth, rebirthError = readRebirth()
 
-    if not rebirth then
+    if not rebirth then
 
-        state.lastError = rebirthError
+        state.lastError = rebirthError
 
-        setPhase(PHASE_ERROR)
+        setPhase(PHASE_ERROR)
 
-        return { ok = false, reason = rebirthError, hourlyDue = hourlyDue }
+        return { ok = false, reason = rebirthError, hourlyDue = hourlyDue }
 
-    end
+    end
 
-    if state.lastObservedRebirth == nil then
+    if state.lastObservedRebirth == nil then
 
-        state.lastObservedRebirth = rebirth
+        state.lastObservedRebirth = rebirth
 
-        setPhase(senderApi() and getSafeSenderStatus(senderApi()).webhookConfigured and PHASE_WAITING or PHASE_WAITING_FOR_WEBHOOK)
+        setPhase(senderApi() and getSafeSenderStatus(senderApi()).webhookConfigured and PHASE_WAITING or PHASE_WAITING_FOR_WEBHOOK)
 
-        return { ok = true, baseline = true, rebirth = rebirth, hourlyDue = false, sendCount = 0 }
+        return { ok = true, baseline = true, rebirth = rebirth, hourlyDue = false, sendCount = 0 }
 
-    end
+    end
 
-    local milestone = highestCrossedMilestone(state.lastObservedRebirth, rebirth, state.lastSentMilestone)
+    local milestone = highestCrossedMilestone(state.lastObservedRebirth, rebirth, state.lastSentMilestone)
 
-    state.lastObservedRebirth = rebirth
+    state.lastObservedRebirth = rebirth
 
-    local trigger = nil
+    local trigger = nil
 
-    if hourlyDue or milestone then
+    if hourlyDue or milestone then
 
-        trigger = {
+        trigger = {
 
-            hourlyDue = hourlyDue,
+            hourlyDue = hourlyDue,
 
-            hourlyKey = hourlyDue and currentKey or nil,
+            hourlyKey = hourlyDue and currentKey or nil,
 
-            milestone = milestone,
+            milestone = milestone,
 
-            trigger = hourlyDue and milestone and ("Hourly Report + Rebirth Milestone " .. tostring(milestone))
+            trigger = hourlyDue and milestone and ("Hourly Report + Rebirth Milestone " .. tostring(milestone))
 
-                or milestone and ("Rebirth Milestone " .. tostring(milestone))
+                or milestone and ("Rebirth Milestone " .. tostring(milestone))
 
-                or "Hourly Report",
+                or "Hourly Report",
 
-        }
+        }
 
-    end
+    end
 
-    if state.pendingTrigger and not trigger then trigger = state.pendingTrigger end
+    if state.pendingTrigger and not trigger then trigger = state.pendingTrigger end
 
-    local result = processTrigger(trigger, now)
+    local result = processTrigger(trigger, now)
 
-    result.ok = true
+    result.ok = true
 
-    result.rebirth = rebirth
+    result.rebirth = rebirth
 
-    result.hourlyDue = hourlyDue
+    result.hourlyDue = hourlyDue
 
-    result.milestone = milestone
+    result.milestone = milestone
 
-    return result
+    return result
 
 end
 
 local function worker(myGeneration)
 
-    while state.enabled and not state.destroyed and state.generation == myGeneration do
+    while state.enabled and not state.destroyed and state.generation == myGeneration do
 
-        local ok = pcall(tick)
+        local ok = pcall(tick)
 
-        if not ok then
+        if not ok then
 
-            state.lastError = "SCHEDULER_TICK_FAILED"
+            state.lastError = "SCHEDULER_TICK_FAILED"
 
-            setPhase(PHASE_ERROR)
+            setPhase(PHASE_ERROR)
 
-        end
+        end
 
-        if not state.enabled or state.destroyed or state.generation ~= myGeneration then break end
+        if not state.enabled or state.destroyed or state.generation ~= myGeneration then break end
 
-        task.wait(POLL_INTERVAL)
+        task.wait(POLL_INTERVAL)
 
-    end
+    end
 
-    if state.generation == myGeneration then state.workerRunning = false end
+    if state.generation == myGeneration then state.workerRunning = false end
 
 end
 
@@ -9250,361 +9250,361 @@ local getStatus
 
 local function enable()
 
-    if state.destroyed then return { ok = false, reason = "DESTROYED" } end
+    if state.destroyed then return { ok = false, reason = "DESTROYED" } end
 
-    if state.enabled then return { ok = true, alreadyEnabled = true, status = getStatus() } end
+    if state.enabled then return { ok = true, alreadyEnabled = true, status = getStatus() } end
 
-    setPhase(PHASE_INITIALIZING)
+    setPhase(PHASE_INITIALIZING)
 
-    local snapshot = snapshotApi()
+    local snapshot = snapshotApi()
 
-    local sender = senderApi()
+    local sender = senderApi()
 
-    if not snapshot then
+    if not snapshot then
 
-        state.lastError = "SNAPSHOT_V2_UNAVAILABLE"
+        state.lastError = "SNAPSHOT_V2_UNAVAILABLE"
 
-        setPhase(PHASE_ERROR)
+        setPhase(PHASE_ERROR)
 
-        return { ok = false, reason = state.lastError }
+        return { ok = false, reason = state.lastError }
 
-    end
+    end
 
-    if not sender then
+    if not sender then
 
-        state.lastError = "SENDER_V1_UNAVAILABLE"
+        state.lastError = "SENDER_V1_UNAVAILABLE"
 
-        setPhase(PHASE_ERROR)
+        setPhase(PHASE_ERROR)
 
-        return { ok = false, reason = state.lastError }
+        return { ok = false, reason = state.lastError }
 
-    end
+    end
 
-    local rebirth, rebirthError = readRebirth()
+    local rebirth, rebirthError = readRebirth()
 
-    if not rebirth then
+    if not rebirth then
 
-        state.lastError = rebirthError
+        state.lastError = rebirthError
 
-        setPhase(PHASE_ERROR)
+        setPhase(PHASE_ERROR)
 
-        return { ok = false, reason = rebirthError }
+        return { ok = false, reason = rebirthError }
 
-    end
+    end
 
-    local now = os.time()
+    local now = os.time()
 
-    local clock = localClock()
+    local clock = localClock()
 
-    if not clock then
+    if not clock then
 
-        state.lastError = "LOCAL_CLOCK_UNAVAILABLE"
+        state.lastError = "LOCAL_CLOCK_UNAVAILABLE"
 
-        setPhase(PHASE_ERROR)
+        setPhase(PHASE_ERROR)
 
-        return { ok = false, reason = state.lastError }
+        return { ok = false, reason = state.lastError }
 
-    end
+    end
 
-    state.enabled = true
+    state.enabled = true
 
-    state.lastError = nil
+    state.lastError = nil
 
-    state.lastObservedRebirth = rebirth
+    state.lastObservedRebirth = rebirth
 
-    state.startupBaselineRebirth = rebirth
+    state.startupBaselineRebirth = rebirth
 
-    local clockState = evaluateClock(clock, state.lastHourlyKey)
+    local clockState = evaluateClock(clock, state.lastHourlyKey)
 
-    if clockState.hourlyWindow then state.lastHourlyKey = clockState.currentHourKey end
+    if clockState.hourlyWindow then state.lastHourlyKey = clockState.currentHourKey end
 
-    state.nextHourlyAt = nextHourlyEstimate(now, clock)
+    state.nextHourlyAt = nextHourlyEstimate(now, clock)
 
-    state.pendingTrigger = nil
+    state.pendingTrigger = nil
 
-    state.generation += 1
+    state.generation += 1
 
-    local myGeneration = state.generation
+    local myGeneration = state.generation
 
-    state.workerRunning = true
+    state.workerRunning = true
 
-    setPhase(getSafeSenderStatus(sender).webhookConfigured and PHASE_WAITING or PHASE_WAITING_FOR_WEBHOOK)
+    setPhase(getSafeSenderStatus(sender).webhookConfigured and PHASE_WAITING or PHASE_WAITING_FOR_WEBHOOK)
 
-    task.spawn(function() worker(myGeneration) end)
+    task.spawn(function() worker(myGeneration) end)
 
-    return { ok = true, status = getStatus() }
+    return { ok = true, status = getStatus() }
 
 end
 
 local function disable()
 
-    state.enabled = false
+    state.enabled = false
 
-    state.generation += 1
+    state.generation += 1
 
-    state.workerRunning = false
+    state.workerRunning = false
 
-    state.pendingTrigger = nil
+    state.pendingTrigger = nil
 
-    if not state.destroyed then setPhase(PHASE_DISABLED) end
+    if not state.destroyed then setPhase(PHASE_DISABLED) end
 
-    return { ok = true, status = getStatus() }
+    return { ok = true, status = getStatus() }
 
 end
 
 local function runOnce()
 
-    if state.destroyed then return { ok = false, reason = "DESTROYED" } end
+    if state.destroyed then return { ok = false, reason = "DESTROYED" } end
 
-    if not snapshotApi() then return { ok = false, reason = "SNAPSHOT_V2_UNAVAILABLE" } end
+    if not snapshotApi() then return { ok = false, reason = "SNAPSHOT_V2_UNAVAILABLE" } end
 
-    if state.lastObservedRebirth == nil then
+    if state.lastObservedRebirth == nil then
 
-        local rebirth, reason = readRebirth()
+        local rebirth, reason = readRebirth()
 
-        if not rebirth then return { ok = false, reason = reason } end
+        if not rebirth then return { ok = false, reason = reason } end
 
-        state.lastObservedRebirth = rebirth
+        state.lastObservedRebirth = rebirth
 
-        state.startupBaselineRebirth = state.startupBaselineRebirth or rebirth
+        state.startupBaselineRebirth = state.startupBaselineRebirth or rebirth
 
-        local clock = localClock()
+        local clock = localClock()
 
-        local now = os.time()
+        local now = os.time()
 
-        local clockState = clock and evaluateClock(clock, state.lastHourlyKey) or nil
+        local clockState = clock and evaluateClock(clock, state.lastHourlyKey) or nil
 
-        if clockState and clockState.hourlyWindow then state.lastHourlyKey = clockState.currentHourKey end
+        if clockState and clockState.hourlyWindow then state.lastHourlyKey = clockState.currentHourKey end
 
-        state.nextHourlyAt = state.nextHourlyAt or (clock and nextHourlyEstimate(now, clock) or nil)
+        state.nextHourlyAt = state.nextHourlyAt or (clock and nextHourlyEstimate(now, clock) or nil)
 
-        setPhase(senderApi() and getSafeSenderStatus(senderApi()).webhookConfigured and PHASE_WAITING or PHASE_WAITING_FOR_WEBHOOK)
+        setPhase(senderApi() and getSafeSenderStatus(senderApi()).webhookConfigured and PHASE_WAITING or PHASE_WAITING_FOR_WEBHOOK)
 
-        return { ok = true, baseline = true, rebirth = rebirth, sendCount = 0 }
+        return { ok = true, baseline = true, rebirth = rebirth, sendCount = 0 }
 
-    end
+    end
 
-    return tick()
+    return tick()
 
 end
 
 local function resetBaseline()
 
-    if state.destroyed then return { ok = false, reason = "DESTROYED" } end
+    if state.destroyed then return { ok = false, reason = "DESTROYED" } end
 
-    local rebirth, reason = readRebirth()
+    local rebirth, reason = readRebirth()
 
-    if not rebirth then return { ok = false, reason = reason } end
+    if not rebirth then return { ok = false, reason = reason } end
 
-    state.lastObservedRebirth = rebirth
+    state.lastObservedRebirth = rebirth
 
-    state.startupBaselineRebirth = rebirth
+    state.startupBaselineRebirth = rebirth
 
-    state.lastSentMilestone = nil
+    state.lastSentMilestone = nil
 
-    state.pendingTrigger = nil
+    state.pendingTrigger = nil
 
-    state.lastError = nil
+    state.lastError = nil
 
-    setPhase(state.enabled and PHASE_WAITING or PHASE_DISABLED)
+    setPhase(state.enabled and PHASE_WAITING or PHASE_DISABLED)
 
-    return { ok = true, rebirth = rebirth }
+    return { ok = true, rebirth = rebirth }
 
 end
 
 local function debugEvaluate(input)
 
-    input = type(input) == "table" and input or {}
+    input = type(input) == "table" and input or {}
 
-    local previous = input.previousRebirth
+    local previous = input.previousRebirth
 
-    local current = input.currentRebirth
+    local current = input.currentRebirth
 
-    local lastSent = input.lastSentMilestone
+    local lastSent = input.lastSentMilestone
 
-    local decision = evaluateDecision(previous, current, input.hourlyDue == true, lastSent)
+    local decision = evaluateDecision(previous, current, input.hourlyDue == true, lastSent)
 
-    decision.hourKey = input.hourKey
+    decision.hourKey = input.hourKey
 
-    decision.httpPerformed = false
+    decision.httpPerformed = false
 
-    decision.gameplayMutated = false
+    decision.gameplayMutated = false
 
-    return decision
+    return decision
 
 end
 
 local function debugEvaluateClock(input)
 
-    input = type(input) == "table" and input or {}
+    input = type(input) == "table" and input or {}
 
-    local clock = {
+    local clock = {
 
-        year = tonumber(input.year) or 1970,
+        year = tonumber(input.year) or 1970,
 
-        month = tonumber(input.month) or 1,
+        month = tonumber(input.month) or 1,
 
-        day = tonumber(input.day) or 1,
+        day = tonumber(input.day) or 1,
 
-        hour = tonumber(input.hour) or 0,
+        hour = tonumber(input.hour) or 0,
 
-        min = tonumber(input.minute) or 0,
+        min = tonumber(input.minute) or 0,
 
-        sec = tonumber(input.second) or 0,
+        sec = tonumber(input.second) or 0,
 
-    }
+    }
 
-    local result = evaluateClock(clock, input.lastHourlyKey)
+    local result = evaluateClock(clock, input.lastHourlyKey)
 
-    if type(input.hourKey) == "string" then result.currentHourKey = input.hourKey end
+    if type(input.hourKey) == "string" then result.currentHourKey = input.hourKey end
 
-    result.ok = true
+    result.ok = true
 
-    result.httpPerformed = false
+    result.httpPerformed = false
 
-    result.gameplayMutated = false
+    result.gameplayMutated = false
 
-    return result
+    return result
 
 end
 
 local function debugClock()
 
-    local now = os.time()
+    local now = os.time()
 
-    local clock = localClock()
+    local clock = localClock()
 
-    if not clock then
+    if not clock then
 
-        return {
+        return {
 
-            ok = false,
+            ok = false,
 
-            reason = "LOCAL_CLOCK_UNAVAILABLE",
+            reason = "LOCAL_CLOCK_UNAVAILABLE",
 
-            nowEpoch = now,
+            nowEpoch = now,
 
-            lastHourlyKey = state.lastHourlyKey,
+            lastHourlyKey = state.lastHourlyKey,
 
-            enabled = state.enabled,
+            enabled = state.enabled,
 
-            httpPerformed = false,
+            httpPerformed = false,
 
-            gameplayMutated = false,
+            gameplayMutated = false,
 
-        }
+        }
 
-    end
+    end
 
-    local result = evaluateClock(clock, state.lastHourlyKey)
+    local result = evaluateClock(clock, state.lastHourlyKey)
 
-    result.ok = true
+    result.ok = true
 
-    result.nowEpoch = now
+    result.nowEpoch = now
 
-    result.localYear = clock.year
+    result.localYear = clock.year
 
-    result.localMonth = clock.month
+    result.localMonth = clock.month
 
-    result.localDay = clock.day
+    result.localDay = clock.day
 
-    result.localHour = clock.hour
+    result.localHour = clock.hour
 
-    result.localMinute = clock.min
+    result.localMinute = clock.min
 
-    result.localSecond = clock.sec
+    result.localSecond = clock.sec
 
-    result.lastHourlyKey = state.lastHourlyKey
+    result.lastHourlyKey = state.lastHourlyKey
 
-    result.enabled = state.enabled
+    result.enabled = state.enabled
 
-    result.httpPerformed = false
+    result.httpPerformed = false
 
-    result.gameplayMutated = false
+    result.gameplayMutated = false
 
-    return result
+    return result
 
 end
 
 getStatus = function()
 
-    local sender = senderApi()
+    local sender = senderApi()
 
-    local senderStatus = sender and getSafeSenderStatus(sender) or nil
+    local senderStatus = sender and getSafeSenderStatus(sender) or nil
 
-    local clock = localClock()
+    local clock = localClock()
 
-    local clockState = clock and evaluateClock(clock, state.lastHourlyKey) or nil
+    local clockState = clock and evaluateClock(clock, state.lastHourlyKey) or nil
 
-    return {
+    return {
 
-        enabled = state.enabled,
+        enabled = state.enabled,
 
-        workerRunning = state.workerRunning,
+        workerRunning = state.workerRunning,
 
-        generation = state.generation,
+        generation = state.generation,
 
-        lastObservedRebirth = state.lastObservedRebirth,
+        lastObservedRebirth = state.lastObservedRebirth,
 
-        startupBaselineRebirth = state.startupBaselineRebirth,
+        startupBaselineRebirth = state.startupBaselineRebirth,
 
-        lastSentMilestone = state.lastSentMilestone,
+        lastSentMilestone = state.lastSentMilestone,
 
-        lastHourlyKey = state.lastHourlyKey,
+        lastHourlyKey = state.lastHourlyKey,
 
-        lastSendAt = state.lastSendAt,
+        lastSendAt = state.lastSendAt,
 
-        lastSendTrigger = state.lastSendTrigger,
+        lastSendTrigger = state.lastSendTrigger,
 
-        lastSendResult = state.lastSendResult,
+        lastSendResult = state.lastSendResult,
 
-        nextHourlyAt = state.nextHourlyAt,
+        nextHourlyAt = state.nextHourlyAt,
 
-        currentLocalTime = clockState and clockState.currentLocalTime or nil,
+        currentLocalTime = clockState and clockState.currentLocalTime or nil,
 
-        currentHourKey = clockState and clockState.currentHourKey or nil,
+        currentHourKey = clockState and clockState.currentHourKey or nil,
 
-        hourlyWindow = clockState and clockState.hourlyWindow or false,
+        hourlyWindow = clockState and clockState.hourlyWindow or false,
 
-        nextHourlyLabel = clockState and clockState.nextHourlyLabel or nil,
+        nextHourlyLabel = clockState and clockState.nextHourlyLabel or nil,
 
-        secondsUntilNextHourly = clockState and clockState.secondsUntilNextHourly or nil,
+        secondsUntilNextHourly = clockState and clockState.secondsUntilNextHourly or nil,
 
-        phase = state.phase,
+        phase = state.phase,
 
-        lastError = state.lastError,
+        lastError = state.lastError,
 
-        pendingTrigger = state.pendingTrigger and {
+        pendingTrigger = state.pendingTrigger and {
 
-            hourlyDue = state.pendingTrigger.hourlyDue,
+            hourlyDue = state.pendingTrigger.hourlyDue,
 
-            hourlyKey = state.pendingTrigger.hourlyKey,
+            hourlyKey = state.pendingTrigger.hourlyKey,
 
-            milestone = state.pendingTrigger.milestone,
+            milestone = state.pendingTrigger.milestone,
 
-            trigger = state.pendingTrigger.trigger,
+            trigger = state.pendingTrigger.trigger,
 
-        } or nil,
+        } or nil,
 
-        sender = senderStatus,
+        sender = senderStatus,
 
-        pollInterval = POLL_INTERVAL,
+        pollInterval = POLL_INTERVAL,
 
-        collisionWindow = COLLISION_WINDOW,
+        collisionWindow = COLLISION_WINDOW,
 
-    }
+    }
 
 end
 
 local function destroy()
 
-    disable()
+    disable()
 
-    state.destroyed = true
+    state.destroyed = true
 
-    state.phase = PHASE_DISABLED
+    state.phase = PHASE_DISABLED
 
-    return { ok = true, destroyed = true }
+    return { ok = true, destroyed = true }
 
 end
 
@@ -9612,29 +9612,29 @@ local previous = env.UNO_WEBHOOK_SCHEDULER_V1
 
 if type(previous) == "table" and type(previous.destroy) == "function" then
 
-    pcall(previous.destroy)
+    pcall(previous.destroy)
 
 end
 
 local API = {
 
-    enable = enable,
+    enable = enable,
 
-    disable = disable,
+    disable = disable,
 
-    getStatus = getStatus,
+    getStatus = getStatus,
 
-    runOnce = runOnce,
+    runOnce = runOnce,
 
-    resetBaseline = resetBaseline,
+    resetBaseline = resetBaseline,
 
-    debugEvaluate = debugEvaluate,
+    debugEvaluate = debugEvaluate,
 
-    debugClock = debugClock,
+    debugClock = debugClock,
 
-    debugEvaluateClock = debugEvaluateClock,
+    debugEvaluateClock = debugEvaluateClock,
 
-    destroy = destroy,
+    destroy = destroy,
 
 }
 

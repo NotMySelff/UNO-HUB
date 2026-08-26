@@ -127,7 +127,7 @@ local State = {
     data = { roster = nil, rebirth = nil, towerBest = nil, chicken = nil, recyclerLevel = nil, money = nil, coop = nil, incubator = nil },
     autoFarmRebirth = {
         enabled = false, phase = "DISABLED", generation = 0,
-        retryDelay = 5, postRebirthDelay = 30, countdown = 0, countdownLabel = "",
+        retryDelay = 30, postRebirthDelay = 30, countdown = 0, countdownLabel = "",
         surrenderInFlight = false, declineInFlight = false,
         coordinatorPauseReasons = {},
     },
@@ -5712,6 +5712,8 @@ do
                 autoFarmRebirth = State.toggles.autoFarmRebirth == true,
                 autoTower = State.toggles.autoTower == true,
                 useFrontierSkip = State.toggles.useFrontierSkip == true,
+                autoFarmStartDelay = tonumber(AFR.postRebirthDelay) or 30,
+                -- Legacy key kept so older UNO configs/tools remain compatible.
                 autoFarmRebirthStartDelay = tonumber(AFR.postRebirthDelay) or 30,
                 autoTowerStartDelay = tonumber(State.autoTower.startDelay) or 30,
                 autoRebirth = State.toggles.autoRebirth == true,
@@ -5743,8 +5745,14 @@ do
             if data.autoFarmRebirth == true and data.autoTower == true then
                 data.autoTower = false
             end
-            if data.autoFarmRebirthStartDelay ~= nil then
-                AFR.postRebirthDelay = math.clamp(math.floor((tonumber(data.autoFarmRebirthStartDelay) or 30) + 0.5), 0, 120)
+            local configuredAutoFarmStartDelay = data.autoFarmStartDelay
+            if configuredAutoFarmStartDelay == nil then
+                configuredAutoFarmStartDelay = data.autoFarmRebirthStartDelay
+            end
+            if configuredAutoFarmStartDelay ~= nil then
+                local delayValue = math.clamp(math.floor((tonumber(configuredAutoFarmStartDelay) or 30) + 0.5), 0, 120)
+                AFR.postRebirthDelay = delayValue
+                AFR.retryDelay = delayValue
             end
             if data.autoTowerStartDelay ~= nil then
                 State.autoTower.startDelay = math.clamp(math.floor((tonumber(data.autoTowerStartDelay) or 30) + 0.5), 0, 120)
@@ -7257,10 +7265,12 @@ safeBuild("Auto Farm", function()
     local farm = tabs.Farm
     local _, farmCard = card(farm, 1, "Farm")
     settingRow(farmCard, 1, "Auto Farm Rebirth", nil, "autoFarmRebirth", setAutoFarmRebirth)
-    State._delayStepper(farmCard, 2, "Rebirth Start Delay", function()
+    State._delayStepper(farmCard, 2, "Start Delay", function()
         return AFR.postRebirthDelay
     end, function(value)
+        -- One Auto Farm delay controls both post-rebirth cooldown and RETRY_WAIT.
         AFR.postRebirthDelay = value
+        AFR.retryDelay = value
     end)
 
     settingRow(farmCard, 3, "Auto Tower", nil, "autoTower", State._setAutoTowerHost)

@@ -157,10 +157,11 @@ local State = {
         generatorsOwned = 0, generatorsSlots = 0, nextBuySlot = nil, nextBuyCost = nil, recyclerLevel = 0,
         maxUpgradeGeneratorLevel = 50,
     },
+    autoFavorite = { status = "DISABLED" },
     movementOwner = "NONE",
     toggles = {
         autoFarmRebirth = false, autoTower = false, useFrontierSkip = true, autoKoDismiss = true, autoHatch = false, autoCollectEgg = false,
-        autoIncubatorClaim = false, autoSell = false, autoFuse = false,
+        autoIncubatorClaim = false, autoSell = false, autoFavorite = false, autoFuse = false,
         autoBuyGenerator = false, autoUpgradeGenerator = false, autoExpandCoop = false, autoUpgradeRecycler = false, autoUpgradeIncubator = false,
         antiAfk = true, autoRebirth = false, autoHotEgg = false, autoArena = false, autoEventCapsule = false, autoKraken = false, autoUfoAscension = false, showFloatingButton = true, reducedMotion = false,
     },
@@ -1235,7 +1236,7 @@ for _, name in ipairs({
     "TowerStart", "TowerSurrender", "TowerRunStarted", "TowerFloorCleared", "TowerRivalLanded",
     "TowerDefeat", "TowerRunEnded", "TowerContinueOffer", "TowerContinueDecline", "TowerContinued",
     "Rebirth", "BuyGenerator", "UpgradeGenerator", "ExpandCoop", "UpgradeRecycler",
-    "HatchEggs", "IncubatorClaim", "IncubatorUpgrade", "SellChickens", "FuseChickens",
+    "HatchEggs", "IncubatorClaim", "IncubatorUpgrade", "SellChickens", "FuseChickens", "SetChickenFavorite",
     "LiveEventStarted", "LiveEventEnded", "HotEggEntrance", "HotEggMeteor", "HotEggReward", "HotEggFinale",
 }) do
     local inst = remotesFolder and remotesFolder:FindFirstChild(name)
@@ -2467,6 +2468,271 @@ do
         end
     end
 end
+
+--------------------------------------------------------------------
+-- AUTO FAVORITE CHICKENS (source-backed SetChickenFavorite integration)
+--------------------------------------------------------------------
+State._autoFavoriteFeature = (function()
+    local Remotes = Integration.modules.Remotes
+    local DataController = Integration.modules.DataController
+    local Catalog = Integration.modules.Catalog
+    local favoriteDef = Remotes and Remotes.defs and Remotes.defs.SetChickenFavorite
+
+    if type(Remotes) ~= "table" or type(Remotes.invoke) ~= "function"
+        or type(DataController) ~= "table" or type(DataController.roster) ~= "function"
+        or type(Catalog) ~= "table" or type(Catalog.chickenTypes) ~= "table"
+        or favoriteDef == nil then
+        return nil
+    end
+
+    local enabled = false
+    local destroyed = false
+    local generation = 0
+    local requestInFlight = nil
+    local selectedTypeIds = {}
+    local selectedRarities = {}
+    local retryAfter = {}
+    local status = "DISABLED"
+    local lastError = nil
+
+    local function setStatus(value, err)
+        status = tostring(value or "IDLE")
+        State.autoFavorite.status = status
+        lastError = err
+    end
+
+    local function readRoster()
+        local ok, roster = pcall(DataController.roster)
+        if ok and type(roster) == "table" and type(roster.chickens) == "table" then
+            return roster
+        end
+        return nil
+    end
+
+    local function resolveRarity(chicken)
+        if type(chicken) ~= "table" then return nil end
+        if chicken.rarity ~= nil then return string.lower(tostring(chicken.rarity)) end
+        local def = chicken.typeId and Catalog.chickenTypes[chicken.typeId]
+        if type(def) == "table" and def.rarity ~= nil then
+            return string.lower(tostring(def.rarity))
+        end
+        return nil
+    end
+
+    local function hasFilters()
+        return next(selectedTypeIds) ~= nil or next(selectedRarities) ~= nil
+    end
+
+    local function matches(chicken)
+        if type(chicken) ~= "table" then return false end
+        local typeId = chicken.typeId
+        if typeId ~= nil and selectedTypeIds[tostring(typeId)] == true then
+            return true
+        end
+        local rarity = resolveRarity(chicken)
+        return rarity ~= nil and selectedRarities[rarity] == true
+    end
+
+    local function findChickenById(roster, id)
+        for _, chicken in pairs((type(roster) == "table" and roster.chickens) or {}) do
+            if type(chicken) == "table" and chicken.id == id then
+                return chicken
+            end
+        end
+        return nil
+    end
+
+    local function processOnce(workerGeneration)
+        if destroyed or not enabled or workerGeneration ~= generation then return end
+        if not hasFilters() then
+            setStatus("NO FILTERS")
+            return
+        end
+
+        local roster = readRoster()
+        if not roster then
+            setStatus("NO ROSTER", "ROSTER UNAVAILABLE")
+            return
+        end
+
+        local now = os.clock()
+        local candidate = nil
+        for _, chicken in pairs(roster.chickens) do
+            if type(chicken) == "table"
+                and chicken.id ~= nil
+                and chicken.favorite ~= true
+                and matches(chicken)
+                and (retryAfter[chicken.id] == nil or retryAfter[chicken.id] <= now) then
+                candidate = chicken
+                break
+            end
+        end
+
+        if not candidate then
+            setStatus("IDLE")
+            return
+        end
+
+        local id = candidate.id
+        requestInFlight = id
+        setStatus("FAVORITING")
+
+        local ok, response = pcall(Remotes.invoke, favoriteDef, id, true)
+        if not ok then
+            requestInFlight = nil
+            retryAfter[id] = os.clock() + 2
+            setStatus("ERROR", tostring(response))
+            return
+        end
+
+        setStatus("WAITING CONFIRMATION")
+        local deadline = os.clock() + 6
+        local confirmed = false
+        while os.clock() < deadline and enabled and not destroyed and workerGeneration == generation do
+            local latestRoster = readRoster()
+            local latest = latestRoster and findChickenById(latestRoster, id) or nil
+            if latest and latest.favorite == true then
+                confirmed = true
+                break
+            end
+            task.wait(0.20)
+        end
+
+        requestInFlight = nil
+        if confirmed then
+            retryAfter[id] = nil
+            setStatus("CONFIRMED")
+        elseif enabled and not destroyed and workerGeneration == generation then
+            retryAfter[id] = os.clock() + 2
+            setStatus("NOT CONFIRMED")
+        end
+    end
+
+    local function worker(workerGeneration)
+        while enabled and not destroyed and workerGeneration == generation do
+            local ok, err = pcall(processOnce, workerGeneration)
+            if not ok then
+                setStatus("ERROR", tostring(err))
+                task.wait(1.5)
+            else
+                task.wait(0.45)
+            end
+        end
+        if not enabled then setStatus("DISABLED") end
+    end
+
+    local api = {}
+
+    function api.setAutoFavorite(value)
+        value = value == true
+        if destroyed then return false end
+        if value == enabled then
+            State.toggles.autoFavorite = enabled
+            return true
+        end
+        enabled = value
+        State.toggles.autoFavorite = value
+        generation = generation + 1
+        requestInFlight = nil
+        if value then
+            setStatus(hasFilters() and "IDLE" or "NO FILTERS")
+            local myGeneration = generation
+            task.spawn(function() worker(myGeneration) end)
+        else
+            setStatus("DISABLED")
+        end
+        return true
+    end
+
+    function api.isEnabled() return enabled end
+    function api.getStatus()
+        return { status = status, enabled = enabled, requestInFlight = requestInFlight, lastError = lastError }
+    end
+
+    function api.setTypeSelected(typeId, value)
+        typeId = tostring(typeId or "")
+        if typeId == "" then return false end
+        if value == true then selectedTypeIds[typeId] = true else selectedTypeIds[typeId] = nil end
+        return true
+    end
+    function api.isTypeSelected(typeId) return selectedTypeIds[tostring(typeId or "")] == true end
+    function api.clearTypeSelection() table.clear(selectedTypeIds) end
+    function api.getSelectedTypeIds()
+        local out = {}
+        for id, on in pairs(selectedTypeIds) do if on then table.insert(out, id) end end
+        table.sort(out)
+        return out
+    end
+
+    function api.setRaritySelected(rarityId, value)
+        rarityId = string.lower(tostring(rarityId or ""))
+        if rarityId == "" then return false end
+        if value == true then selectedRarities[rarityId] = true else selectedRarities[rarityId] = nil end
+        return true
+    end
+    function api.isRaritySelected(rarityId)
+        return selectedRarities[string.lower(tostring(rarityId or ""))] == true
+    end
+    function api.clearRaritySelection() table.clear(selectedRarities) end
+    function api.getSelectedRarities()
+        local out = {}
+        for id, on in pairs(selectedRarities) do if on then table.insert(out, id) end end
+        table.sort(out)
+        return out
+    end
+
+    function api.getAvailableChickenTypes()
+        local out = {}
+        for typeId, def in pairs(Catalog.chickenTypes or {}) do
+            if type(def) == "table" then
+                local id = tostring(def.id or typeId)
+                local name = tostring(def.name or id)
+                table.insert(out, { id = id, name = name })
+            end
+        end
+        table.sort(out, function(a, b)
+            local an, bn = string.lower(a.name), string.lower(b.name)
+            if an == bn then return a.id < b.id end
+            return an < bn
+        end)
+        return out
+    end
+
+    function api.getAvailableRarities()
+        local out, seen = {}, {}
+        local rarity = Catalog.Rarity or Catalog.rarity or {}
+        if type(rarity.rank) == "table" then
+            for id in pairs(rarity.rank) do
+                id = string.lower(tostring(id))
+                if id ~= "" and not seen[id] then seen[id] = true; table.insert(out, id) end
+            end
+            table.sort(out, function(a, b)
+                local ar = tonumber(rarity.rank[a]) or math.huge
+                local br = tonumber(rarity.rank[b]) or math.huge
+                if ar == br then return a < b end
+                return ar < br
+            end)
+        end
+        if #out == 0 then
+            out = { "common", "uncommon", "rare", "epic", "legendary", "mythic", "divine", "celestial", "cosmic", "secret" }
+        end
+        return out
+    end
+
+    function api.destroy()
+        if destroyed then return end
+        enabled = false
+        State.toggles.autoFavorite = false
+        generation = generation + 1
+        requestInFlight = nil
+        destroyed = true
+        setStatus("DISABLED")
+    end
+
+    return api
+end)()
+
+State.diagnostics["AutoFavorite.Feature"] = State._autoFavoriteFeature and "READY" or "MISSING DEPENDENCY"
 
 
 
@@ -5133,6 +5399,34 @@ do
             abilities = {}, maxBatchSize = 10,
         } })
 
+        ConfigManager.registerSection("favorite", function()
+            local feature = State._autoFavoriteFeature
+            if not feature then return { enabled = false, typeIds = "", rarities = "" } end
+            return {
+                enabled = feature.isEnabled and feature.isEnabled() or false,
+                typeIds = table.concat((feature.getSelectedTypeIds and feature.getSelectedTypeIds()) or {}, "\n"),
+                rarities = table.concat((feature.getSelectedRarities and feature.getSelectedRarities()) or {}, "\n"),
+            }
+        end, function(data)
+            local feature = State._autoFavoriteFeature
+            if type(data) ~= "table" or not feature then return end
+            if feature.clearTypeSelection then pcall(feature.clearTypeSelection) end
+            if type(data.typeIds) == "string" and feature.setTypeSelected then
+                for id in string.gmatch(data.typeIds, "[^\n]+") do
+                    pcall(feature.setTypeSelected, id, true)
+                end
+            end
+            if feature.clearRaritySelection then pcall(feature.clearRaritySelection) end
+            if type(data.rarities) == "string" and feature.setRaritySelected then
+                for id in string.gmatch(data.rarities, "[^\n]+") do
+                    pcall(feature.setRaritySelected, id, true)
+                end
+            end
+            State.toggles.autoFavorite = data.enabled == true
+            if feature.setAutoFavorite then pcall(feature.setAutoFavorite, data.enabled == true) end
+        end, { defaults = { enabled = false, typeIds = "", rarities = "" } })
+
+
         ConfigManager.registerSection("fuse", function()
             if not AutoFuseFeature then return { enabled = false, dryRun = true, keepCopies = 0 } end
             return {
@@ -5521,6 +5815,7 @@ local function shutdown()
     -- 2) stop workers
     if AutoCollectEggFeature then pcall(function() AutoCollectEggFeature.setAutoCollectEggs(false); AutoCollectEggFeature.destroy() end) end
     if AutoSellFeature then pcall(function() AutoSellFeature.setAutoSell(false); AutoSellFeature.destroy() end) end
+    if State._autoFavoriteFeature then pcall(function() State._autoFavoriteFeature.setAutoFavorite(false); State._autoFavoriteFeature.destroy() end) end
     if AutoFuseFeature then pcall(function() AutoFuseFeature.setAutoFuse(false); AutoFuseFeature.destroy() end) end
     HatchFeature.setAutoHatch(false)
     IncubatorClaimFeature.setAutoIncubatorClaim(false)
@@ -6313,7 +6608,7 @@ safeBuild("Auto Farm", function()
             AutoSellFeature.setAutoSell(v)
         end)
 
-        local _, chickenFilters = card(chicken, 2, "Filters")
+        local _, chickenFilters = card(chicken, 2, "Auto Sell Filters")
         makeCollapsibleFilter(chickenFilters, 1, "Rarity", function(host)
             local rarities = AutoSellFeature.getAvailableRarities()
             if #rarities == 0 then
@@ -6359,6 +6654,87 @@ safeBuild("Auto Farm", function()
     else
         setText(row(chickenCard, 1, "Status"), "Unavailable")
     end
+
+    (function()
+        local _, favoriteCard = card(chicken, 3, "Auto Favorite")
+        if State._autoFavoriteFeature then
+            settingRow(favoriteCard, 1, "Auto Favorite Chickens", nil, "autoFavorite", function(v)
+                return State._autoFavoriteFeature.setAutoFavorite(v)
+            end)
+
+            local _, favoriteFilters = card(chicken, 4, "Favorite Filters")
+            makeCollapsibleFilter(favoriteFilters, 1, "Chicken Names", function(host)
+            local feature = State._autoFavoriteFeature
+            local entries = feature.getAvailableChickenTypes()
+            local rows = {}
+
+            local search = Instance.new("TextBox")
+            search.LayoutOrder = 0
+            search.Size = UDim2.new(1, 0, 0, 32)
+            search.BackgroundColor3 = Theme.SurfaceElevated
+            search.BorderSizePixel = 0
+            search.ClearTextOnFocus = false
+            search.PlaceholderText = "Search Chicken..."
+            search.Text = ""
+            search.Font = Enum.Font.Gotham
+            search.TextSize = 12
+            search.TextColor3 = Theme.TextPrimary
+            search.PlaceholderColor3 = Theme.TextMuted
+            search.TextXAlignment = Enum.TextXAlignment.Left
+            search.Parent = host
+            corner(search, 7); stroke(search); pad(search, 0, 10, 0, 10)
+
+            for i, entry in ipairs(entries) do
+                local rowFrame = makeFilterRow(
+                    host,
+                    i,
+                    entry.name,
+                    nil,
+                    feature.isTypeSelected(entry.id),
+                    function(checkBtn)
+                        local now = not feature.isTypeSelected(entry.id)
+                        feature.setTypeSelected(entry.id, now)
+                        checkBtn.Text = now and "✓" or ""
+                        markConfigDirty()
+                    end
+                )
+                table.insert(rows, { frame = rowFrame, id = entry.id, name = entry.name })
+            end
+
+            local function applySearch()
+                local query = string.lower(search.Text or "")
+                for _, item in ipairs(rows) do
+                    local haystack = string.lower(tostring(item.name) .. " " .. tostring(item.id))
+                    item.frame.Visible = query == "" or string.find(haystack, query, 1, true) ~= nil
+                end
+            end
+            search:GetPropertyChangedSignal("Text"):Connect(applySearch)
+            applySearch()
+        end)
+
+            makeCollapsibleFilter(favoriteFilters, 2, "Rarity", function(host)
+                local feature = State._autoFavoriteFeature
+                local rarities = feature.getAvailableRarities()
+                for i, rarityId in ipairs(rarities) do
+                    makeFilterRow(
+                        host,
+                        i,
+                        resolveRarityDisplayName(rarityId),
+                        nil,
+                        feature.isRaritySelected(rarityId),
+                        function(checkBtn)
+                            local now = not feature.isRaritySelected(rarityId)
+                            feature.setRaritySelected(rarityId, now)
+                            checkBtn.Text = now and "✓" or ""
+                            markConfigDirty()
+                        end
+                    )
+                end
+            end)
+        else
+            setText(row(favoriteCard, 1, "Status"), "Unavailable")
+        end
+    end)()
 
     -- FUSE
     local fuse = tabs.Fuse

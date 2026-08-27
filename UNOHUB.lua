@@ -2681,6 +2681,7 @@ State._autoFavoriteFeature = (function()
     local requestInFlight = nil
     local selectedTypeIds = {}
     local selectedRarities = {}
+    local selectedMutations = {}
     local retryAfter = {}
     local status = "DISABLED"
     local lastError = nil
@@ -2709,18 +2710,51 @@ State._autoFavoriteFeature = (function()
         return nil
     end
 
+    local function resolveMutationId(chicken)
+        if type(chicken) ~= "table" then return nil end
+        local mutation = chicken.mutation
+        if mutation == nil then return nil end
+
+        if type(mutation) == "string" or type(mutation) == "number" then
+            local id = string.lower(tostring(mutation))
+            return id ~= "" and id or nil
+        end
+
+        -- Future-proof fallback if a future update changes mutation from
+        -- a plain id into a descriptor table.
+        if type(mutation) == "table" then
+            local raw = mutation.id or mutation.mutationId or mutation.typeId or mutation.name
+            if raw ~= nil then
+                local id = string.lower(tostring(raw))
+                return id ~= "" and id or nil
+            end
+        end
+
+        return nil
+    end
+
     local function hasFilters()
-        return next(selectedTypeIds) ~= nil or next(selectedRarities) ~= nil
+        return next(selectedTypeIds) ~= nil
+            or next(selectedRarities) ~= nil
+            or next(selectedMutations) ~= nil
     end
 
     local function matches(chicken)
         if type(chicken) ~= "table" then return false end
+
+        -- Filters are OR conditions: Chicken OR Rarity OR Mutation.
         local typeId = chicken.typeId
         if typeId ~= nil and selectedTypeIds[tostring(typeId)] == true then
             return true
         end
+
         local rarity = resolveRarity(chicken)
-        return rarity ~= nil and selectedRarities[rarity] == true
+        if rarity ~= nil and selectedRarities[rarity] == true then
+            return true
+        end
+
+        local mutationId = resolveMutationId(chicken)
+        return mutationId ~= nil and selectedMutations[mutationId] == true
     end
 
     local function findChickenById(roster, id)
@@ -2871,6 +2905,62 @@ State._autoFavoriteFeature = (function()
         return out
     end
 
+    function api.setMutationSelected(mutationId, value)
+        mutationId = string.lower(tostring(mutationId or ""))
+        if mutationId == "" then return false end
+        if value == true then
+            selectedMutations[mutationId] = true
+        else
+            selectedMutations[mutationId] = nil
+        end
+        return true
+    end
+
+    function api.isMutationSelected(mutationId)
+        return selectedMutations[string.lower(tostring(mutationId or ""))] == true
+    end
+
+    function api.clearMutationSelection()
+        table.clear(selectedMutations)
+    end
+
+    function api.getSelectedMutations()
+        local out = {}
+        for id, on in pairs(selectedMutations) do
+            if on then table.insert(out, id) end
+        end
+        table.sort(out)
+        return out
+    end
+
+    function api.getAvailableMutations()
+        -- Dynamic discovery: mutation ids come from live roster data.
+        -- New mutations automatically appear after they exist on a chicken
+        -- visible in DataController.roster().
+        local out, seen = {}, {}
+        local roster = readRoster()
+
+        for _, chicken in pairs((type(roster) == "table" and roster.chickens) or {}) do
+            local id = resolveMutationId(chicken)
+            if id ~= nil and not seen[id] then
+                seen[id] = true
+                table.insert(out, id)
+            end
+        end
+
+        -- Preserve saved selections even if no current chicken has the
+        -- mutation during this session.
+        for id, on in pairs(selectedMutations) do
+            if on and not seen[id] then
+                seen[id] = true
+                table.insert(out, id)
+            end
+        end
+
+        table.sort(out)
+        return out
+    end
+
     function api.getAvailableChickenTypes()
         local out = {}
         for typeId, def in pairs(Catalog.chickenTypes or {}) do
@@ -2922,6 +3012,7 @@ State._autoFavoriteFeature = (function()
     return api
 end)()
 
+State.diagnostics["AutoFavorite.MutationFilter"] = State._autoFavoriteFeature and "DYNAMIC_ROSTER_DISCOVERY" or "UNAVAILABLE"
 State.diagnostics["AutoFavorite.Feature"] = State._autoFavoriteFeature and "READY" or "MISSING DEPENDENCY"
 
 
@@ -6132,11 +6223,12 @@ do
 
         ConfigManager.registerSection("favorite", function()
             local feature = State._autoFavoriteFeature
-            if not feature then return { enabled = false, typeIds = "", rarities = "" } end
+            if not feature then return { enabled = false, typeIds = "", rarities = "", mutations = "" } end
             return {
                 enabled = feature.isEnabled and feature.isEnabled() or false,
                 typeIds = table.concat((feature.getSelectedTypeIds and feature.getSelectedTypeIds()) or {}, "\n"),
                 rarities = table.concat((feature.getSelectedRarities and feature.getSelectedRarities()) or {}, "\n"),
+                mutations = table.concat((feature.getSelectedMutations and feature.getSelectedMutations()) or {}, "\n"),
             }
         end, function(data)
             local feature = State._autoFavoriteFeature
@@ -6153,9 +6245,15 @@ do
                     pcall(feature.setRaritySelected, id, true)
                 end
             end
+            if feature.clearMutationSelection then pcall(feature.clearMutationSelection) end
+            if type(data.mutations) == "string" and feature.setMutationSelected then
+                for id in string.gmatch(data.mutations, "[^\n]+") do
+                    pcall(feature.setMutationSelected, id, true)
+                end
+            end
             State.toggles.autoFavorite = data.enabled == true
             if feature.setAutoFavorite then pcall(feature.setAutoFavorite, data.enabled == true) end
-        end, { defaults = { enabled = false, typeIds = "", rarities = "" } })
+        end, { defaults = { enabled = false, typeIds = "", rarities = "", mutations = "" } })
 
 
         ConfigManager.registerSection("fuse", function()
@@ -7820,6 +7918,20 @@ safeBuild("Auto Farm", function()
                             if feature.isTypeSelected(entry.id) then count += 1 end
                         end
                         summaryLabel.Text = count == 0 and "None selected" or (tostring(count) .. " selected")
+                    elseif kind == "mutations" then
+                        local chosen = {}
+                        for _, mutationId in ipairs(feature.getAvailableMutations()) do
+                            if feature.isMutationSelected(mutationId) then
+                                table.insert(chosen, titleCaseId(mutationId))
+                            end
+                        end
+                        if #chosen == 0 then
+                            summaryLabel.Text = "None selected"
+                        elseif #chosen <= 3 then
+                            summaryLabel.Text = table.concat(chosen, ", ")
+                        else
+                            summaryLabel.Text = tostring(#chosen) .. " selected"
+                        end
                     else
                         local chosen = {}
                         for _, rarityId in ipairs(feature.getAvailableRarities()) do
@@ -7918,21 +8030,47 @@ safeBuild("Auto Farm", function()
                     listLayout.SortOrder = Enum.SortOrder.LayoutOrder
                     listLayout.Parent = list
 
-                    for i, rarityId in ipairs(feature.getAvailableRarities()) do
-                        makeFilterRow(
-                            list,
-                            i,
-                            resolveRarityDisplayName(rarityId),
-                            nil,
-                            feature.isRaritySelected(rarityId),
-                            function(button)
-                                local now = not feature.isRaritySelected(rarityId)
-                                feature.setRaritySelected(rarityId, now)
-                                button.Text = now and "✓" or ""
-                                refreshSummary()
-                                markConfigDirty()
+                    if kind == "mutations" then
+                        local mutations = feature.getAvailableMutations()
+                        if #mutations == 0 then
+                            local emptyLabel = text(list, "No mutation detected in roster", 11, Theme.TextMuted)
+                            emptyLabel.LayoutOrder = 1
+                            emptyLabel.Size = UDim2.new(1, 0, 0, 32)
+                        else
+                            for i, mutationId in ipairs(mutations) do
+                                makeFilterRow(
+                                    list,
+                                    i,
+                                    titleCaseId(mutationId),
+                                    mutationId,
+                                    feature.isMutationSelected(mutationId),
+                                    function(button)
+                                        local now = not feature.isMutationSelected(mutationId)
+                                        feature.setMutationSelected(mutationId, now)
+                                        button.Text = now and "✓" or ""
+                                        refreshSummary()
+                                        markConfigDirty()
+                                    end
+                                )
                             end
-                        )
+                        end
+                    else
+                        for i, rarityId in ipairs(feature.getAvailableRarities()) do
+                            makeFilterRow(
+                                list,
+                                i,
+                                resolveRarityDisplayName(rarityId),
+                                nil,
+                                feature.isRaritySelected(rarityId),
+                                function(button)
+                                    local now = not feature.isRaritySelected(rarityId)
+                                    feature.setRaritySelected(rarityId, now)
+                                    button.Text = now and "✓" or ""
+                                    refreshSummary()
+                                    markConfigDirty()
+                                end
+                            )
+                        end
                     end
                 end
 
@@ -7946,6 +8084,7 @@ safeBuild("Auto Farm", function()
 
             makeFavoriteSelector(3, "Chicken Names", "names")
             makeFavoriteSelector(4, "Rarities", "rarities")
+            makeFavoriteSelector(5, "Mutations", "mutations")
         else
             setText(row(favoriteCard, 1, "Status"), "Unavailable")
         end

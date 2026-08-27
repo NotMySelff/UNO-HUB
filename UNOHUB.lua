@@ -1693,7 +1693,11 @@ local function createAutoSellChickens(deps)
     local rosterUnsubscribe, wakeEvaluation, lastRosterFingerprint, lastLogKey = nil, false, nil, nil
     local configRevision = 0
     local selectedRarities, abilityWhitelist = {}, { voodoo = true, cycleofash = true }
-    local protectMutated, protectFavorites = true, true
+    -- Mutation protection is opt-out:
+    -- every discovered/current/future mutation is protected by default,
+    -- and only mutations explicitly unchecked by the user may be sold.
+    local unprotectedMutations = {}
+    local protectFavorites = true
     local maxBatchSize, pollInterval, confirmationTimeout, retryDelay = 10, 1, 8, 2
     local status, lastError = "DISABLED", nil
     local stats = {
@@ -1786,6 +1790,55 @@ local function createAutoSellChickens(deps)
         if ability == nil then ability = "beyblade" end
         return ability
     end
+    local function resolveMutationId(chicken)
+        if type(chicken) ~= "table" then return nil end
+        local mutation = chicken.mutation
+        if mutation == nil then return nil end
+
+        if type(mutation) == "string" or type(mutation) == "number" then
+            local id = string.lower(tostring(mutation))
+            return id ~= "" and id or nil
+        end
+
+        -- Future-proof fallback if the game later changes mutation from a
+        -- plain string id into a small descriptor table.
+        if type(mutation) == "table" then
+            local raw = mutation.id or mutation.mutationId or mutation.typeId or mutation.name
+            if raw ~= nil then
+                local id = string.lower(tostring(raw))
+                return id ~= "" and id or nil
+            end
+        end
+
+        return nil
+    end
+
+    local function getAvailableMutations()
+        local result, seen = {}, {}
+        local roster = readRoster()
+        if type(roster) == "table" then
+            for _, chicken in ipairs(roster.chickens or {}) do
+                local mutationId = resolveMutationId(chicken)
+                if mutationId ~= nil and not seen[mutationId] then
+                    seen[mutationId] = true
+                    table.insert(result, mutationId)
+                end
+            end
+        end
+
+        -- Keep explicitly unchecked ids visible after config restore even when
+        -- no current chicken happens to carry that mutation.
+        for mutationId, excluded in pairs(unprotectedMutations) do
+            if excluded == true and not seen[mutationId] then
+                seen[mutationId] = true
+                table.insert(result, mutationId)
+            end
+        end
+
+        table.sort(result)
+        return result
+    end
+
     local function getAvailableAbilities()
         local result, abilities = {}, Catalog.abilities
         if type(abilities) ~= "table" then return result end
@@ -1862,9 +1915,10 @@ local function createAutoSellChickens(deps)
                 return decide(false, "KEEP_BUSY")
             end
         end
-        if protectMutated and chicken.mutation ~= nil then
+        local mutationId = resolveMutationId(chicken)
+        if mutationId ~= nil and unprotectedMutations[mutationId] ~= true then
             stats.totalProtectedMutated = stats.totalProtectedMutated + 1
-            return decide(false, "KEEP_MUTATED")
+            return decide(false, "KEEP_MUTATION:" .. mutationId)
         end
         if abilityWhitelist[ability] then
             stats.totalProtectedAbility = stats.totalProtectedAbility + 1
@@ -2066,8 +2120,55 @@ local function createAutoSellChickens(deps)
         invalidateEvaluation("select all rarities")
     end
     function api.getAvailableRarities() return getAvailableRarities() end
-    function api.setProtectMutated(value) protectMutated = value == true; invalidateEvaluation("protectMutated=" .. tostring(value == true)) end
-    function api.getProtectMutated() return protectMutated end
+    function api.setMutationProtected(mutationId, value)
+        mutationId = string.lower(tostring(mutationId or ""))
+        if mutationId == "" then return false end
+        if value == true then
+            unprotectedMutations[mutationId] = nil
+        else
+            unprotectedMutations[mutationId] = true
+        end
+        invalidateEvaluation("mutationProtected:" .. mutationId .. "=" .. tostring(value == true))
+        return true
+    end
+
+    function api.isMutationProtected(mutationId)
+        mutationId = string.lower(tostring(mutationId or ""))
+        return mutationId ~= "" and unprotectedMutations[mutationId] ~= true
+    end
+
+    function api.getAvailableMutations()
+        return getAvailableMutations()
+    end
+
+    function api.getProtectedMutations()
+        local result = {}
+        for _, mutationId in ipairs(getAvailableMutations()) do
+            if unprotectedMutations[mutationId] ~= true then
+                table.insert(result, mutationId)
+            end
+        end
+        return result
+    end
+
+    function api.getUnprotectedMutations()
+        local result = {}
+        for mutationId, excluded in pairs(unprotectedMutations) do
+            if excluded == true then table.insert(result, mutationId) end
+        end
+        table.sort(result)
+        return result
+    end
+
+    function api.clearMutationProtectionExclusions()
+        unprotectedMutations = {}
+        invalidateEvaluation("mutation protection reset")
+    end
+
+    function api.setMutationUnprotected(mutationId, value)
+        -- Config-oriented alias. true means this mutation may be sold.
+        return api.setMutationProtected(mutationId, value ~= true)
+    end
     function api.setProtectFavorites(value) protectFavorites = value == true; invalidateEvaluation("protectFavorites=" .. tostring(value == true)) end
     function api.getProtectFavorites() return protectFavorites end
     function api.setAbilityWhitelisted(abilityId, value)
@@ -2092,6 +2193,8 @@ local function createAutoSellChickens(deps)
         local result = copyMap(stats)
         result.selectedRarities = copyArray(api.getSelectedRarities())
         result.abilityWhitelist = copyMap(abilityWhitelist)
+        result.protectedMutations = copyArray(api.getProtectedMutations())
+        result.unprotectedMutations = copyArray(api.getUnprotectedMutations())
         result.maxBatchSize = maxBatchSize
         return result
     end
@@ -2642,6 +2745,7 @@ do
         if ok and featOrErr then
             AutoSellFeature = featOrErr
             State.diagnostics["AutoSell.Mode"] = "LIVE_ONLY_NO_DRY_RUN"
+            State.diagnostics["AutoSell.MutationProtection"] = "DYNAMIC_SELECTIVE_DEFAULT_PROTECTED"
             State.diagnostics["AutoSell.Feature"] = "READY"
             log("INFO", "AutoSellFeature READY")
         else
@@ -6169,7 +6273,7 @@ do
                 enabled = (AutoSellFeature.isEnabled and AutoSellFeature.isEnabled()) or false,
                 rarities = (AutoSellFeature.getSelectedRarities and AutoSellFeature.getSelectedRarities()) or {},
                 protectFavorites = (AutoSellFeature.getProtectFavorites and AutoSellFeature.getProtectFavorites()) ~= false,
-                protectMutated = (AutoSellFeature.getProtectMutated and AutoSellFeature.getProtectMutated()) ~= false,
+                unprotectedMutations = (AutoSellFeature.getUnprotectedMutations and AutoSellFeature.getUnprotectedMutations()) or {},
                 abilities = (AutoSellFeature.getAbilityWhitelist and AutoSellFeature.getAbilityWhitelist()) or {},
                 maxBatchSize = (AutoSellFeature.getMaxBatchSize and AutoSellFeature.getMaxBatchSize()) or 10,
             }
@@ -6184,8 +6288,13 @@ do
             if data.protectFavorites ~= nil and AutoSellFeature.setProtectFavorites then
                 pcall(AutoSellFeature.setProtectFavorites, data.protectFavorites == true)
             end
-            if data.protectMutated ~= nil and AutoSellFeature.setProtectMutated then
-                pcall(AutoSellFeature.setProtectMutated, data.protectMutated == true)
+            if AutoSellFeature.clearMutationProtectionExclusions then
+                pcall(AutoSellFeature.clearMutationProtectionExclusions)
+            end
+            if type(data.unprotectedMutations) == "table" and AutoSellFeature.setMutationUnprotected then
+                for _, mutationId in ipairs(data.unprotectedMutations) do
+                    pcall(AutoSellFeature.setMutationUnprotected, mutationId, true)
+                end
             end
             if type(data.abilities) == "table" then
                 if AutoSellFeature.clearAbilityWhitelist then pcall(AutoSellFeature.clearAbilityWhitelist) end
@@ -6206,7 +6315,7 @@ do
             end
         end, { defaults = {
             enabled = false, rarities = {},
-            protectFavorites = true, protectMutated = true,
+            protectFavorites = true, unprotectedMutations = {},
             abilities = {}, maxBatchSize = 10,
         } })
 
@@ -6383,9 +6492,10 @@ do
         if AutoSellFeature then
             for _, methodName in ipairs({
                 "setAutoSell", "setMaxBatchSize",
-                "setProtectFavorites", "setProtectMutated",
+                "setProtectFavorites",
                 "setRaritySelected", "clearRaritySelection", "selectAllRarities",
                 "setAbilityWhitelisted", "clearAbilityWhitelist",
+                "setMutationProtected", "setMutationUnprotected", "clearMutationProtectionExclusions",
             }) do
                 wrapConfigDirty(AutoSellFeature, methodName)
             end
@@ -7788,7 +7898,42 @@ safeBuild("Auto Farm", function()
             end
         end)
 
-        State._makeSummaryFilterSelector(chickenFilters, 2, "Protected Abilities", function()
+        State._makeSummaryFilterSelector(chickenFilters, 2, "Protected Mutations", function()
+            local selected = AutoSellFeature.getProtectedMutations and AutoSellFeature.getProtectedMutations() or {}
+            local labels = {}
+            for _, mutationId in ipairs(selected) do
+                table.insert(labels, titleCaseId(mutationId))
+            end
+            if #labels == 0 then return "None selected" end
+            if #labels <= 3 then return table.concat(labels, ", ") end
+            return tostring(#labels) .. " selected"
+        end, function(host, refreshSummary)
+            local mutations = AutoSellFeature.getAvailableMutations and AutoSellFeature.getAvailableMutations() or {}
+            if #mutations == 0 then
+                local emptyLabel = text(host, "No mutation detected in roster", 11, Theme.TextMuted)
+                emptyLabel.LayoutOrder = 1
+                emptyLabel.Size = UDim2.new(1, 0, 0, 32)
+                return
+            end
+
+            for i, mutationId in ipairs(mutations) do
+                makeFilterRow(
+                    host,
+                    i,
+                    titleCaseId(mutationId),
+                    mutationId,
+                    AutoSellFeature.isMutationProtected(mutationId),
+                    function(checkBtn)
+                        local now = not AutoSellFeature.isMutationProtected(mutationId)
+                        AutoSellFeature.setMutationProtected(mutationId, now)
+                        checkBtn.Text = now and "✓" or ""
+                        refreshSummary()
+                    end
+                )
+            end
+        end)
+
+        State._makeSummaryFilterSelector(chickenFilters, 3, "Protected Abilities", function()
             local selected = {}
             local whitelist = AutoSellFeature.getAbilityWhitelist and AutoSellFeature.getAbilityWhitelist() or {}
             local abilities = AutoSellFeature.getAvailableAbilities and AutoSellFeature.getAvailableAbilities() or {}
@@ -8632,15 +8777,6 @@ safeBuild("Chickens", function()
     do
         local f = Instance.new("Frame"); f.LayoutOrder = 2; f.Size = UDim2.new(1, 0, 0, 28)
         f.BackgroundTransparency = 1; f.Parent = sellCard
-        text(f, "Protect Mutated", 13, Theme.TextPrimary, Enum.Font.GothamMedium).Size = UDim2.new(1, -50, 1, 0)
-        local sw = select(1, makeSwitch(f, AutoSellFeature.getProtectMutated() == true, function(v)
-            AutoSellFeature.setProtectMutated(v)
-        end))
-        sw.Position = UDim2.new(1, -40, 0.5, -11)
-    end
-    do
-        local f = Instance.new("Frame"); f.LayoutOrder = 3; f.Size = UDim2.new(1, 0, 0, 28)
-        f.BackgroundTransparency = 1; f.Parent = sellCard
         text(f, "Protect Favorites", 13, Theme.TextPrimary, Enum.Font.GothamMedium).Size = UDim2.new(1, -50, 1, 0)
         local sw = select(1, makeSwitch(f, AutoSellFeature.getProtectFavorites() == true, function(v)
             AutoSellFeature.setProtectFavorites(v)
@@ -8671,7 +8807,38 @@ safeBuild("Chickens", function()
         end)
     end
 
-    local _, abilityCard = card(sc, 3, "ABILITY WHITELIST")
+    local _, mutationCard = card(sc, 3, "PROTECTED MUTATIONS")
+    local mutationHost = Instance.new("Frame")
+    mutationHost.LayoutOrder = 5
+    mutationHost.Size = UDim2.new(1, 0, 0, 0)
+    mutationHost.AutomaticSize = Enum.AutomaticSize.Y
+    mutationHost.BackgroundTransparency = 1
+    mutationHost.Parent = mutationCard
+    Instance.new("UIListLayout", mutationHost).Padding = UDim.new(0, 4)
+
+    local mutations = AutoSellFeature.getAvailableMutations and AutoSellFeature.getAvailableMutations() or {}
+    if #mutations == 0 then
+        local emptyLabel = text(mutationHost, "No mutation detected in roster", 11, Theme.TextMuted)
+        emptyLabel.LayoutOrder = 1
+        emptyLabel.Size = UDim2.new(1, 0, 0, 32)
+    else
+        for i, mutationId in ipairs(mutations) do
+            makeFilterRow(
+                mutationHost,
+                i,
+                titleCaseId(mutationId),
+                mutationId,
+                AutoSellFeature.isMutationProtected(mutationId),
+                function(checkBtn)
+                    local now = not AutoSellFeature.isMutationProtected(mutationId)
+                    AutoSellFeature.setMutationProtected(mutationId, now)
+                    checkBtn.Text = now and "✓" or ""
+                end
+            )
+        end
+    end
+
+    local _, abilityCard = card(sc, 4, "ABILITY WHITELIST")
     local abilityHost = Instance.new("Frame")
     abilityHost.LayoutOrder = 5
     abilityHost.Size = UDim2.new(1, 0, 0, 0)
@@ -8701,14 +8868,14 @@ safeBuild("Chickens", function()
         end)
     end
 
-    local _, statsCard = card(sc, 4, "SELL STATUS / DIAGNOSTICS")
+    local _, statsCard = card(sc, 5, "SELL STATUS / DIAGNOSTICS")
     local sStatus = row(statsCard, 1, "Status")
     local sSel = row(statsCard, 2, "Selected Rarities")
     local sEval = row(statsCard, 3, "Evaluated")
     local sSold = row(statsCard, 4, "Confirmed Sold")
     local sAct = row(statsCard, 5, "Protected Active")
     local sFav = row(statsCard, 6, "Protected Favorite")
-    local sMut = row(statsCard, 7, "Protected Mutated")
+    local sMut = row(statsCard, 7, "Protected by Mutation")
     local sAb = row(statsCard, 8, "Protected Ability")
     local sInc = row(statsCard, 9, "Protected Incubator")
     local sFail = row(statsCard, 10, "Failed / Not Confirmed")

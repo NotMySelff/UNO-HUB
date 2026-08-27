@@ -1693,7 +1693,7 @@ local function createAutoSellChickens(deps)
     local rosterUnsubscribe, wakeEvaluation, lastRosterFingerprint, lastLogKey = nil, false, nil, nil
     local configRevision = 0
     local selectedRarities, abilityWhitelist = {}, { voodoo = true, cycleofash = true }
-    local protectMutated, protectFavorites, dryRun = true, true, true
+    local protectMutated, protectFavorites = true, true
     local maxBatchSize, pollInterval, confirmationTimeout, retryDelay = 10, 1, 8, 2
     local status, lastError = "DISABLED", nil
     local stats = {
@@ -1977,11 +1977,6 @@ local function createAutoSellChickens(deps)
             end
             if #finalIds == 0 then continue end
             stats.lastBatchSize = #finalIds
-            if dryRun then
-                for _, id in ipairs(finalIds) do emit("WOULD SELL: id = " .. tostring(id)) end
-                setStatus("CONFIRMED", "DRY RUN")
-                continue
-            end
             sellInProgress = true
             setStatus("SELLING", tostring(#finalIds))
             local requestGeneration = generation
@@ -2092,15 +2087,12 @@ local function createAutoSellChickens(deps)
         return true
     end
     function api.getMaxBatchSize() return maxBatchSize end
-    function api.setDryRun(value) dryRun = value == true; invalidateEvaluation("dryRun=" .. tostring(value == true)) end
-    function api.getDryRun() return dryRun end
     function api.getStatus() return status end
     function api.getStats()
         local result = copyMap(stats)
         result.selectedRarities = copyArray(api.getSelectedRarities())
         result.abilityWhitelist = copyMap(abilityWhitelist)
         result.maxBatchSize = maxBatchSize
-        result.dryRun = dryRun
         return result
     end
     function api.destroy()
@@ -2649,9 +2641,9 @@ do
         end)
         if ok and featOrErr then
             AutoSellFeature = featOrErr
-            AutoSellFeature.setDryRun(true)
+            State.diagnostics["AutoSell.Mode"] = "LIVE_ONLY_NO_DRY_RUN"
             State.diagnostics["AutoSell.Feature"] = "READY"
-            log("INFO", "AutoSellFeature READY (DryRun ON)")
+            log("INFO", "AutoSellFeature READY")
         else
             State.diagnostics["AutoSell.Feature"] = "ERROR: " .. tostring(featOrErr)
             log("ERROR", "AutoSell construct: " .. tostring(featOrErr))
@@ -6172,10 +6164,9 @@ do
         end, { defaults = { selectedEggs = {} } })
 
         ConfigManager.registerSection("sell", function()
-            if not AutoSellFeature then return { enabled = false, dryRun = true } end
+            if not AutoSellFeature then return { enabled = false } end
             return {
                 enabled = (AutoSellFeature.isEnabled and AutoSellFeature.isEnabled()) or false,
-                dryRun = (AutoSellFeature.getDryRun and AutoSellFeature.getDryRun()) ~= false,
                 rarities = (AutoSellFeature.getSelectedRarities and AutoSellFeature.getSelectedRarities()) or {},
                 protectFavorites = (AutoSellFeature.getProtectFavorites and AutoSellFeature.getProtectFavorites()) ~= false,
                 protectMutated = (AutoSellFeature.getProtectMutated and AutoSellFeature.getProtectMutated()) ~= false,
@@ -6209,14 +6200,12 @@ do
             if data.maxBatchSize ~= nil and AutoSellFeature.setMaxBatchSize then
                 pcall(AutoSellFeature.setMaxBatchSize, data.maxBatchSize)
             end
-            -- Dry run / enabled: ConfigManager.applyDocument already forces safe values when restoreDestructive=false
-            if data.dryRun ~= nil and AutoSellFeature.setDryRun then pcall(AutoSellFeature.setDryRun, data.dryRun == true) end
             if data.enabled ~= nil and AutoSellFeature.setAutoSell then
                 State.toggles.autoSell = data.enabled == true
                 pcall(AutoSellFeature.setAutoSell, data.enabled == true)
             end
         end, { defaults = {
-            enabled = false, dryRun = true, rarities = {},
+            enabled = false, rarities = {},
             protectFavorites = true, protectMutated = true,
             abilities = {}, maxBatchSize = 10,
         } })
@@ -6393,7 +6382,7 @@ do
 
         if AutoSellFeature then
             for _, methodName in ipairs({
-                "setAutoSell", "setDryRun", "setMaxBatchSize",
+                "setAutoSell", "setMaxBatchSize",
                 "setProtectFavorites", "setProtectMutated",
                 "setRaritySelected", "clearRaritySelection", "selectAllRarities",
                 "setAbilityWhitelisted", "clearAbilityWhitelist",
@@ -8643,15 +8632,6 @@ safeBuild("Chickens", function()
     do
         local f = Instance.new("Frame"); f.LayoutOrder = 2; f.Size = UDim2.new(1, 0, 0, 28)
         f.BackgroundTransparency = 1; f.Parent = sellCard
-        text(f, "Dry Run", 13, Theme.TextPrimary, Enum.Font.GothamMedium).Size = UDim2.new(1, -50, 1, 0)
-        local sw = select(1, makeSwitch(f, AutoSellFeature.getDryRun() == true, function(v)
-            AutoSellFeature.setDryRun(v)
-        end))
-        sw.Position = UDim2.new(1, -40, 0.5, -11)
-    end
-    do
-        local f = Instance.new("Frame"); f.LayoutOrder = 3; f.Size = UDim2.new(1, 0, 0, 28)
-        f.BackgroundTransparency = 1; f.Parent = sellCard
         text(f, "Protect Mutated", 13, Theme.TextPrimary, Enum.Font.GothamMedium).Size = UDim2.new(1, -50, 1, 0)
         local sw = select(1, makeSwitch(f, AutoSellFeature.getProtectMutated() == true, function(v)
             AutoSellFeature.setProtectMutated(v)
@@ -8659,7 +8639,7 @@ safeBuild("Chickens", function()
         sw.Position = UDim2.new(1, -40, 0.5, -11)
     end
     do
-        local f = Instance.new("Frame"); f.LayoutOrder = 4; f.Size = UDim2.new(1, 0, 0, 28)
+        local f = Instance.new("Frame"); f.LayoutOrder = 3; f.Size = UDim2.new(1, 0, 0, 28)
         f.BackgroundTransparency = 1; f.Parent = sellCard
         text(f, "Protect Favorites", 13, Theme.TextPrimary, Enum.Font.GothamMedium).Size = UDim2.new(1, -50, 1, 0)
         local sw = select(1, makeSwitch(f, AutoSellFeature.getProtectFavorites() == true, function(v)
@@ -8723,22 +8703,20 @@ safeBuild("Chickens", function()
 
     local _, statsCard = card(sc, 4, "SELL STATUS / DIAGNOSTICS")
     local sStatus = row(statsCard, 1, "Status")
-    local sDry = row(statsCard, 2, "Dry Run")
-    local sSel = row(statsCard, 3, "Selected Rarities")
-    local sEval = row(statsCard, 4, "Evaluated")
-    local sSold = row(statsCard, 5, "Confirmed Sold")
-    local sAct = row(statsCard, 6, "Protected Active")
-    local sFav = row(statsCard, 7, "Protected Favorite")
-    local sMut = row(statsCard, 8, "Protected Mutated")
-    local sAb = row(statsCard, 9, "Protected Ability")
-    local sInc = row(statsCard, 10, "Protected Incubator")
-    local sFail = row(statsCard, 11, "Failed / Not Confirmed")
-    local sBatch = row(statsCard, 12, "Last Batch")
-    local sErr = row(statsCard, 13, "Last Error")
+    local sSel = row(statsCard, 2, "Selected Rarities")
+    local sEval = row(statsCard, 3, "Evaluated")
+    local sSold = row(statsCard, 4, "Confirmed Sold")
+    local sAct = row(statsCard, 5, "Protected Active")
+    local sFav = row(statsCard, 6, "Protected Favorite")
+    local sMut = row(statsCard, 7, "Protected Mutated")
+    local sAb = row(statsCard, 8, "Protected Ability")
+    local sInc = row(statsCard, 9, "Protected Incubator")
+    local sFail = row(statsCard, 10, "Failed / Not Confirmed")
+    local sBatch = row(statsCard, 11, "Last Batch")
+    local sErr = row(statsCard, 12, "Last Error")
 
     Views.Chickens = { root = sc, update = function()
         setText(sStatus, AutoSellFeature.getStatus())
-        setText(sDry, AutoSellFeature.getDryRun() and "ON" or "OFF")
         local st = AutoSellFeature.getStats()
         local sel = st.selectedRarities or {}
         setText(sSel, #sel > 0 and table.concat(sel, ", ") or "(none)")

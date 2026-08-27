@@ -1,5 +1,5 @@
 --[[
-    UNO HUB
+    UNO HUB1
 ]]
 
 
@@ -3182,7 +3182,7 @@ State._autoUnfavoriteFeature = State._createFavoriteActionFeature(
 
 State.diagnostics["AutoFavorite.Engine"] = State._autoFavoriteFeature and "SHARED_STATE_FACTORY_V3" or "UNAVAILABLE"
 State.diagnostics["AutoUnfavorite.Engine"] = State._autoUnfavoriteFeature and "SHARED_STATE_FACTORY_V3" or "UNAVAILABLE"
-State.diagnostics["AutoUnfavorite.Feature"] = State._autoUnfavoriteFeature and "READY_BACKEND_ONLY" or "MISSING DEPENDENCY"
+State.diagnostics["AutoUnfavorite.Feature"] = State._autoUnfavoriteFeature and "READY_BACKEND_UI_SHARED_BUILDER" or "MISSING DEPENDENCY"
 State.diagnostics["AutoFavorite.MutationFilter"] = State._autoFavoriteFeature and "DYNAMIC_ROSTER_DISCOVERY" or "UNAVAILABLE"
 State.diagnostics["AutoFavorite.ToggleSafety"] = State._autoFavoriteFeature and "HARD_ARMING_GATE_V1" or "UNAVAILABLE"
 State.diagnostics["AutoFavorite.Feature"] = State._autoFavoriteFeature and "READY" or "MISSING DEPENDENCY"
@@ -8055,29 +8055,33 @@ safeBuild("Auto Farm", function()
         setText(row(chickenCard, 1, "Status"), "Unavailable")
     end
 
-    (function()
-        local _, favoriteCard = card(chicken, 3, "Auto Favorite")
+    -- Shared Favorite / Unfavorite UI builder.
+    -- Stored on State instead of a new outer local to avoid the stage local/register limit.
+    State._buildFavoriteActionCard = function(parent, order, title, toggleKey, feature, setterName)
+        local _, actionCard = card(parent, order, title)
         if State._autoFavoriteFeature then
             local feature = State._autoFavoriteFeature
 
-            settingRow(favoriteCard, 1, "Auto Favorite", nil, "autoFavorite", function(v)
-                return feature.setAutoFavorite(v)
+            settingRow(actionCard, 1, title, nil, toggleKey, function(v)
+                local setter = feature and feature[setterName]
+                if type(setter) ~= "function" then return false end
+                return setter(v)
             end)
 
             local filterTitle = Instance.new("Frame")
             filterTitle.LayoutOrder = 2
             filterTitle.Size = UDim2.new(1, 0, 0, 18)
             filterTitle.BackgroundTransparency = 1
-            filterTitle.Parent = favoriteCard
+            filterTitle.Parent = actionCard
             text(filterTitle, "Filters", 11, Theme.TextMuted, Enum.Font.GothamMedium).Size = UDim2.new(1, 0, 1, 0)
 
-            local function makeFavoriteSelector(order, title, kind)
+            local function makeFavoriteActionSelector(order, title, kind)
                 local wrap = Instance.new("Frame")
                 wrap.LayoutOrder = order
                 wrap.Size = UDim2.new(1, 0, 0, 0)
                 wrap.AutomaticSize = Enum.AutomaticSize.Y
                 wrap.BackgroundTransparency = 1
-                wrap.Parent = favoriteCard
+                wrap.Parent = actionCard
 
                 local layout = Instance.new("UIListLayout")
                 layout.Padding = UDim.new(0, 5)
@@ -8293,13 +8297,31 @@ safeBuild("Auto Farm", function()
                 refreshSummary()
             end
 
-            makeFavoriteSelector(3, "Chicken Names", "names")
-            makeFavoriteSelector(4, "Rarities", "rarities")
-            makeFavoriteSelector(5, "Mutations", "mutations")
+            makeFavoriteActionSelector(3, "Chicken Names", "names")
+            makeFavoriteActionSelector(4, "Rarities", "rarities")
+            makeFavoriteActionSelector(5, "Mutations", "mutations")
         else
-            setText(row(favoriteCard, 1, "Status"), "Unavailable")
+            setText(row(actionCard, 1, "Status"), "Unavailable")
         end
-    end)()
+    end
+
+    State._buildFavoriteActionCard(
+        chicken,
+        3,
+        "Auto Favorite",
+        "autoFavorite",
+        State._autoFavoriteFeature,
+        "setAutoFavorite"
+    )
+
+    State._buildFavoriteActionCard(
+        chicken,
+        4,
+        "Auto Unfavorite",
+        "autoUnfavorite",
+        State._autoUnfavoriteFeature,
+        "setAutoUnfavorite"
+    )
 
     -- FUSE
     local fuse = tabs.Fuse

@@ -1,5 +1,5 @@
 --[[
-    UNO HUB
+    UNO HUB1
 ]]
 
 
@@ -5700,11 +5700,21 @@ local function setAutoRebirth(on)
             --
             -- If Auto Farm Rebirth is enabled, that feature owns
             -- the complete Tower/Rebirth lifecycle instead.
-            if not AFR.enabled and next(AFR.coordinatorPauseReasons) == nil then
+            if not AFR.enabled
+                and next(AFR.coordinatorPauseReasons) == nil
+                and State.toggles.autoTower ~= true
+                and not isTowerActive() then
                 refreshData()
 
                 local before, _, ready = getRebirthInfo()
                 if ready then
+                    -- Auto Tower owns its Tower session. Standalone Auto Rebirth
+                    -- must never interrupt it, even if Tower starts between polls.
+                    if State.toggles.autoTower == true or isTowerActive() then
+                        task.wait(0.35)
+                        continue
+                    end
+
                     if isLocalPlayerInsidePit() then
                         task.wait(0.35)
                         continue

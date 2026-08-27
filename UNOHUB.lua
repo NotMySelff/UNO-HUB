@@ -2133,7 +2133,7 @@ local function createAutoCollectEggs(deps)
     local trackedEggs, attributeWaits, connections, temporaryConnections = {}, {}, {}, {}
     local serial, generation, workerRunning, enabled, destroyed = 0, 0, false, false, false
     local movementLease, activeTw, activeTweenConnection, activeMoveConnection = nil, nil, nil, nil
-    local currentTarget, movementMode, status, lastError = nil, "Walk", "DISABLED", nil
+    local currentTarget, movementMode, status, lastError = nil, "Tween", "DISABLED", nil
     local inventoryConfirmation, retryCount, failedUntil = "UNAVAILABLE", 0, {}
     local CONFIG = {
         attributeWaitSeconds = 1.25, pollSeconds = 0.25, arrivalDistance = 3.5, arrivalHeight = 2.25,
@@ -2389,7 +2389,16 @@ local function createAutoCollectEggs(deps)
         if not record then return true end
         setStatus("MOVING")
         local destination = instance.Position + Vector3.new(0, CONFIG.arrivalHeight, 0)
-        local tween = TweenSvc:Create(root, TweenInfo.new(CONFIG.tweenDuration, Enum.EasingStyle.Linear), {
+        -- Match the smoother Hot Egg / Event Capsule tween profile.
+        -- Distance-based timing avoids slow long-distance Walk/pathing and reduces
+        -- the chance of getting stuck behind fences or coop geometry.
+        local distance = (root.Position - destination).Magnitude
+        local duration = math.clamp(distance / 48, 0.12, 1.8)
+        local tween = TweenSvc:Create(root, TweenInfo.new(
+            duration,
+            Enum.EasingStyle.Quad,
+            Enum.EasingDirection.Out
+        ), {
             CFrame = CFrame.new(destination),
         })
         activeTw = tween

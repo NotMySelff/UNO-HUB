@@ -2808,20 +2808,12 @@ do
 end
 
 --------------------------------------------------------------------
--- FAVORITE ACTION ENGINE
--- V1 refactor: preserves the existing Auto Favorite behavior exactly.
--- Auto Unfavorite is NOT instantiated yet; this build is only to validate
--- that the shared engine refactor is safe on the last-working baseline.
+-- AUTO FAVORITE CHICKENS
+-- V2 shared-engine preparation WITHOUT adding a new outer local to __unoStage01.
+-- This is important because the stage is already very large and may be near
+-- the Luau local/register limit.
 --------------------------------------------------------------------
-local function createFavoriteActionFeature(options)
-    options = options or {}
-
-    local desiredState = options.desiredState == true
-    local toggleKey = tostring(options.toggleKey or "autoFavorite")
-    local stateKey = tostring(options.stateKey or "autoFavorite")
-    local setterName = tostring(options.setterName or "setAutoFavorite")
-    local activeStatus = tostring(options.activeStatus or "FAVORITING")
-
+State._autoFavoriteFeature = (function(desiredState, toggleKey, stateKey, setterName, activeStatus)
     local Remotes = Integration.modules.Remotes
     local DataController = Integration.modules.DataController
     local Catalog = Integration.modules.Catalog
@@ -2890,7 +2882,6 @@ local function createFavoriteActionFeature(options)
                 return id ~= "" and id or nil
             end
         end
-
         return nil
     end
 
@@ -3087,27 +3078,16 @@ local function createFavoriteActionFeature(options)
     function api.setMutationSelected(mutationId, value)
         mutationId = string.lower(tostring(mutationId or ""))
         if mutationId == "" then return false end
-        if value == true then
-            selectedMutations[mutationId] = true
-        else
-            selectedMutations[mutationId] = nil
-        end
+        if value == true then selectedMutations[mutationId] = true else selectedMutations[mutationId] = nil end
         return true
     end
-
     function api.isMutationSelected(mutationId)
         return selectedMutations[string.lower(tostring(mutationId or ""))] == true
     end
-
-    function api.clearMutationSelection()
-        table.clear(selectedMutations)
-    end
-
+    function api.clearMutationSelection() table.clear(selectedMutations) end
     function api.getSelectedMutations()
         local out = {}
-        for id, on in pairs(selectedMutations) do
-            if on then table.insert(out, id) end
-        end
+        for id, on in pairs(selectedMutations) do if on then table.insert(out, id) end end
         table.sort(out)
         return out
     end
@@ -3115,7 +3095,6 @@ local function createFavoriteActionFeature(options)
     function api.getAvailableMutations()
         local out, seen = {}, {}
         local roster = readRoster()
-
         for _, chicken in pairs((type(roster) == "table" and roster.chickens) or {}) do
             local id = resolveMutationId(chicken)
             if id ~= nil and not seen[id] then
@@ -3123,14 +3102,12 @@ local function createFavoriteActionFeature(options)
                 table.insert(out, id)
             end
         end
-
         for id, on in pairs(selectedMutations) do
             if on and not seen[id] then
                 seen[id] = true
                 table.insert(out, id)
             end
         end
-
         table.sort(out)
         return out
     end
@@ -3185,18 +3162,9 @@ local function createFavoriteActionFeature(options)
     end
 
     return api
-end
+end)(true, "autoFavorite", "autoFavorite", "setAutoFavorite", "FAVORITING")
 
--- Instantiate ONLY the existing Auto Favorite in V1.
-State._autoFavoriteFeature = createFavoriteActionFeature({
-    desiredState = true,
-    toggleKey = "autoFavorite",
-    stateKey = "autoFavorite",
-    setterName = "setAutoFavorite",
-    activeStatus = "FAVORITING",
-})
-
-State.diagnostics["AutoFavorite.Engine"] = State._autoFavoriteFeature and "SHARED_ENGINE_V1_FAVORITE_ONLY" or "UNAVAILABLE"
+State.diagnostics["AutoFavorite.Engine"] = State._autoFavoriteFeature and "PARAMETERIZED_IIFE_V2_NO_OUTER_LOCAL" or "UNAVAILABLE"
 State.diagnostics["AutoFavorite.MutationFilter"] = State._autoFavoriteFeature and "DYNAMIC_ROSTER_DISCOVERY" or "UNAVAILABLE"
 State.diagnostics["AutoFavorite.ToggleSafety"] = State._autoFavoriteFeature and "HARD_ARMING_GATE_V1" or "UNAVAILABLE"
 State.diagnostics["AutoFavorite.Feature"] = State._autoFavoriteFeature and "READY" or "MISSING DEPENDENCY"

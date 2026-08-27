@@ -1,10 +1,13 @@
 --[[
-    UNO HUB1
+    UNO HUB
 ]]
 
 
 local function __unoRunStage(name, fn)
     print("[UNO FINAL] START " .. name)
+    if type(fn) ~= "function" then
+        error("[UNO FINAL] " .. name .. " stage is not callable: " .. tostring(fn), 0)
+    end
     local ok, result = pcall(fn)
     if not ok then
         warn("[UNO FINAL] FAILED " .. name .. ": " .. tostring(result))
@@ -1120,7 +1123,7 @@ local function createConfigManager(deps)
         for name, section in pairs(sections) do
             local value = document[name]
             local normalized = validateSection(name, value, section)
-            if name == "sell" or name == "fuse" or name == "autoSell" or name == "autoFuse" or name == "unfavorite" then
+            if name == "sell" or name == "fuse" or name == "autoSell" or name == "autoFuse" then
                 if type(normalized) == "table" and not restoreDestructive then
                     if normalized.enabled ~= nil then normalized.enabled = false end
                     if normalized.dryRun ~= nil then normalized.dryRun = true end
@@ -2715,466 +2718,10 @@ local function createAutoCollectEggs(deps)
 end
 
 --------------------------------------------------------------------
--- AUTO UNFAVORITE CHICKENS
--- Source-backed desired-state action:
--- SetChickenFavorite(chickenId, false)
---------------------------------------------------------------------
-local function createAutoUnfavoriteChickens(deps)
-    deps = deps or {}
-
-    local Remotes = deps.Remotes
-    local DataController = deps.DataController
-    local Catalog = deps.Catalog
-    local favoriteDef = Remotes and Remotes.defs and Remotes.defs.SetChickenFavorite
-
-    if type(Remotes) ~= "table" or type(Remotes.invoke) ~= "function" then
-        return nil, "Core.Remotes/invoke unavailable"
-    end
-    if favoriteDef == nil then
-        return nil, "SetChickenFavorite definition unavailable"
-    end
-    if type(DataController) ~= "table" or type(DataController.roster) ~= "function" then
-        return nil, "DataController.roster unavailable"
-    end
-    if type(Catalog) ~= "table" or type(Catalog.chickenTypes) ~= "table" then
-        return nil, "Catalog.chickenTypes unavailable"
-    end
-
-    local enabled = false
-    local destroyed = false
-    local userArmed = false
-    local generation = 0
-    local requestInFlight = nil
-    local selectedTypeIds = {}
-    local selectedRarities = {}
-    local selectedMutations = {}
-    local retryAfter = {}
-    local status = "DISABLED"
-    local lastError = nil
-
-    local function setStatus(value, err)
-        status = tostring(value or "IDLE")
-        if State.autoUnfavorite then
-            State.autoUnfavorite.status = status
-        end
-        lastError = err
-    end
-
-    local function readRoster()
-        local ok, roster = pcall(DataController.roster)
-        if ok and type(roster) == "table" and type(roster.chickens) == "table" then
-            return roster
-        end
-        return nil
-    end
-
-    local function resolveRarity(chicken)
-        if type(chicken) ~= "table" then return nil end
-        if chicken.rarity ~= nil then
-            return string.lower(tostring(chicken.rarity))
-        end
-        local def = chicken.typeId and Catalog.chickenTypes[chicken.typeId]
-        if type(def) == "table" and def.rarity ~= nil then
-            return string.lower(tostring(def.rarity))
-        end
-        return nil
-    end
-
-    local function resolveMutationId(chicken)
-        if type(chicken) ~= "table" then return nil end
-        local mutation = chicken.mutation
-        if mutation == nil then return nil end
-
-        if type(mutation) == "string" or type(mutation) == "number" then
-            local id = string.lower(tostring(mutation))
-            return id ~= "" and id or nil
-        end
-
-        if type(mutation) == "table" then
-            local raw = mutation.id or mutation.mutationId or mutation.typeId or mutation.name
-            if raw ~= nil then
-                local id = string.lower(tostring(raw))
-                return id ~= "" and id or nil
-            end
-        end
-
-        return nil
-    end
-
-    local function hasFilters()
-        return next(selectedTypeIds) ~= nil
-            or next(selectedRarities) ~= nil
-            or next(selectedMutations) ~= nil
-    end
-
-    local function matches(chicken)
-        if type(chicken) ~= "table" then return false end
-
-        local typeId = chicken.typeId
-        if typeId ~= nil and selectedTypeIds[tostring(typeId)] == true then
-            return true
-        end
-
-        local rarity = resolveRarity(chicken)
-        if rarity ~= nil and selectedRarities[rarity] == true then
-            return true
-        end
-
-        local mutationId = resolveMutationId(chicken)
-        return mutationId ~= nil and selectedMutations[mutationId] == true
-    end
-
-    local function findChickenById(roster, id)
-        for _, chicken in pairs((type(roster) == "table" and roster.chickens) or {}) do
-            if type(chicken) == "table" and chicken.id == id then
-                return chicken
-            end
-        end
-        return nil
-    end
-
-    local function processOnce(workerGeneration)
-        if destroyed
-            or not enabled
-            or not userArmed
-            or State.toggles.autoUnfavorite ~= true
-            or workerGeneration ~= generation then
-            return
-        end
-
-        if not hasFilters() then
-            setStatus("NO FILTERS")
-            return
-        end
-
-        local roster = readRoster()
-        if not roster then
-            setStatus("NO ROSTER", "ROSTER UNAVAILABLE")
-            return
-        end
-
-        local now = os.clock()
-        local candidate = nil
-
-        for _, chicken in pairs(roster.chickens) do
-            if type(chicken) == "table"
-                and chicken.id ~= nil
-                and chicken.favorite == true
-                and matches(chicken)
-                and (retryAfter[chicken.id] == nil or retryAfter[chicken.id] <= now) then
-                candidate = chicken
-                break
-            end
-        end
-
-        if not candidate then
-            setStatus("IDLE")
-            return
-        end
-
-        local id = candidate.id
-
-        -- Final destructive-state gate.
-        if destroyed
-            or not enabled
-            or not userArmed
-            or State.toggles.autoUnfavorite ~= true
-            or workerGeneration ~= generation then
-            requestInFlight = nil
-            setStatus("DISABLED")
-            return
-        end
-
-        requestInFlight = id
-        setStatus("UNFAVORITING")
-
-        local ok, response = pcall(Remotes.invoke, favoriteDef, id, false)
-        if not ok then
-            requestInFlight = nil
-            retryAfter[id] = os.clock() + 2
-            setStatus("ERROR", tostring(response))
-            return
-        end
-
-        setStatus("WAITING CONFIRMATION")
-        local deadline = os.clock() + 6
-        local confirmed = false
-
-        while os.clock() < deadline
-            and enabled
-            and userArmed
-            and State.toggles.autoUnfavorite == true
-            and not destroyed
-            and workerGeneration == generation do
-
-            local latestRoster = readRoster()
-            local latest = latestRoster and findChickenById(latestRoster, id) or nil
-            if latest and latest.favorite ~= true then
-                confirmed = true
-                break
-            end
-            task.wait(0.20)
-        end
-
-        requestInFlight = nil
-
-        if confirmed then
-            retryAfter[id] = nil
-            setStatus("CONFIRMED")
-        elseif enabled and userArmed
-            and State.toggles.autoUnfavorite == true
-            and not destroyed
-            and workerGeneration == generation then
-            retryAfter[id] = os.clock() + 2
-            setStatus("NOT CONFIRMED")
-        end
-    end
-
-    local function worker(workerGeneration)
-        while enabled
-            and userArmed
-            and State.toggles.autoUnfavorite == true
-            and not destroyed
-            and workerGeneration == generation do
-
-            local ok, err = pcall(processOnce, workerGeneration)
-            if not ok then
-                setStatus("ERROR", tostring(err))
-                task.wait(1.5)
-            else
-                task.wait(0.45)
-            end
-        end
-
-        if not enabled then
-            setStatus("DISABLED")
-        end
-    end
-
-    local api = {}
-
-    function api.setAutoUnfavorite(value)
-        value = value == true
-        if destroyed then return false end
-
-        -- Runtime-only mutual exclusion. No construction-time peer dependency.
-        if value then
-            local favoriteFeature = State._autoFavoriteFeature
-            if type(favoriteFeature) == "table"
-                and type(favoriteFeature.isEnabled) == "function"
-                and type(favoriteFeature.setAutoFavorite) == "function"
-                and favoriteFeature.isEnabled() then
-                pcall(favoriteFeature.setAutoFavorite, false)
-            end
-        end
-
-        State.toggles.autoUnfavorite = value
-        userArmed = value
-
-        if value == enabled then
-            if not value then requestInFlight = nil end
-            return true
-        end
-
-        enabled = value
-        generation = generation + 1
-        requestInFlight = nil
-
-        if value then
-            setStatus(hasFilters() and "IDLE" or "NO FILTERS")
-            local workerGeneration = generation
-            task.spawn(function()
-                worker(workerGeneration)
-            end)
-        else
-            setStatus("DISABLED")
-        end
-
-        return true
-    end
-
-    function api.isEnabled()
-        return enabled
-    end
-
-    function api.getStatus()
-        return {
-            status = status,
-            enabled = enabled,
-            requestInFlight = requestInFlight,
-            lastError = lastError,
-        }
-    end
-
-    function api.setTypeSelected(typeId, value)
-        typeId = tostring(typeId or "")
-        if typeId == "" then return false end
-        if value == true then selectedTypeIds[typeId] = true else selectedTypeIds[typeId] = nil end
-        return true
-    end
-
-    function api.isTypeSelected(typeId)
-        return selectedTypeIds[tostring(typeId or "")] == true
-    end
-
-    function api.clearTypeSelection()
-        table.clear(selectedTypeIds)
-    end
-
-    function api.getSelectedTypeIds()
-        local out = {}
-        for id, on in pairs(selectedTypeIds) do
-            if on then table.insert(out, id) end
-        end
-        table.sort(out)
-        return out
-    end
-
-    function api.setRaritySelected(rarityId, value)
-        rarityId = string.lower(tostring(rarityId or ""))
-        if rarityId == "" then return false end
-        if value == true then selectedRarities[rarityId] = true else selectedRarities[rarityId] = nil end
-        return true
-    end
-
-    function api.isRaritySelected(rarityId)
-        return selectedRarities[string.lower(tostring(rarityId or ""))] == true
-    end
-
-    function api.clearRaritySelection()
-        table.clear(selectedRarities)
-    end
-
-    function api.getSelectedRarities()
-        local out = {}
-        for id, on in pairs(selectedRarities) do
-            if on then table.insert(out, id) end
-        end
-        table.sort(out)
-        return out
-    end
-
-    function api.setMutationSelected(mutationId, value)
-        mutationId = string.lower(tostring(mutationId or ""))
-        if mutationId == "" then return false end
-        if value == true then selectedMutations[mutationId] = true else selectedMutations[mutationId] = nil end
-        return true
-    end
-
-    function api.isMutationSelected(mutationId)
-        return selectedMutations[string.lower(tostring(mutationId or ""))] == true
-    end
-
-    function api.clearMutationSelection()
-        table.clear(selectedMutations)
-    end
-
-    function api.getSelectedMutations()
-        local out = {}
-        for id, on in pairs(selectedMutations) do
-            if on then table.insert(out, id) end
-        end
-        table.sort(out)
-        return out
-    end
-
-    function api.getAvailableMutations()
-        local out = {}
-        local seen = {}
-        local roster = readRoster()
-
-        for _, chicken in pairs((type(roster) == "table" and roster.chickens) or {}) do
-            local id = resolveMutationId(chicken)
-            if id ~= nil and not seen[id] then
-                seen[id] = true
-                table.insert(out, id)
-            end
-        end
-
-        for id, on in pairs(selectedMutations) do
-            if on and not seen[id] then
-                seen[id] = true
-                table.insert(out, id)
-            end
-        end
-
-        table.sort(out)
-        return out
-    end
-
-    function api.getAvailableChickenTypes()
-        local out = {}
-
-        for typeId, def in pairs(Catalog.chickenTypes or {}) do
-            if type(def) == "table" then
-                local id = tostring(def.id or typeId)
-                local name = tostring(def.name or id)
-                table.insert(out, { id = id, name = name })
-            end
-        end
-
-        table.sort(out, function(a, b)
-            local an = string.lower(a.name)
-            local bn = string.lower(b.name)
-            if an == bn then return a.id < b.id end
-            return an < bn
-        end)
-
-        return out
-    end
-
-    function api.getAvailableRarities()
-        local out = {}
-        local seen = {}
-        local rarity = Catalog.Rarity or Catalog.rarity or {}
-
-        if type(rarity.rank) == "table" then
-            for id in pairs(rarity.rank) do
-                id = string.lower(tostring(id))
-                if id ~= "" and not seen[id] then
-                    seen[id] = true
-                    table.insert(out, id)
-                end
-            end
-
-            table.sort(out, function(a, b)
-                local ar = tonumber(rarity.rank[a]) or math.huge
-                local br = tonumber(rarity.rank[b]) or math.huge
-                if ar == br then return a < b end
-                return ar < br
-            end)
-        end
-
-        if #out == 0 then
-            out = {
-                "common", "uncommon", "rare", "epic", "legendary",
-                "mythic", "divine", "celestial", "cosmic", "secret",
-            }
-        end
-
-        return out
-    end
-
-    function api.destroy()
-        if destroyed then return end
-        enabled = false
-        userArmed = false
-        State.toggles.autoUnfavorite = false
-        generation = generation + 1
-        requestInFlight = nil
-        destroyed = true
-        setStatus("DISABLED")
-    end
-
-    return api
-end
-
---------------------------------------------------------------------
 -- Feature construction
 --------------------------------------------------------------------
 local AutoCollectEggFeature = nil
 local AutoSellFeature = nil
-local AutoUnfavoriteFeature = nil
 
 do
     local ok, feat = pcall(function()
@@ -3261,33 +2808,6 @@ do
             State.diagnostics["AutoSell.Feature"] = "ERROR: " .. tostring(featOrErr)
             log("ERROR", "AutoSell construct: " .. tostring(featOrErr))
         end
-    end
-end
-
-do
-    local ok, featureOrError = pcall(function()
-        local feature, constructError = createAutoUnfavoriteChickens({
-            Remotes = Integration.modules.Remotes,
-            DataController = Integration.modules.DataController,
-            Catalog = Integration.modules.Catalog,
-        })
-        if not feature then
-            error(tostring(constructError or "Auto Unfavorite construction failed"))
-        end
-        return feature
-    end)
-
-    if ok and type(featureOrError) == "table" then
-        AutoUnfavoriteFeature = featureOrError
-        State._autoUnfavoriteFeature = featureOrError
-        State.diagnostics["AutoUnfavorite.Feature"] = "READY"
-        State.diagnostics["AutoUnfavorite.Remote"] = "SetChickenFavorite(false)"
-        State.diagnostics["AutoUnfavorite.ToggleSafety"] = "HARD_ARMING_GATE_V1"
-    else
-        AutoUnfavoriteFeature = nil
-        State._autoUnfavoriteFeature = nil
-        State.diagnostics["AutoUnfavorite.Feature"] = "ERROR: " .. tostring(featureOrError)
-        log("ERROR", "AutoUnfavorite construct: " .. tostring(featureOrError))
     end
 end
 
@@ -3498,16 +3018,6 @@ State._autoFavoriteFeature = (function()
         value = value == true
         if destroyed then return false end
 
-        if value then
-            local unfavoriteFeature = State._autoUnfavoriteFeature
-            if type(unfavoriteFeature) == "table"
-                and type(unfavoriteFeature.isEnabled) == "function"
-                and type(unfavoriteFeature.setAutoUnfavorite) == "function"
-                and unfavoriteFeature.isEnabled() then
-                pcall(unfavoriteFeature.setAutoUnfavorite, false)
-            end
-        end
-
         State.toggles.autoFavorite = value
         userArmed = value
 
@@ -3677,6 +3187,286 @@ end)()
 State.diagnostics["AutoFavorite.MutationFilter"] = State._autoFavoriteFeature and "DYNAMIC_ROSTER_DISCOVERY" or "UNAVAILABLE"
 State.diagnostics["AutoFavorite.ToggleSafety"] = State._autoFavoriteFeature and "HARD_ARMING_GATE_V1" or "UNAVAILABLE"
 State.diagnostics["AutoFavorite.Feature"] = State._autoFavoriteFeature and "READY" or "MISSING DEPENDENCY"
+
+--------------------------------------------------------------------
+-- AUTO UNFAVORITE CHICKENS
+-- Minimal isolated implementation. No ConfigManager dependency.
+--------------------------------------------------------------------
+State._autoUnfavoriteFeature = (function()
+    local Remotes = Integration.modules.Remotes
+    local DataController = Integration.modules.DataController
+    local Catalog = Integration.modules.Catalog
+    local favoriteDef = Remotes and Remotes.defs and Remotes.defs.SetChickenFavorite
+
+    if type(Remotes) ~= "table"
+        or type(Remotes.invoke) ~= "function"
+        or favoriteDef == nil
+        or type(DataController) ~= "table"
+        or type(DataController.roster) ~= "function"
+        or type(Catalog) ~= "table"
+        or type(Catalog.chickenTypes) ~= "table" then
+        return nil
+    end
+
+    local enabled = false
+    local armed = false
+    local destroyed = false
+    local generation = 0
+    local selectedTypeIds = {}
+    local selectedRarities = {}
+    local selectedMutations = {}
+    local status = "DISABLED"
+
+    local function setStatus(value)
+        status = tostring(value or "IDLE")
+        if type(State.autoUnfavorite) == "table" then
+            State.autoUnfavorite.status = status
+        end
+    end
+
+    local function roster()
+        local ok, value = pcall(DataController.roster)
+        if ok and type(value) == "table" and type(value.chickens) == "table" then
+            return value
+        end
+        return nil
+    end
+
+    local function mutationId(chicken)
+        local value = type(chicken) == "table" and chicken.mutation or nil
+        if value == nil then return nil end
+        if type(value) == "string" or type(value) == "number" then
+            local id = string.lower(tostring(value))
+            return id ~= "" and id or nil
+        end
+        if type(value) == "table" then
+            local raw = value.id or value.mutationId or value.typeId or value.name
+            if raw ~= nil then
+                local id = string.lower(tostring(raw))
+                return id ~= "" and id or nil
+            end
+        end
+        return nil
+    end
+
+    local function rarityId(chicken)
+        if type(chicken) ~= "table" then return nil end
+        if chicken.rarity ~= nil then
+            return string.lower(tostring(chicken.rarity))
+        end
+        local definition = chicken.typeId and Catalog.chickenTypes[chicken.typeId]
+        if type(definition) == "table" and definition.rarity ~= nil then
+            return string.lower(tostring(definition.rarity))
+        end
+        return nil
+    end
+
+    local function hasFilters()
+        return next(selectedTypeIds) ~= nil
+            or next(selectedRarities) ~= nil
+            or next(selectedMutations) ~= nil
+    end
+
+    local function matches(chicken)
+        if type(chicken) ~= "table" then return false end
+        if chicken.typeId ~= nil and selectedTypeIds[tostring(chicken.typeId)] == true then
+            return true
+        end
+        local rarity = rarityId(chicken)
+        if rarity and selectedRarities[rarity] == true then
+            return true
+        end
+        local mutation = mutationId(chicken)
+        return mutation and selectedMutations[mutation] == true or false
+    end
+
+    local function worker(myGeneration)
+        while not destroyed
+            and enabled
+            and armed
+            and State.toggles.autoUnfavorite == true
+            and myGeneration == generation do
+
+            if not hasFilters() then
+                setStatus("NO FILTERS")
+                task.wait(0.5)
+                continue
+            end
+
+            local current = roster()
+            local candidate = nil
+            if current then
+                for _, chicken in pairs(current.chickens) do
+                    if type(chicken) == "table"
+                        and chicken.id ~= nil
+                        and chicken.favorite == true
+                        and matches(chicken) then
+                        candidate = chicken
+                        break
+                    end
+                end
+            end
+
+            if not candidate then
+                setStatus("IDLE")
+                task.wait(0.5)
+                continue
+            end
+
+            -- Hard gate immediately before the remote.
+            if destroyed
+                or not enabled
+                or not armed
+                or State.toggles.autoUnfavorite ~= true
+                or myGeneration ~= generation then
+                setStatus("DISABLED")
+                break
+            end
+
+            setStatus("UNFAVORITING")
+            local ok = pcall(Remotes.invoke, favoriteDef, candidate.id, false)
+            if not ok then
+                setStatus("ERROR")
+                task.wait(1.5)
+            else
+                -- Give replicated roster time to update before scanning again.
+                setStatus("WAITING")
+                task.wait(0.65)
+            end
+        end
+        if not enabled then setStatus("DISABLED") end
+    end
+
+    local api = {}
+
+    function api.setAutoUnfavorite(value)
+        if destroyed then return false end
+        value = value == true
+
+        if value then
+            -- Runtime-only mutual exclusion.
+            local favorite = State._autoFavoriteFeature
+            if type(favorite) == "table"
+                and type(favorite.isEnabled) == "function"
+                and type(favorite.setAutoFavorite) == "function"
+                and favorite.isEnabled() == true then
+                pcall(favorite.setAutoFavorite, false)
+            end
+        end
+
+        State.toggles.autoUnfavorite = value
+        armed = value
+
+        if enabled == value then
+            if not value then setStatus("DISABLED") end
+            return true
+        end
+
+        enabled = value
+        generation += 1
+
+        if value then
+            setStatus(hasFilters() and "IDLE" or "NO FILTERS")
+            local myGeneration = generation
+            task.spawn(function()
+                worker(myGeneration)
+            end)
+        else
+            setStatus("DISABLED")
+        end
+        return true
+    end
+
+    function api.isEnabled() return enabled end
+    function api.getStatus() return status end
+
+    function api.setTypeSelected(id, value)
+        id = tostring(id or "")
+        if id == "" then return false end
+        if value == true then selectedTypeIds[id] = true else selectedTypeIds[id] = nil end
+        return true
+    end
+    function api.isTypeSelected(id) return selectedTypeIds[tostring(id or "")] == true end
+
+    function api.setRaritySelected(id, value)
+        id = string.lower(tostring(id or ""))
+        if id == "" then return false end
+        if value == true then selectedRarities[id] = true else selectedRarities[id] = nil end
+        return true
+    end
+    function api.isRaritySelected(id)
+        return selectedRarities[string.lower(tostring(id or ""))] == true
+    end
+
+    function api.setMutationSelected(id, value)
+        id = string.lower(tostring(id or ""))
+        if id == "" then return false end
+        if value == true then selectedMutations[id] = true else selectedMutations[id] = nil end
+        return true
+    end
+    function api.isMutationSelected(id)
+        return selectedMutations[string.lower(tostring(id or ""))] == true
+    end
+
+    function api.getAvailableChickenTypes()
+        local result = {}
+        for key, definition in pairs(Catalog.chickenTypes or {}) do
+            if type(definition) == "table" then
+                local id = tostring(definition.id or key)
+                result[#result + 1] = { id = id, name = tostring(definition.name or id) }
+            end
+        end
+        table.sort(result, function(a, b)
+            return string.lower(a.name) < string.lower(b.name)
+        end)
+        return result
+    end
+
+    function api.getAvailableRarities()
+        local ids, seen = {}, {}
+        for _, definition in pairs(Catalog.chickenTypes or {}) do
+            if type(definition) == "table" and definition.rarity ~= nil then
+                local id = string.lower(tostring(definition.rarity))
+                if not seen[id] then
+                    seen[id] = true
+                    ids[#ids + 1] = id
+                end
+            end
+        end
+        table.sort(ids)
+        return ids
+    end
+
+    function api.getAvailableMutations()
+        local ids, seen = {}, {}
+        local current = roster()
+        for _, chicken in pairs(current and current.chickens or {}) do
+            local id = mutationId(chicken)
+            if id and not seen[id] then
+                seen[id] = true
+                ids[#ids + 1] = id
+            end
+        end
+        table.sort(ids)
+        return ids
+    end
+
+    function api.destroy()
+        if destroyed then return end
+        destroyed = true
+        enabled = false
+        armed = false
+        State.toggles.autoUnfavorite = false
+        generation += 1
+        setStatus("DISABLED")
+    end
+
+    return api
+end)()
+
+State.diagnostics["AutoUnfavorite.Feature"] =
+    State._autoUnfavoriteFeature and "READY_MINIMAL_NO_CONFIG" or "UNAVAILABLE"
+
 
 
 
@@ -6920,60 +6710,6 @@ do
             if feature.setAutoFavorite then pcall(feature.setAutoFavorite, data.enabled == true) end
         end, { defaults = { enabled = false, typeIds = "", rarities = "", mutations = "" } })
 
-        ConfigManager.registerSection("unfavorite", function()
-            if type(AutoUnfavoriteFeature) ~= "table" then
-                return { enabled = false, typeIds = "", rarities = "", mutations = "" }
-            end
-
-            return {
-                enabled = type(AutoUnfavoriteFeature.isEnabled) == "function" and AutoUnfavoriteFeature.isEnabled() or false,
-                typeIds = table.concat(type(AutoUnfavoriteFeature.getSelectedTypeIds) == "function" and AutoUnfavoriteFeature.getSelectedTypeIds() or {}, "\n"),
-                rarities = table.concat(type(AutoUnfavoriteFeature.getSelectedRarities) == "function" and AutoUnfavoriteFeature.getSelectedRarities() or {}, "\n"),
-                mutations = table.concat(type(AutoUnfavoriteFeature.getSelectedMutations) == "function" and AutoUnfavoriteFeature.getSelectedMutations() or {}, "\n"),
-            }
-        end, function(data)
-            if type(data) ~= "table" or type(AutoUnfavoriteFeature) ~= "table" then return end
-
-            if type(AutoUnfavoriteFeature.clearTypeSelection) == "function" then
-                pcall(AutoUnfavoriteFeature.clearTypeSelection)
-            end
-            if type(data.typeIds) == "string" and type(AutoUnfavoriteFeature.setTypeSelected) == "function" then
-                for id in string.gmatch(data.typeIds, "[^\n]+") do
-                    pcall(AutoUnfavoriteFeature.setTypeSelected, id, true)
-                end
-            end
-
-            if type(AutoUnfavoriteFeature.clearRaritySelection) == "function" then
-                pcall(AutoUnfavoriteFeature.clearRaritySelection)
-            end
-            if type(data.rarities) == "string" and type(AutoUnfavoriteFeature.setRaritySelected) == "function" then
-                for id in string.gmatch(data.rarities, "[^\n]+") do
-                    pcall(AutoUnfavoriteFeature.setRaritySelected, id, true)
-                end
-            end
-
-            if type(AutoUnfavoriteFeature.clearMutationSelection) == "function" then
-                pcall(AutoUnfavoriteFeature.clearMutationSelection)
-            end
-            if type(data.mutations) == "string" and type(AutoUnfavoriteFeature.setMutationSelected) == "function" then
-                for id in string.gmatch(data.mutations, "[^\n]+") do
-                    pcall(AutoUnfavoriteFeature.setMutationSelected, id, true)
-                end
-            end
-
-            State.toggles.autoUnfavorite = data.enabled == true
-            if type(AutoUnfavoriteFeature.setAutoUnfavorite) == "function" then
-                pcall(AutoUnfavoriteFeature.setAutoUnfavorite, data.enabled == true)
-            end
-        end, {
-            defaults = {
-                enabled = false,
-                typeIds = "",
-                rarities = "",
-                mutations = "",
-            },
-        })
-
 
         ConfigManager.registerSection("fuse", function()
             if not AutoFuseFeature then return { enabled = false, dryRun = true, keepCopies = 0 } end
@@ -7119,17 +6855,6 @@ do
                 "setMutationProtected", "setMutationUnprotected", "clearMutationProtectionExclusions",
             }) do
                 wrapConfigDirty(AutoSellFeature, methodName)
-            end
-        end
-
-        if AutoUnfavoriteFeature then
-            for _, methodName in ipairs({
-                "setAutoUnfavorite",
-                "setTypeSelected", "clearTypeSelection",
-                "setRaritySelected", "clearRaritySelection",
-                "setMutationSelected", "clearMutationSelection",
-            }) do
-                wrapConfigDirty(AutoUnfavoriteFeature, methodName)
             end
         end
 
@@ -7412,16 +7137,7 @@ local function shutdown()
     if AutoCollectEggFeature then pcall(function() AutoCollectEggFeature.setAutoCollectEggs(false); AutoCollectEggFeature.destroy() end) end
     if AutoSellFeature then pcall(function() AutoSellFeature.setAutoSell(false); AutoSellFeature.destroy() end) end
     if State._autoFavoriteFeature then pcall(function() State._autoFavoriteFeature.setAutoFavorite(false); State._autoFavoriteFeature.destroy() end) end
-    if AutoUnfavoriteFeature then
-        pcall(function()
-            if type(AutoUnfavoriteFeature.setAutoUnfavorite) == "function" then
-                AutoUnfavoriteFeature.setAutoUnfavorite(false)
-            end
-            if type(AutoUnfavoriteFeature.destroy) == "function" then
-                AutoUnfavoriteFeature.destroy()
-            end
-        end)
-    end
+    if State._autoUnfavoriteFeature then pcall(function() State._autoUnfavoriteFeature.setAutoUnfavorite(false); State._autoUnfavoriteFeature.destroy() end) end
     if AutoFuseFeature then pcall(function() AutoFuseFeature.setAutoFuse(false); AutoFuseFeature.destroy() end) end
     HatchFeature.setAutoHatch(false)
     IncubatorClaimFeature.setAutoIncubatorClaim(false)
@@ -8868,8 +8584,8 @@ safeBuild("Auto Farm", function()
 
     (function()
         local _, unfavoriteCard = card(chicken, 4, "Auto Unfavorite")
-        if AutoUnfavoriteFeature then
-            local feature = AutoUnfavoriteFeature
+        if State._autoUnfavoriteFeature then
+            local feature = State._autoUnfavoriteFeature
 
             settingRow(unfavoriteCard, 1, "Auto Unfavorite", nil, "autoUnfavorite", function(v)
                 return feature.setAutoUnfavorite(v)

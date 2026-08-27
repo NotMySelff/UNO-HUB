@@ -1,5 +1,5 @@
 --[[
-    UNO HUB
+    UNO HUB1
 ]]
 
 
@@ -295,6 +295,7 @@ local function createPerformanceManager(deps)
         hideOtherChickens = false,
         whiteScreen = false,
         ultraPerformance = false,
+        potatoMode = false,
     }
 
     local state = {
@@ -303,6 +304,7 @@ local function createPerformanceManager(deps)
         whiteScreenIsCover = false,
         boostSnapshot = nil,
         ultraSnapshot = nil,
+        potatoSnapshot = nil,
     }
 
     local stats = {
@@ -312,6 +314,10 @@ local function createPerformanceManager(deps)
         chickenPartsHidden = 0,
         protectedObjectsSkipped = 0,
         dynamicObjectsHandled = 0,
+        geometryObjectsOptimized = 0,
+        textureObjectsHidden = 0,
+        meshFidelityReduced = 0,
+        potatoMaterialsApplied = 0,
         currentMode = "DISABLED",
     }
 
@@ -408,12 +414,89 @@ local function createPerformanceManager(deps)
         saved.Enabled = nil
     end
 
+    local function restoreSavedProperty(instance, property)
+        local saved = originals[instance]
+        if not saved or saved[property] == nil then return false end
+        local ok = writeProperty(instance, property, saved[property])
+        if ok then saved[property] = nil end
+        return ok
+    end
+
+    local function optimizeGeometry(instance)
+        if not instance or isProtected(instance) then return end
+        local className = safeClass(instance)
+        local ultra = config.ultraPerformance == true or config.potatoMode == true
+        local potato = config.potatoMode == true
+
+        local isBasePart = className == "Part" or className == "MeshPart" or className == "UnionOperation"
+        if isBasePart then
+            if ultra then
+                local okShadow, shadow = readProperty(instance, "CastShadow")
+                if okShadow then
+                    remember(instance, "CastShadow", shadow)
+                    if shadow ~= false and writeProperty(instance, "CastShadow", false) then
+                        stats.geometryObjectsOptimized += 1
+                    end
+                end
+            else
+                restoreSavedProperty(instance, "CastShadow")
+            end
+
+            if potato then
+                local okMaterial, material = readProperty(instance, "Material")
+                if okMaterial then
+                    remember(instance, "Material", material)
+                    if material ~= Enum.Material.SmoothPlastic and writeProperty(instance, "Material", Enum.Material.SmoothPlastic) then
+                        stats.potatoMaterialsApplied += 1
+                    end
+                end
+                local okReflectance, reflectance = readProperty(instance, "Reflectance")
+                if okReflectance then
+                    remember(instance, "Reflectance", reflectance)
+                    writeProperty(instance, "Reflectance", 0)
+                end
+            else
+                restoreSavedProperty(instance, "Material")
+                restoreSavedProperty(instance, "Reflectance")
+            end
+        end
+
+        if className == "MeshPart" then
+            if ultra then
+                local okFidelity, fidelity = readProperty(instance, "RenderFidelity")
+                if okFidelity then
+                    remember(instance, "RenderFidelity", fidelity)
+                    if fidelity ~= Enum.RenderFidelity.Performance and writeProperty(instance, "RenderFidelity", Enum.RenderFidelity.Performance) then
+                        stats.meshFidelityReduced += 1
+                    end
+                end
+            else
+                restoreSavedProperty(instance, "RenderFidelity")
+            end
+        end
+
+        if className == "Texture" or className == "Decal" then
+            if ultra then
+                local okTransparency, transparency = readProperty(instance, "Transparency")
+                if okTransparency then
+                    remember(instance, "Transparency", transparency)
+                    if transparency ~= 1 and writeProperty(instance, "Transparency", 1) then
+                        stats.textureObjectsHidden += 1
+                    end
+                end
+            else
+                restoreSavedProperty(instance, "Transparency")
+            end
+        end
+    end
+
     local function processVisual(instance)
-        if config.disableVFX or config.boostFPS then
+        if config.disableVFX or config.boostFPS or config.ultraPerformance or config.potatoMode then
             disableVisual(instance)
         else
             restoreVisual(instance)
         end
+        optimizeGeometry(instance)
     end
 
     local function isLocalCharacter(model)
@@ -532,6 +615,42 @@ local function createPerformanceManager(deps)
             connectRoot(root)
             processRoot(root)
         end
+
+        -- V2: when a real performance preset is active, process the existing
+        -- client-visible world too. Instances are never destroyed/reparented.
+        local WorkspaceService = services.Workspace
+        if WorkspaceService and (config.boostFPS or config.ultraPerformance or config.potatoMode) then
+            processVisual(WorkspaceService)
+            for _, instance in ipairs(safeGetDescendants(WorkspaceService)) do
+                processVisual(instance)
+            end
+        elseif WorkspaceService then
+            -- Restore properties previously overridden by Ultra/Potato.
+            for instance in pairs(originals) do
+                processVisual(instance)
+            end
+        end
+
+        local terrain = WorkspaceService and WorkspaceService:FindFirstChildOfClass("Terrain")
+        if terrain then
+            if config.potatoMode then
+                for property, value in pairs({
+                    WaterWaveSize = 0,
+                    WaterWaveSpeed = 0,
+                    WaterReflectance = 0,
+                    Decoration = false,
+                }) do
+                    local readable, current = readProperty(terrain, property)
+                    if readable then remember(terrain, property, current); writeProperty(terrain, property, value) end
+                end
+            else
+                restoreSavedProperty(terrain, "WaterWaveSize")
+                restoreSavedProperty(terrain, "WaterWaveSpeed")
+                restoreSavedProperty(terrain, "WaterReflectance")
+                restoreSavedProperty(terrain, "Decoration")
+            end
+        end
+
         if Lighting and config.disableShadows then
             local readable, shadows = readProperty(Lighting, "GlobalShadows")
             if readable then
@@ -570,7 +689,9 @@ local function createPerformanceManager(deps)
     end
 
     local function updateModeStatus()
-        if config.ultraPerformance then
+        if config.potatoMode then
+            setStatus("POTATO MODE")
+        elseif config.ultraPerformance then
             setStatus("ULTRA PERFORMANCE")
         elseif config.boostFPS then
             setStatus("BOOST FPS + LOW GRAPHICS")
@@ -676,6 +797,56 @@ local function createPerformanceManager(deps)
     end
     function api.getUltraPerformance() return config.ultraPerformance end
 
+    function api.setPotatoMode(enabled)
+        enabled = enabled == true
+        if enabled and not state.potatoSnapshot then
+            state.potatoSnapshot = {
+                boostFPS = config.boostFPS,
+                disableVFX = config.disableVFX,
+                disableShadows = config.disableShadows,
+                hideOtherPlayers = config.hideOtherPlayers,
+                hideOtherChickens = config.hideOtherChickens,
+                ultraPerformance = config.ultraPerformance,
+            }
+        elseif not enabled and state.potatoSnapshot then
+            config.boostFPS = state.potatoSnapshot.boostFPS
+            config.disableVFX = state.potatoSnapshot.disableVFX
+            config.disableShadows = state.potatoSnapshot.disableShadows
+            config.hideOtherPlayers = state.potatoSnapshot.hideOtherPlayers
+            config.hideOtherChickens = state.potatoSnapshot.hideOtherChickens
+            config.ultraPerformance = state.potatoSnapshot.ultraPerformance
+            state.potatoSnapshot = nil
+        end
+        config.potatoMode = enabled
+        if enabled then
+            config.boostFPS = true
+            config.disableVFX = true
+            config.disableShadows = true
+            config.hideOtherPlayers = true
+            config.hideOtherChickens = true
+            config.ultraPerformance = true
+        end
+        apply()
+        return true
+    end
+    function api.getPotatoMode() return config.potatoMode == true end
+
+    function api.restoreVisuals()
+        config.boostFPS = false
+        config.disableVFX = false
+        config.disableShadows = false
+        config.hideOtherPlayers = false
+        config.hideOtherChickens = false
+        config.whiteScreen = false
+        config.ultraPerformance = false
+        config.potatoMode = false
+        state.boostSnapshot = nil
+        state.ultraSnapshot = nil
+        state.potatoSnapshot = nil
+        apply()
+        return true
+    end
+
     function api.getStatus() return state.status end
     function api.getStats()
         local result = {}
@@ -702,6 +873,15 @@ local function createPerformanceManager(deps)
             if saved.Enabled ~= nil then writeProperty(instance, "Enabled", saved.Enabled) end
             if saved.GlobalShadows ~= nil then writeProperty(instance, "GlobalShadows", saved.GlobalShadows) end
             if saved.LocalTransparencyModifier ~= nil then writeProperty(instance, "LocalTransparencyModifier", saved.LocalTransparencyModifier) end
+            if saved.CastShadow ~= nil then writeProperty(instance, "CastShadow", saved.CastShadow) end
+            if saved.Material ~= nil then writeProperty(instance, "Material", saved.Material) end
+            if saved.Reflectance ~= nil then writeProperty(instance, "Reflectance", saved.Reflectance) end
+            if saved.RenderFidelity ~= nil then writeProperty(instance, "RenderFidelity", saved.RenderFidelity) end
+            if saved.Transparency ~= nil then writeProperty(instance, "Transparency", saved.Transparency) end
+            if saved.WaterWaveSize ~= nil then writeProperty(instance, "WaterWaveSize", saved.WaterWaveSize) end
+            if saved.WaterWaveSpeed ~= nil then writeProperty(instance, "WaterWaveSpeed", saved.WaterWaveSpeed) end
+            if saved.WaterReflectance ~= nil then writeProperty(instance, "WaterReflectance", saved.WaterReflectance) end
+            if saved.Decoration ~= nil then writeProperty(instance, "Decoration", saved.Decoration) end
         end
         if type(deps.setVisualCover) == "function" then pcall(deps.setVisualCover, false) end
         setStatus("DISABLED")
@@ -6031,6 +6211,7 @@ do
                 hideOtherChickens = PerformanceManager.getHideOtherChickens(),
                 whiteScreen = PerformanceManager.getWhiteScreen(),
                 ultraPerformance = PerformanceManager.getUltraPerformance(),
+                potatoMode = PerformanceManager.getPotatoMode and PerformanceManager.getPotatoMode() or false,
             }
         end, function(data)
             if type(data) ~= "table" or not PerformanceManager then return end
@@ -6041,9 +6222,10 @@ do
             if data.whiteScreen ~= nil then PerformanceManager.setWhiteScreen(data.whiteScreen == true) end
             if data.boostFPS ~= nil then PerformanceManager.setBoostFPS(data.boostFPS == true) end
             if data.ultraPerformance ~= nil then PerformanceManager.setUltraPerformance(data.ultraPerformance == true) end
+            if data.potatoMode ~= nil and PerformanceManager.setPotatoMode then PerformanceManager.setPotatoMode(data.potatoMode == true) end
         end, { defaults = {
             boostFPS = false, disableVFX = false, disableShadows = false,
-            hideOtherPlayers = false, hideOtherChickens = false, whiteScreen = false, ultraPerformance = false,
+            hideOtherPlayers = false, hideOtherChickens = false, whiteScreen = false, ultraPerformance = false, potatoMode = false,
         } })
 
 
@@ -8744,6 +8926,24 @@ safeBuild("Performance", function()
         perfToggle(4, "Hide Other Players", PerformanceManager.getHideOtherPlayers, PerformanceManager.setHideOtherPlayers)
         perfToggle(5, "White Screen / AFK Saver", PerformanceManager.getWhiteScreen, PerformanceManager.setWhiteScreen)
         perfToggle(6, "Ultra Performance", PerformanceManager.getUltraPerformance, PerformanceManager.setUltraPerformance)
+        if PerformanceManager.getPotatoMode and PerformanceManager.setPotatoMode then
+            perfToggle(7, "Potato Mode", PerformanceManager.getPotatoMode, PerformanceManager.setPotatoMode)
+        end
+        local restoreButton = Instance.new("TextButton")
+        restoreButton.LayoutOrder = 8
+        restoreButton.Size = UDim2.new(1, 0, 0, 30)
+        restoreButton.BackgroundColor3 = Theme.SurfaceElevated
+        restoreButton.BorderSizePixel = 0
+        restoreButton.Text = "Restore Visuals"
+        restoreButton.Font = Enum.Font.GothamMedium
+        restoreButton.TextSize = 11
+        restoreButton.TextColor3 = Theme.TextPrimary
+        restoreButton.AutoButtonColor = false
+        restoreButton.Parent = perfCard
+        corner(restoreButton, 7)
+        maid:Connect(restoreButton.MouseButton1Click, function()
+            if PerformanceManager.restoreVisuals then PerformanceManager.restoreVisuals(); markConfigDirty() end
+        end)
     else
         setText(row(perfCard, 1, "Status"), "Unavailable")
     end
@@ -11824,6 +12024,24 @@ safeBuild("Settings", function()
         perfToggle(5, "Hide Other Chickens", PerformanceManager.getHideOtherChickens, PerformanceManager.setHideOtherChickens)
         perfToggle(6, "White Screen / AFK Saver", PerformanceManager.getWhiteScreen, PerformanceManager.setWhiteScreen)
         perfToggle(7, "Ultra Performance", PerformanceManager.getUltraPerformance, PerformanceManager.setUltraPerformance)
+        if PerformanceManager.getPotatoMode and PerformanceManager.setPotatoMode then
+            perfToggle(8, "Potato Mode", PerformanceManager.getPotatoMode, PerformanceManager.setPotatoMode)
+        end
+        local restoreButton = Instance.new("TextButton")
+        restoreButton.LayoutOrder = 9
+        restoreButton.Size = UDim2.new(1, 0, 0, 30)
+        restoreButton.BackgroundColor3 = Theme.SurfaceElevated
+        restoreButton.BorderSizePixel = 0
+        restoreButton.Text = "Restore Visuals"
+        restoreButton.Font = Enum.Font.GothamMedium
+        restoreButton.TextSize = 11
+        restoreButton.TextColor3 = Theme.TextPrimary
+        restoreButton.AutoButtonColor = false
+        restoreButton.Parent = perfCard
+        corner(restoreButton, 7)
+        maid:Connect(restoreButton.MouseButton1Click, function()
+            if PerformanceManager.restoreVisuals then PerformanceManager.restoreVisuals(); markConfigDirty() end
+        end)
         local pStatus = row(perfCard, 10, "Status")
         local pVfx = row(perfCard, 11, "VFX Disabled")
         local pPl = row(perfCard, 12, "Player Parts Hidden")

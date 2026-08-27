@@ -14,26 +14,6 @@ local function __unoRunStage(name, fn)
     return result
 end
 
-local function __unoPrintUnfavDiag()
-    local env = (getgenv and getgenv()) or _G
-    local d = type(env) == "table" and env.UNO_UNFAV_DIAG or nil
-    if type(d) ~= "table" then
-        print("[UNO UNFAV DIAG] no captured backend/UI error")
-        return nil
-    end
-    print("[UNO UNFAV DIAG REPORT]")
-    print("backend = " .. tostring(d.backend))
-    print("ui = " .. tostring(d.ui))
-    return d
-end
-
-do
-    local env = (getgenv and getgenv()) or _G
-    if type(env) == "table" then
-        env.UNO_PRINT_UNFAV_DIAG = __unoPrintUnfavDiag
-    end
-end
-
 
 
 local function __unoStage01()
@@ -179,11 +159,10 @@ local State = {
         maxUpgradeGeneratorLevel = 50,
     },
     autoFavorite = { status = "DISABLED" },
-    autoUnfavorite = { status = "DISABLED" },
     movementOwner = "NONE",
     toggles = {
         autoFarmRebirth = false, autoTower = false, useFrontierSkip = true, autoKoDismiss = true, autoHatch = false, autoCollectEgg = false,
-        autoIncubatorClaim = false, autoSell = false, autoFavorite = false, autoUnfavorite = false, autoFuse = false, autoTargetFuse = false,
+        autoIncubatorClaim = false, autoSell = false, autoFavorite = false, autoFuse = false, autoTargetFuse = false,
         autoBuyGenerator = false, autoUpgradeGenerator = false, autoExpandCoop = false, autoUpgradeRecycler = false, autoUpgradeIncubator = false,
         antiAfk = true, autoRebirth = false, autoHotEgg = false, autoArena = false, autoEventCapsule = false, autoKraken = false, autoUfoAscension = false, showFloatingButton = true, reducedMotion = false,
     },
@@ -2829,9 +2808,20 @@ do
 end
 
 --------------------------------------------------------------------
--- AUTO FAVORITE CHICKENS (source-backed SetChickenFavorite integration)
+-- FAVORITE ACTION ENGINE
+-- V1 refactor: preserves the existing Auto Favorite behavior exactly.
+-- Auto Unfavorite is NOT instantiated yet; this build is only to validate
+-- that the shared engine refactor is safe on the last-working baseline.
 --------------------------------------------------------------------
-State._autoFavoriteFeature = (function()
+local function createFavoriteActionFeature(options)
+    options = options or {}
+
+    local desiredState = options.desiredState == true
+    local toggleKey = tostring(options.toggleKey or "autoFavorite")
+    local stateKey = tostring(options.stateKey or "autoFavorite")
+    local setterName = tostring(options.setterName or "setAutoFavorite")
+    local activeStatus = tostring(options.activeStatus or "FAVORITING")
+
     local Remotes = Integration.modules.Remotes
     local DataController = Integration.modules.DataController
     local Catalog = Integration.modules.Catalog
@@ -2846,8 +2836,6 @@ State._autoFavoriteFeature = (function()
 
     local enabled = false
     local destroyed = false
-    -- Explicit arming gate mirrors Auto Sell. Roster changes from hatching must
-    -- never favorite anything while the toggle is OFF.
     local userArmed = false
     local generation = 0
     local requestInFlight = nil
@@ -2860,7 +2848,10 @@ State._autoFavoriteFeature = (function()
 
     local function setStatus(value, err)
         status = tostring(value or "IDLE")
-        State.autoFavorite.status = status
+        local stateBucket = State[stateKey]
+        if type(stateBucket) == "table" then
+            stateBucket.status = status
+        end
         lastError = err
     end
 
@@ -2892,8 +2883,6 @@ State._autoFavoriteFeature = (function()
             return id ~= "" and id or nil
         end
 
-        -- Future-proof fallback if a future update changes mutation from
-        -- a plain id into a descriptor table.
         if type(mutation) == "table" then
             local raw = mutation.id or mutation.mutationId or mutation.typeId or mutation.name
             if raw ~= nil then
@@ -2914,7 +2903,6 @@ State._autoFavoriteFeature = (function()
     local function matches(chicken)
         if type(chicken) ~= "table" then return false end
 
-        -- Filters are OR conditions: Chicken OR Rarity OR Mutation.
         local typeId = chicken.typeId
         if typeId ~= nil and selectedTypeIds[tostring(typeId)] == true then
             return true
@@ -2938,6 +2926,10 @@ State._autoFavoriteFeature = (function()
         return nil
     end
 
+    local function isAlreadyDesired(chicken)
+        return (chicken.favorite == true) == desiredState
+    end
+
     local function processOnce(workerGeneration)
         if destroyed or not enabled or workerGeneration ~= generation then return end
         if not hasFilters() then
@@ -2956,7 +2948,7 @@ State._autoFavoriteFeature = (function()
         for _, chicken in pairs(roster.chickens) do
             if type(chicken) == "table"
                 and chicken.id ~= nil
-                and chicken.favorite ~= true
+                and not isAlreadyDesired(chicken)
                 and matches(chicken)
                 and (retryAfter[chicken.id] == nil or retryAfter[chicken.id] <= now) then
                 candidate = chicken
@@ -2971,10 +2963,9 @@ State._autoFavoriteFeature = (function()
 
         local id = candidate.id
 
-        -- FINAL FAVORITE GATE.
         if not enabled
             or not userArmed
-            or State.toggles.autoFavorite ~= true
+            or State.toggles[toggleKey] ~= true
             or workerGeneration ~= generation
             or destroyed then
             requestInFlight = nil
@@ -2983,9 +2974,9 @@ State._autoFavoriteFeature = (function()
         end
 
         requestInFlight = id
-        setStatus("FAVORITING")
+        setStatus(activeStatus)
 
-        local ok, response = pcall(Remotes.invoke, favoriteDef, id, true)
+        local ok, response = pcall(Remotes.invoke, favoriteDef, id, desiredState)
         if not ok then
             requestInFlight = nil
             retryAfter[id] = os.clock() + 2
@@ -2999,7 +2990,7 @@ State._autoFavoriteFeature = (function()
         while os.clock() < deadline and enabled and not destroyed and workerGeneration == generation do
             local latestRoster = readRoster()
             local latest = latestRoster and findChickenById(latestRoster, id) or nil
-            if latest and latest.favorite == true then
+            if latest and isAlreadyDesired(latest) then
                 confirmed = true
                 break
             end
@@ -3031,11 +3022,11 @@ State._autoFavoriteFeature = (function()
 
     local api = {}
 
-    function api.setAutoFavorite(value)
+    api[setterName] = function(value)
         value = value == true
         if destroyed then return false end
 
-        State.toggles.autoFavorite = value
+        State.toggles[toggleKey] = value
         userArmed = value
 
         if value == enabled then
@@ -3122,9 +3113,6 @@ State._autoFavoriteFeature = (function()
     end
 
     function api.getAvailableMutations()
-        -- Dynamic discovery: mutation ids come from live roster data.
-        -- New mutations automatically appear after they exist on a chicken
-        -- visible in DataController.roster().
         local out, seen = {}, {}
         local roster = readRoster()
 
@@ -3136,8 +3124,6 @@ State._autoFavoriteFeature = (function()
             end
         end
 
-        -- Preserve saved selections even if no current chicken has the
-        -- mutation during this session.
         for id, on in pairs(selectedMutations) do
             if on and not seen[id] then
                 seen[id] = true
@@ -3191,7 +3177,7 @@ State._autoFavoriteFeature = (function()
         if destroyed then return end
         enabled = false
         userArmed = false
-        State.toggles.autoFavorite = false
+        State.toggles[toggleKey] = false
         generation = generation + 1
         requestInFlight = nil
         destroyed = true
@@ -3199,403 +3185,21 @@ State._autoFavoriteFeature = (function()
     end
 
     return api
-end)()
+end
 
+-- Instantiate ONLY the existing Auto Favorite in V1.
+State._autoFavoriteFeature = createFavoriteActionFeature({
+    desiredState = true,
+    toggleKey = "autoFavorite",
+    stateKey = "autoFavorite",
+    setterName = "setAutoFavorite",
+    activeStatus = "FAVORITING",
+})
+
+State.diagnostics["AutoFavorite.Engine"] = State._autoFavoriteFeature and "SHARED_ENGINE_V1_FAVORITE_ONLY" or "UNAVAILABLE"
 State.diagnostics["AutoFavorite.MutationFilter"] = State._autoFavoriteFeature and "DYNAMIC_ROSTER_DISCOVERY" or "UNAVAILABLE"
 State.diagnostics["AutoFavorite.ToggleSafety"] = State._autoFavoriteFeature and "HARD_ARMING_GATE_V1" or "UNAVAILABLE"
 State.diagnostics["AutoFavorite.Feature"] = State._autoFavoriteFeature and "READY" or "MISSING DEPENDENCY"
-
-print("[UNO UNFAV DIAG] BACKEND INSERT START")
-local __unoUnfavBackendOk, __unoUnfavBackendErr = pcall(function()
--- AUTO UNFAVORITE CHICKENS (diagnostic exact clone)
---------------------------------------------------------------------
-State._autoUnfavoriteFeature = (function()
-    local Remotes = Integration.modules.Remotes
-    local DataController = Integration.modules.DataController
-    local Catalog = Integration.modules.Catalog
-    local favoriteDef = Remotes and Remotes.defs and Remotes.defs.SetChickenFavorite
-
-    if type(Remotes) ~= "table" or type(Remotes.invoke) ~= "function"
-        or type(DataController) ~= "table" or type(DataController.roster) ~= "function"
-        or type(Catalog) ~= "table" or type(Catalog.chickenTypes) ~= "table"
-        or favoriteDef == nil then
-        return nil
-    end
-
-    local enabled = false
-    local destroyed = false
-    -- Explicit arming gate mirrors Auto Sell. Roster changes from hatching must
-    -- never favorite anything while the toggle is OFF.
-    local userArmed = false
-    local generation = 0
-    local requestInFlight = nil
-    local selectedTypeIds = {}
-    local selectedRarities = {}
-    local selectedMutations = {}
-    local retryAfter = {}
-    local status = "DISABLED"
-    local lastError = nil
-
-    local function setStatus(value, err)
-        status = tostring(value or "IDLE")
-        State.autoUnfavorite.status = status
-        lastError = err
-    end
-
-    local function readRoster()
-        local ok, roster = pcall(DataController.roster)
-        if ok and type(roster) == "table" and type(roster.chickens) == "table" then
-            return roster
-        end
-        return nil
-    end
-
-    local function resolveRarity(chicken)
-        if type(chicken) ~= "table" then return nil end
-        if chicken.rarity ~= nil then return string.lower(tostring(chicken.rarity)) end
-        local def = chicken.typeId and Catalog.chickenTypes[chicken.typeId]
-        if type(def) == "table" and def.rarity ~= nil then
-            return string.lower(tostring(def.rarity))
-        end
-        return nil
-    end
-
-    local function resolveMutationId(chicken)
-        if type(chicken) ~= "table" then return nil end
-        local mutation = chicken.mutation
-        if mutation == nil then return nil end
-
-        if type(mutation) == "string" or type(mutation) == "number" then
-            local id = string.lower(tostring(mutation))
-            return id ~= "" and id or nil
-        end
-
-        -- Future-proof fallback if a future update changes mutation from
-        -- a plain id into a descriptor table.
-        if type(mutation) == "table" then
-            local raw = mutation.id or mutation.mutationId or mutation.typeId or mutation.name
-            if raw ~= nil then
-                local id = string.lower(tostring(raw))
-                return id ~= "" and id or nil
-            end
-        end
-
-        return nil
-    end
-
-    local function hasFilters()
-        return next(selectedTypeIds) ~= nil
-            or next(selectedRarities) ~= nil
-            or next(selectedMutations) ~= nil
-    end
-
-    local function matches(chicken)
-        if type(chicken) ~= "table" then return false end
-
-        -- Filters are OR conditions: Chicken OR Rarity OR Mutation.
-        local typeId = chicken.typeId
-        if typeId ~= nil and selectedTypeIds[tostring(typeId)] == true then
-            return true
-        end
-
-        local rarity = resolveRarity(chicken)
-        if rarity ~= nil and selectedRarities[rarity] == true then
-            return true
-        end
-
-        local mutationId = resolveMutationId(chicken)
-        return mutationId ~= nil and selectedMutations[mutationId] == true
-    end
-
-    local function findChickenById(roster, id)
-        for _, chicken in pairs((type(roster) == "table" and roster.chickens) or {}) do
-            if type(chicken) == "table" and chicken.id == id then
-                return chicken
-            end
-        end
-        return nil
-    end
-
-    local function processOnce(workerGeneration)
-        if destroyed or not enabled or workerGeneration ~= generation then return end
-        if not hasFilters() then
-            setStatus("NO FILTERS")
-            return
-        end
-
-        local roster = readRoster()
-        if not roster then
-            setStatus("NO ROSTER", "ROSTER UNAVAILABLE")
-            return
-        end
-
-        local now = os.clock()
-        local candidate = nil
-        for _, chicken in pairs(roster.chickens) do
-            if type(chicken) == "table"
-                and chicken.id ~= nil
-                and chicken.favorite == true
-                and matches(chicken)
-                and (retryAfter[chicken.id] == nil or retryAfter[chicken.id] <= now) then
-                candidate = chicken
-                break
-            end
-        end
-
-        if not candidate then
-            setStatus("IDLE")
-            return
-        end
-
-        local id = candidate.id
-
-        -- FINAL FAVORITE GATE.
-        if not enabled
-            or not userArmed
-            or State.toggles.autoUnfavorite ~= true
-            or workerGeneration ~= generation
-            or destroyed then
-            requestInFlight = nil
-            setStatus("DISABLED")
-            return
-        end
-
-        requestInFlight = id
-        setStatus("UNFAVORITING")
-
-        local ok, response = pcall(Remotes.invoke, favoriteDef, id, false)
-        if not ok then
-            requestInFlight = nil
-            retryAfter[id] = os.clock() + 2
-            setStatus("ERROR", tostring(response))
-            return
-        end
-
-        setStatus("WAITING CONFIRMATION")
-        local deadline = os.clock() + 6
-        local confirmed = false
-        while os.clock() < deadline and enabled and not destroyed and workerGeneration == generation do
-            local latestRoster = readRoster()
-            local latest = latestRoster and findChickenById(latestRoster, id) or nil
-            if latest and latest.favorite ~= true then
-                confirmed = true
-                break
-            end
-            task.wait(0.20)
-        end
-
-        requestInFlight = nil
-        if confirmed then
-            retryAfter[id] = nil
-            setStatus("CONFIRMED")
-        elseif enabled and not destroyed and workerGeneration == generation then
-            retryAfter[id] = os.clock() + 2
-            setStatus("NOT CONFIRMED")
-        end
-    end
-
-    local function worker(workerGeneration)
-        while enabled and not destroyed and workerGeneration == generation do
-            local ok, err = pcall(processOnce, workerGeneration)
-            if not ok then
-                setStatus("ERROR", tostring(err))
-                task.wait(1.5)
-            else
-                task.wait(0.45)
-            end
-        end
-        if not enabled then setStatus("DISABLED") end
-    end
-
-    local api = {}
-
-    function api.setAutoUnfavorite(value)
-        value = value == true
-        if destroyed then return false end
-
-        State.toggles.autoUnfavorite = value
-        userArmed = value
-
-        if value == enabled then
-            if not value then requestInFlight = nil end
-            return true
-        end
-
-        enabled = value
-        generation = generation + 1
-        requestInFlight = nil
-        if value then
-            setStatus(hasFilters() and "IDLE" or "NO FILTERS")
-            local myGeneration = generation
-            task.spawn(function() worker(myGeneration) end)
-        else
-            setStatus("DISABLED")
-        end
-        return true
-    end
-
-    function api.isEnabled() return enabled end
-    function api.getStatus()
-        return { status = status, enabled = enabled, requestInFlight = requestInFlight, lastError = lastError }
-    end
-
-    function api.setTypeSelected(typeId, value)
-        typeId = tostring(typeId or "")
-        if typeId == "" then return false end
-        if value == true then selectedTypeIds[typeId] = true else selectedTypeIds[typeId] = nil end
-        return true
-    end
-    function api.isTypeSelected(typeId) return selectedTypeIds[tostring(typeId or "")] == true end
-    function api.clearTypeSelection() table.clear(selectedTypeIds) end
-    function api.getSelectedTypeIds()
-        local out = {}
-        for id, on in pairs(selectedTypeIds) do if on then table.insert(out, id) end end
-        table.sort(out)
-        return out
-    end
-
-    function api.setRaritySelected(rarityId, value)
-        rarityId = string.lower(tostring(rarityId or ""))
-        if rarityId == "" then return false end
-        if value == true then selectedRarities[rarityId] = true else selectedRarities[rarityId] = nil end
-        return true
-    end
-    function api.isRaritySelected(rarityId)
-        return selectedRarities[string.lower(tostring(rarityId or ""))] == true
-    end
-    function api.clearRaritySelection() table.clear(selectedRarities) end
-    function api.getSelectedRarities()
-        local out = {}
-        for id, on in pairs(selectedRarities) do if on then table.insert(out, id) end end
-        table.sort(out)
-        return out
-    end
-
-    function api.setMutationSelected(mutationId, value)
-        mutationId = string.lower(tostring(mutationId or ""))
-        if mutationId == "" then return false end
-        if value == true then
-            selectedMutations[mutationId] = true
-        else
-            selectedMutations[mutationId] = nil
-        end
-        return true
-    end
-
-    function api.isMutationSelected(mutationId)
-        return selectedMutations[string.lower(tostring(mutationId or ""))] == true
-    end
-
-    function api.clearMutationSelection()
-        table.clear(selectedMutations)
-    end
-
-    function api.getSelectedMutations()
-        local out = {}
-        for id, on in pairs(selectedMutations) do
-            if on then table.insert(out, id) end
-        end
-        table.sort(out)
-        return out
-    end
-
-    function api.getAvailableMutations()
-        -- Dynamic discovery: mutation ids come from live roster data.
-        -- New mutations automatically appear after they exist on a chicken
-        -- visible in DataController.roster().
-        local out, seen = {}, {}
-        local roster = readRoster()
-
-        for _, chicken in pairs((type(roster) == "table" and roster.chickens) or {}) do
-            local id = resolveMutationId(chicken)
-            if id ~= nil and not seen[id] then
-                seen[id] = true
-                table.insert(out, id)
-            end
-        end
-
-        -- Preserve saved selections even if no current chicken has the
-        -- mutation during this session.
-        for id, on in pairs(selectedMutations) do
-            if on and not seen[id] then
-                seen[id] = true
-                table.insert(out, id)
-            end
-        end
-
-        table.sort(out)
-        return out
-    end
-
-    function api.getAvailableChickenTypes()
-        local out = {}
-        for typeId, def in pairs(Catalog.chickenTypes or {}) do
-            if type(def) == "table" then
-                local id = tostring(def.id or typeId)
-                local name = tostring(def.name or id)
-                table.insert(out, { id = id, name = name })
-            end
-        end
-        table.sort(out, function(a, b)
-            local an, bn = string.lower(a.name), string.lower(b.name)
-            if an == bn then return a.id < b.id end
-            return an < bn
-        end)
-        return out
-    end
-
-    function api.getAvailableRarities()
-        local out, seen = {}, {}
-        local rarity = Catalog.Rarity or Catalog.rarity or {}
-        if type(rarity.rank) == "table" then
-            for id in pairs(rarity.rank) do
-                id = string.lower(tostring(id))
-                if id ~= "" and not seen[id] then seen[id] = true; table.insert(out, id) end
-            end
-            table.sort(out, function(a, b)
-                local ar = tonumber(rarity.rank[a]) or math.huge
-                local br = tonumber(rarity.rank[b]) or math.huge
-                if ar == br then return a < b end
-                return ar < br
-            end)
-        end
-        if #out == 0 then
-            out = { "common", "uncommon", "rare", "epic", "legendary", "mythic", "divine", "celestial", "cosmic", "secret" }
-        end
-        return out
-    end
-
-    function api.destroy()
-        if destroyed then return end
-        enabled = false
-        userArmed = false
-        State.toggles.autoUnfavorite = false
-        generation = generation + 1
-        requestInFlight = nil
-        destroyed = true
-        setStatus("DISABLED")
-    end
-
-    return api
-end)()
-
-State.diagnostics["AutoUnfavorite.MutationFilter"] = State._autoUnfavoriteFeature and "DYNAMIC_ROSTER_DISCOVERY" or "UNAVAILABLE"
-State.diagnostics["AutoUnfavorite.ToggleSafety"] = State._autoUnfavoriteFeature and "HARD_ARMING_GATE_V1" or "UNAVAILABLE"
-State.diagnostics["AutoUnfavorite.Feature"] = State._autoUnfavoriteFeature and "READY" or "MISSING DEPENDENCY"
-end)
-if __unoUnfavBackendOk then
-    print("[UNO UNFAV DIAG] BACKEND INSERT OK")
-else
-    State._autoUnfavoriteFeature = nil
-    local __msg = "[UNO UNFAV DIAG] BACKEND ERROR: " .. tostring(__unoUnfavBackendErr)
-    warn(__msg)
-    local __env = (getgenv and getgenv()) or _G
-    if type(__env) == "table" then
-        __env.UNO_UNFAV_DIAG = __env.UNO_UNFAV_DIAG or {}
-        __env.UNO_UNFAV_DIAG.backend = __msg
-    end
-end
-
 
 
 
@@ -8709,268 +8313,6 @@ safeBuild("Auto Farm", function()
             setText(row(favoriteCard, 1, "Status"), "Unavailable")
         end
     end)()
-
-
-    print("[UNO UNFAV DIAG] UI INSERT START")
-    local __unoUnfavUiOk, __unoUnfavUiErr = pcall(function()
-    (function()
-        local _, unfavoriteCard = card(chicken, 4, "Auto Unfavorite")
-        if State._autoUnfavoriteFeature then
-            local feature = State._autoUnfavoriteFeature
-
-            settingRow(unfavoriteCard, 1, "Auto Unfavorite", nil, "autoUnfavorite", function(v)
-                return feature.setAutoUnfavorite(v)
-            end)
-
-            local filterTitle = Instance.new("Frame")
-            filterTitle.LayoutOrder = 2
-            filterTitle.Size = UDim2.new(1, 0, 0, 18)
-            filterTitle.BackgroundTransparency = 1
-            filterTitle.Parent = unfavoriteCard
-            text(filterTitle, "Filters", 11, Theme.TextMuted, Enum.Font.GothamMedium).Size = UDim2.new(1, 0, 1, 0)
-
-            local function makeUnfavoriteSelector(order, title, kind)
-                local wrap = Instance.new("Frame")
-                wrap.LayoutOrder = order
-                wrap.Size = UDim2.new(1, 0, 0, 0)
-                wrap.AutomaticSize = Enum.AutomaticSize.Y
-                wrap.BackgroundTransparency = 1
-                wrap.Parent = unfavoriteCard
-
-                local layout = Instance.new("UIListLayout")
-                layout.Padding = UDim.new(0, 5)
-                layout.SortOrder = Enum.SortOrder.LayoutOrder
-                layout.Parent = wrap
-
-                local header = Instance.new("TextButton")
-                header.LayoutOrder = 1
-                header.Size = UDim2.new(1, 0, 0, 48)
-                header.BackgroundColor3 = Theme.SurfaceElevated
-                header.BorderSizePixel = 0
-                header.Text = ""
-                header.AutoButtonColor = false
-                header.Parent = wrap
-                corner(header, 7); stroke(header)
-
-                local titleLabel = text(header, title, 12, Theme.TextSecondary, Enum.Font.GothamMedium)
-                titleLabel.Position = UDim2.fromOffset(11, 4)
-                titleLabel.Size = UDim2.new(1, -48, 0, 20)
-
-                local summaryLabel = text(header, "None selected", 10, Theme.TextMuted)
-                summaryLabel.Position = UDim2.fromOffset(11, 24)
-                summaryLabel.Size = UDim2.new(1, -48, 0, 17)
-
-                local arrow = text(header, "›", 20, Theme.TextMuted, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
-                arrow.Position = UDim2.new(1, -36, 0, 8)
-                arrow.Size = UDim2.fromOffset(26, 30)
-
-                local body = Instance.new("Frame")
-                body.LayoutOrder = 2
-                body.Size = UDim2.new(1, 0, 0, 0)
-                body.AutomaticSize = Enum.AutomaticSize.Y
-                body.BackgroundTransparency = 1
-                body.Visible = false
-                body.Parent = wrap
-
-                local bodyLayout = Instance.new("UIListLayout")
-                bodyLayout.Padding = UDim.new(0, 5)
-                bodyLayout.SortOrder = Enum.SortOrder.LayoutOrder
-                bodyLayout.Parent = body
-
-                local selectedRows = {}
-
-                local function refreshSummary()
-                    if kind == "names" then
-                        local entries = feature.getAvailableChickenTypes()
-                        local count = 0
-                        for _, entry in ipairs(entries) do
-                            if feature.isTypeSelected(entry.id) then count += 1 end
-                        end
-                        summaryLabel.Text = count == 0 and "None selected" or (tostring(count) .. " selected")
-                    elseif kind == "mutations" then
-                        local chosen = {}
-                        for _, mutationId in ipairs(feature.getAvailableMutations()) do
-                            if feature.isMutationSelected(mutationId) then
-                                table.insert(chosen, titleCaseId(mutationId))
-                            end
-                        end
-                        if #chosen == 0 then
-                            summaryLabel.Text = "None selected"
-                        elseif #chosen <= 3 then
-                            summaryLabel.Text = table.concat(chosen, ", ")
-                        else
-                            summaryLabel.Text = tostring(#chosen) .. " selected"
-                        end
-                    else
-                        local chosen = {}
-                        for _, rarityId in ipairs(feature.getAvailableRarities()) do
-                            if feature.isRaritySelected(rarityId) then
-                                table.insert(chosen, resolveRarityDisplayName(rarityId))
-                            end
-                        end
-                        if #chosen == 0 then
-                            summaryLabel.Text = "None selected"
-                        elseif #chosen <= 3 then
-                            summaryLabel.Text = table.concat(chosen, ", ")
-                        else
-                            summaryLabel.Text = tostring(#chosen) .. " selected"
-                        end
-                    end
-                end
-
-                if kind == "names" then
-                    local search = Instance.new("TextBox")
-                    search.LayoutOrder = 1
-                    search.Size = UDim2.new(1, 0, 0, 34)
-                    search.BackgroundColor3 = Theme.SurfaceElevated
-                    search.BorderSizePixel = 0
-                    search.ClearTextOnFocus = false
-                    search.PlaceholderText = "🔍  Search Chicken..."
-                    search.Text = ""
-                    search.Font = Enum.Font.Gotham
-                    search.TextSize = 12
-                    search.TextColor3 = Theme.TextPrimary
-                    search.PlaceholderColor3 = Theme.TextMuted
-                    search.TextXAlignment = Enum.TextXAlignment.Left
-                    search.Parent = body
-                    corner(search, 7); stroke(search); pad(search, 0, 10, 0, 10)
-
-                    local list = Instance.new("ScrollingFrame")
-                    list.LayoutOrder = 2
-                    list.Size = UDim2.new(1, 0, 0, 220)
-                    list.BackgroundColor3 = Theme.Surface
-                    list.BorderSizePixel = 0
-                    list.ScrollBarThickness = 3
-                    list.AutomaticCanvasSize = Enum.AutomaticSize.Y
-                    list.CanvasSize = UDim2.new()
-                    list.Parent = body
-                    corner(list, 7); stroke(list); pad(list, 8, 8, 8, 8)
-
-                    local listLayout = Instance.new("UIListLayout")
-                    listLayout.Padding = UDim.new(0, 4)
-                    listLayout.SortOrder = Enum.SortOrder.LayoutOrder
-                    listLayout.Parent = list
-
-                    for i, entry in ipairs(feature.getAvailableChickenTypes()) do
-                        local rowFrame, checkBtn = makeFilterRow(
-                            list,
-                            i,
-                            entry.name,
-                            nil,
-                            feature.isTypeSelected(entry.id),
-                            function(button)
-                                local now = not feature.isTypeSelected(entry.id)
-                                feature.setTypeSelected(entry.id, now)
-                                button.Text = now and "✓" or ""
-                                refreshSummary()
-                                markConfigDirty()
-                            end
-                        )
-                        selectedRows[#selectedRows + 1] = {
-                            frame = rowFrame,
-                            id = entry.id,
-                            name = entry.name,
-                            check = checkBtn,
-                        }
-                    end
-
-                    local function applySearch()
-                        local query = string.lower(search.Text or "")
-                        for _, item in ipairs(selectedRows) do
-                            local haystack = string.lower(tostring(item.name) .. " " .. tostring(item.id))
-                            item.frame.Visible = query == "" or string.find(haystack, query, 1, true) ~= nil
-                        end
-                    end
-                    search:GetPropertyChangedSignal("Text"):Connect(applySearch)
-                else
-                    local list = Instance.new("ScrollingFrame")
-                    list.LayoutOrder = 1
-                    list.Size = UDim2.new(1, 0, 0, 220)
-                    list.BackgroundColor3 = Theme.Surface
-                    list.BorderSizePixel = 0
-                    list.ScrollBarThickness = 3
-                    list.AutomaticCanvasSize = Enum.AutomaticSize.Y
-                    list.CanvasSize = UDim2.new()
-                    list.Parent = body
-                    corner(list, 7); stroke(list); pad(list, 8, 8, 8, 8)
-
-                    local listLayout = Instance.new("UIListLayout")
-                    listLayout.Padding = UDim.new(0, 4)
-                    listLayout.SortOrder = Enum.SortOrder.LayoutOrder
-                    listLayout.Parent = list
-
-                    if kind == "mutations" then
-                        local mutations = feature.getAvailableMutations()
-                        if #mutations == 0 then
-                            local emptyLabel = text(list, "No mutation detected in roster", 11, Theme.TextMuted)
-                            emptyLabel.LayoutOrder = 1
-                            emptyLabel.Size = UDim2.new(1, 0, 0, 32)
-                        else
-                            for i, mutationId in ipairs(mutations) do
-                                makeFilterRow(
-                                    list,
-                                    i,
-                                    titleCaseId(mutationId),
-                                    mutationId,
-                                    feature.isMutationSelected(mutationId),
-                                    function(button)
-                                        local now = not feature.isMutationSelected(mutationId)
-                                        feature.setMutationSelected(mutationId, now)
-                                        button.Text = now and "✓" or ""
-                                        refreshSummary()
-                                        markConfigDirty()
-                                    end
-                                )
-                            end
-                        end
-                    else
-                        for i, rarityId in ipairs(feature.getAvailableRarities()) do
-                            makeFilterRow(
-                                list,
-                                i,
-                                resolveRarityDisplayName(rarityId),
-                                nil,
-                                feature.isRaritySelected(rarityId),
-                                function(button)
-                                    local now = not feature.isRaritySelected(rarityId)
-                                    feature.setRaritySelected(rarityId, now)
-                                    button.Text = now and "✓" or ""
-                                    refreshSummary()
-                                    markConfigDirty()
-                                end
-                            )
-                        end
-                    end
-                end
-
-                header.MouseButton1Click:Connect(function()
-                    body.Visible = not body.Visible
-                    arrow.Text = body.Visible and "⌄" or "›"
-                end)
-
-                refreshSummary()
-            end
-
-            makeUnfavoriteSelector(3, "Chicken Names", "names")
-            makeUnfavoriteSelector(4, "Rarities", "rarities")
-            makeUnfavoriteSelector(5, "Mutations", "mutations")
-        else
-            setText(row(unfavoriteCard, 1, "Status"), "Unavailable")
-        end
-    end)()
-
-    end)
-    if __unoUnfavUiOk then
-        print("[UNO UNFAV DIAG] UI INSERT OK")
-    else
-        local __msg = "[UNO UNFAV DIAG] UI ERROR: " .. tostring(__unoUnfavUiErr)
-        warn(__msg)
-        local __env = (getgenv and getgenv()) or _G
-        if type(__env) == "table" then
-            __env.UNO_UNFAV_DIAG = __env.UNO_UNFAV_DIAG or {}
-            __env.UNO_UNFAV_DIAG.ui = __msg
-        end
-    end
 
     -- FUSE
     local fuse = tabs.Fuse

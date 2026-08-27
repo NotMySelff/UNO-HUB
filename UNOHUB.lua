@@ -1,5 +1,5 @@
 --[[
-    UNO HUB1
+    UNO HUB
 ]]
 
 
@@ -3183,6 +3183,7 @@ State._autoUnfavoriteFeature = State._createFavoriteActionFeature(
 State.diagnostics["AutoFavorite.Engine"] = State._autoFavoriteFeature and "SHARED_STATE_FACTORY_V3" or "UNAVAILABLE"
 State.diagnostics["AutoUnfavorite.Engine"] = State._autoUnfavoriteFeature and "SHARED_STATE_FACTORY_V3" or "UNAVAILABLE"
 State.diagnostics["AutoUnfavorite.Feature"] = State._autoUnfavoriteFeature and "READY_BACKEND_UI_SHARED_BUILDER" or "MISSING DEPENDENCY"
+State.diagnostics["AutoUnfavorite.UIBinding"] = State._autoUnfavoriteFeature and "PASSED_FEATURE_INSTANCE_V5_1" or "UNAVAILABLE"
 State.diagnostics["AutoFavorite.MutationFilter"] = State._autoFavoriteFeature and "DYNAMIC_ROSTER_DISCOVERY" or "UNAVAILABLE"
 State.diagnostics["AutoFavorite.ToggleSafety"] = State._autoFavoriteFeature and "HARD_ARMING_GATE_V1" or "UNAVAILABLE"
 State.diagnostics["AutoFavorite.Feature"] = State._autoFavoriteFeature and "READY" or "MISSING DEPENDENCY"
@@ -8059,9 +8060,10 @@ safeBuild("Auto Farm", function()
     -- Stored on State instead of a new outer local to avoid the stage local/register limit.
     State._buildFavoriteActionCard = function(parent, order, title, toggleKey, feature, setterName)
         local _, actionCard = card(parent, order, title)
-        if State._autoFavoriteFeature then
-            local feature = State._autoFavoriteFeature
-
+        -- IMPORTANT: use the feature instance passed into this shared builder.
+        -- Do not overwrite it with State._autoFavoriteFeature, otherwise the
+        -- Auto Unfavorite card would call setAutoUnfavorite on Auto Favorite.
+        if feature then
             settingRow(actionCard, 1, title, nil, toggleKey, function(v)
                 local setter = feature and feature[setterName]
                 if type(setter) ~= "function" then return false end

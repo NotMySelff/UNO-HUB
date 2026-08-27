@@ -159,10 +159,11 @@ local State = {
         maxUpgradeGeneratorLevel = 50,
     },
     autoFavorite = { status = "DISABLED" },
+    autoUnfavorite = { status = "DISABLED" },
     movementOwner = "NONE",
     toggles = {
         autoFarmRebirth = false, autoTower = false, useFrontierSkip = true, autoKoDismiss = true, autoHatch = false, autoCollectEgg = false,
-        autoIncubatorClaim = false, autoSell = false, autoFavorite = false, autoFuse = false, autoTargetFuse = false,
+        autoIncubatorClaim = false, autoSell = false, autoFavorite = false, autoUnfavorite = false, autoFuse = false, autoTargetFuse = false,
         autoBuyGenerator = false, autoUpgradeGenerator = false, autoExpandCoop = false, autoUpgradeRecycler = false, autoUpgradeIncubator = false,
         antiAfk = true, autoRebirth = false, autoHotEgg = false, autoArena = false, autoEventCapsule = false, autoKraken = false, autoUfoAscension = false, showFloatingButton = true, reducedMotion = false,
     },
@@ -2808,12 +2809,11 @@ do
 end
 
 --------------------------------------------------------------------
--- AUTO FAVORITE CHICKENS
--- V2 shared-engine preparation WITHOUT adding a new outer local to __unoStage01.
--- This is important because the stage is already very large and may be near
--- the Luau local/register limit.
+-- FAVORITE / UNFAVORITE SHARED ACTION ENGINE
+-- V3: shared factory is stored on State, NOT as a new outer local.
+-- This avoids the local/register issue that broke V1.
 --------------------------------------------------------------------
-State._autoFavoriteFeature = (function(desiredState, toggleKey, stateKey, setterName, activeStatus)
+State._createFavoriteActionFeature = function(desiredState, toggleKey, stateKey, setterName, activeStatus)
     local Remotes = Integration.modules.Remotes
     local DataController = Integration.modules.DataController
     local Catalog = Integration.modules.Catalog
@@ -3162,9 +3162,27 @@ State._autoFavoriteFeature = (function(desiredState, toggleKey, stateKey, setter
     end
 
     return api
-end)(true, "autoFavorite", "autoFavorite", "setAutoFavorite", "FAVORITING")
+end
 
-State.diagnostics["AutoFavorite.Engine"] = State._autoFavoriteFeature and "PARAMETERIZED_IIFE_V2_NO_OUTER_LOCAL" or "UNAVAILABLE"
+State._autoFavoriteFeature = State._createFavoriteActionFeature(
+    true,
+    "autoFavorite",
+    "autoFavorite",
+    "setAutoFavorite",
+    "FAVORITING"
+)
+
+State._autoUnfavoriteFeature = State._createFavoriteActionFeature(
+    false,
+    "autoUnfavorite",
+    "autoUnfavorite",
+    "setAutoUnfavorite",
+    "UNFAVORITING"
+)
+
+State.diagnostics["AutoFavorite.Engine"] = State._autoFavoriteFeature and "SHARED_STATE_FACTORY_V3" or "UNAVAILABLE"
+State.diagnostics["AutoUnfavorite.Engine"] = State._autoUnfavoriteFeature and "SHARED_STATE_FACTORY_V3" or "UNAVAILABLE"
+State.diagnostics["AutoUnfavorite.Feature"] = State._autoUnfavoriteFeature and "READY_BACKEND_ONLY" or "MISSING DEPENDENCY"
 State.diagnostics["AutoFavorite.MutationFilter"] = State._autoFavoriteFeature and "DYNAMIC_ROSTER_DISCOVERY" or "UNAVAILABLE"
 State.diagnostics["AutoFavorite.ToggleSafety"] = State._autoFavoriteFeature and "HARD_ARMING_GATE_V1" or "UNAVAILABLE"
 State.diagnostics["AutoFavorite.Feature"] = State._autoFavoriteFeature and "READY" or "MISSING DEPENDENCY"
@@ -6838,6 +6856,7 @@ local function shutdown()
     if AutoCollectEggFeature then pcall(function() AutoCollectEggFeature.setAutoCollectEggs(false); AutoCollectEggFeature.destroy() end) end
     if AutoSellFeature then pcall(function() AutoSellFeature.setAutoSell(false); AutoSellFeature.destroy() end) end
     if State._autoFavoriteFeature then pcall(function() State._autoFavoriteFeature.setAutoFavorite(false); State._autoFavoriteFeature.destroy() end) end
+    if State._autoUnfavoriteFeature then pcall(function() State._autoUnfavoriteFeature.setAutoUnfavorite(false); State._autoUnfavoriteFeature.destroy() end) end
     if AutoFuseFeature then pcall(function() AutoFuseFeature.setAutoFuse(false); AutoFuseFeature.destroy() end) end
     HatchFeature.setAutoHatch(false)
     IncubatorClaimFeature.setAutoIncubatorClaim(false)

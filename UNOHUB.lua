@@ -16582,11 +16582,14 @@ local function createTweenMovement(root)
         local hrp = getRootPart()
         if not hrp then return false end
         local distance = (hrp.Position - position).Magnitude
-        local speed = tonumber(options.speed) or 45
-        local duration = math.max(0.05, distance / math.max(1, speed))
+        -- Match Auto Hot Egg tween profile:
+        -- ~48 studs/s, Quad Out, clamped to 0.12s..1.8s.
+        -- Keep Event Capsule's own cancellation / dynamic-retarget logic intact.
+        local speed = tonumber(options.speed) or 48
+        local duration = math.clamp(distance / math.max(1, speed), 0.12, 1.8)
         local tween = root.TweenService:Create(
             hrp,
-            TweenInfo.new(duration, Enum.EasingStyle.Linear, Enum.EasingDirection.Out),
+            TweenInfo.new(duration, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
             { CFrame = CFrame.new(position + Vector3.new(0, 3, 0)) }
         )
         local handle = {

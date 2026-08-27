@@ -1,5 +1,5 @@
 --[[
-    UNO HUB1
+    UNO HUB
 ]]
 
 
@@ -5681,39 +5681,6 @@ end
 
 
 local autoRebirthGeneration = 0
-
--- Standalone Auto Rebirth must never interfere with any Tower session.
--- In particular, Auto Tower owns its Tower lifecycle and must not be cut short
--- just because Rebirth becomes READY.
-local function standaloneAutoTowerBlocksRebirth()
-    -- Fast path: UI/requested state or an authoritative active Tower run.
-    if State.toggles.autoTower == true or isTowerActive() then
-        return true
-    end
-
-    -- Also consult the standalone backend in case UI/runtime state is between sync ticks.
-    local envNow = (getgenv and getgenv()) or _G
-    local towerApi = envNow.UNO_AUTO_TOWER_STANDALONE
-    if type(towerApi) == "table" and type(towerApi.getStatus) == "function" then
-        local ok, towerStatus = pcall(towerApi.getStatus)
-        if ok and type(towerStatus) == "table" then
-            if towerStatus.enabled == true then
-                return true
-            end
-            local phase = tostring(towerStatus.phase or "")
-            if phase == "START_DELAY"
-                or phase == "STARTING_TOWER"
-                or phase == "TOWER_RUNNING"
-                or phase == "RUNNING"
-                or phase == "RETRY_WAIT" then
-                return true
-            end
-        end
-    end
-
-    return false
-end
-
 local function setAutoRebirth(on)
     State.toggles.autoRebirth = on == true
     autoRebirthGeneration += 1
@@ -5731,24 +5698,13 @@ local function setAutoRebirth(on)
             -- It NEVER starts Tower, NEVER surrenders Tower,
             -- and NEVER touches the Continue prompt.
             --
-            -- Auto Farm Rebirth owns the complete Tower/Rebirth lifecycle.
-            -- Auto Tower (and any currently-active Tower run) blocks this
-            -- standalone Rebirth worker completely.
-            if not AFR.enabled
-                and next(AFR.coordinatorPauseReasons) == nil
-                and not standaloneAutoTowerBlocksRebirth() then
-
+            -- If Auto Farm Rebirth is enabled, that feature owns
+            -- the complete Tower/Rebirth lifecycle instead.
+            if not AFR.enabled and next(AFR.coordinatorPauseReasons) == nil then
                 refreshData()
 
                 local before, _, ready = getRebirthInfo()
                 if ready then
-                    -- Re-check immediately before invoking the gameplay request.
-                    -- This closes the race where Auto Tower starts between poll ticks.
-                    if standaloneAutoTowerBlocksRebirth() then
-                        task.wait(0.35)
-                        continue
-                    end
-
                     if isLocalPlayerInsidePit() then
                         task.wait(0.35)
                         continue

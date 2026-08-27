@@ -1,5 +1,5 @@
 --[[
-    UNO HUB1
+    UNO HUB
 ]]
 
 
@@ -3931,25 +3931,41 @@ State._targetFuseFeature = (function()
         return n
     end
 
+    -- Fusion Lock availability is SLOT/CAPABILITY based, not current-value based.
+    --
+    -- Runtime/UI research confirmed the Fusion UI exposes these lock categories:
+    --   Level, Ability, Eggs/Lays, Color, Hat, Mask, Feet.
+    --
+    -- A target is not required to currently have a cosmetic/value for its lock
+    -- slot to be valid. Example: target.look.hat == nil must NOT make Hat
+    -- "Unavailable"; the Fusion UI can still expose that slot.
+    --
+    -- FusionRules.LOOK_SLOTS also contains "aura", but Aura is resolver-only in
+    -- the currently observed Fusion UI and is intentionally not exposed here.
+    local SUPPORTED_TARGET_LOCKS = {
+        { field = "level",     label = "Level" },
+        { field = "ability",   label = "Ability" },
+        { field = "eggs",      label = "Eggs / Lays" },
+        { field = "cos:color", label = "Color" },
+        { field = "cos:hat",   label = "Hat" },
+        { field = "cos:mask",  label = "Mask" },
+        { field = "cos:feet",  label = "Feet" },
+    }
+
+    local SUPPORTED_TARGET_LOCK_FIELDS = {}
+    for _, item in ipairs(SUPPORTED_TARGET_LOCKS) do
+        SUPPORTED_TARGET_LOCK_FIELDS[item.field] = true
+    end
+
     local function availableLocks(target)
-        local list = {
-            { field = "level", label = "Level", available = target ~= nil and target.level ~= nil },
-            { field = "ability", label = "Ability", available = target ~= nil and target.ability ~= nil and target.ability ~= "" },
-            { field = "eggs", label = "Eggs / Lays", available = target ~= nil and type(target.eggs) == "table" },
-        }
-        local slots = FusionRules.LOOK_SLOTS or { "color", "hat", "mask", "feet", "aura" }
-        local labels = { color = "Color", hat = "Hat", mask = "Mask", feet = "Feet", aura = "Aura" }
-        local seen = {}
-        for _, slot in ipairs(slots) do
-            slot = tostring(slot)
-            if slot ~= "rig" and not seen[slot] then
-                seen[slot] = true
-                table.insert(list, {
-                    field = "cos:" .. slot,
-                    label = labels[slot] or titleCaseId(slot),
-                    available = target ~= nil and type(target.look) == "table" and target.look[slot] ~= nil,
-                })
-            end
+        local targetPresent = target ~= nil
+        local list = {}
+        for _, item in ipairs(SUPPORTED_TARGET_LOCKS) do
+            table.insert(list, {
+                field = item.field,
+                label = item.label,
+                available = targetPresent,
+            })
         end
         return list
     end
@@ -4024,8 +4040,15 @@ State._targetFuseFeature = (function()
         local result = {}
         for field, enabled in pairs(config.selectedLocks) do
             if enabled == true then
-                if available[field] ~= true then return nil, "LOCK UNAVAILABLE: " .. tostring(field) end
-                table.insert(result, { field = field, from = target.id })
+                if SUPPORTED_TARGET_LOCK_FIELDS[field] ~= true then
+                    -- Ignore stale/obsolete selections (for example cos:aura)
+                    -- instead of blocking the whole Auto Target Fuse cycle.
+                    config.selectedLocks[field] = nil
+                elseif available[field] ~= true then
+                    return nil, "LOCK UNAVAILABLE: " .. tostring(field)
+                else
+                    table.insert(result, { field = field, from = target.id })
+                end
             end
         end
         table.sort(result, function(a,b) return tostring(a.field) < tostring(b.field) end)
@@ -4233,6 +4256,9 @@ State._targetFuseFeature = (function()
     function api.setLockSelected(field, enabled)
         field = tostring(field or "")
         if field == "" then return false, "INVALID LOCK" end
+        if SUPPORTED_TARGET_LOCK_FIELDS[field] ~= true then
+            return false, "LOCK UNSUPPORTED"
+        end
         if enabled == true and not config.selectedLocks[field] then
             local allowed = lockCapacity()
             if selectedLockCount() >= allowed then return false, "LOCK CAPACITY REACHED" end
@@ -4262,6 +4288,7 @@ State._targetFuseFeature = (function()
         life.destroyed = true
         setStatus("DISABLED")
     end
+    State.diagnostics["TargetFuse.LockDetector"] = "SLOT_CAPABILITY_V1"
     State.diagnostics["TargetFuse.Feature"] = "READY"
     return api
 end)()

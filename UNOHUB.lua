@@ -1690,6 +1690,9 @@ local function createAutoSellChickens(deps)
     local Remotes, DataController, Catalog = deps.Remotes, deps.DataController, deps.Catalog
     local logSink = deps.log
     local enabled, destroyed, generation, sellInProgress = false, false, 0, false
+    -- Explicit arming flag prevents stale roster callbacks/workers from ever
+    -- performing a destructive sell after the UI toggle has been turned OFF.
+    local userArmed = false
     local rosterUnsubscribe, wakeEvaluation, lastRosterFingerprint, lastLogKey = nil, false, nil, nil
     local configRevision = 0
     local selectedRarities, abilityWhitelist = {}, { voodoo = true, cycleofash = true }
@@ -2031,6 +2034,21 @@ local function createAutoSellChickens(deps)
             end
             if #finalIds == 0 then continue end
             stats.lastBatchSize = #finalIds
+
+            -- FINAL DESTRUCTIVE GATE.
+            -- Roster changes (including hatching) may wake old callbacks, but
+            -- no sell remote is allowed unless Auto Sell is explicitly armed
+            -- *right now* and this worker still belongs to the current generation.
+            if not enabled
+                or not userArmed
+                or State.toggles.autoSell ~= true
+                or workerGeneration ~= generation
+                or destroyed then
+                sellInProgress = false
+                setStatus("DISABLED")
+                return
+            end
+
             sellInProgress = true
             setStatus("SELLING", tostring(#finalIds))
             local requestGeneration = generation
@@ -2059,7 +2077,12 @@ local function createAutoSellChickens(deps)
             else setStatus("WAITING CONFIRMATION", "partial"); sleep(retryDelay) end
         end
     end
-    local function scheduleEvaluation() wakeEvaluation = true end
+    local function scheduleEvaluation()
+        if destroyed or not enabled or not userArmed or State.toggles.autoSell ~= true then
+            return
+        end
+        wakeEvaluation = true
+    end
     local function worker(workerGeneration)
         while not destroyed and enabled and workerGeneration == generation do
             if wakeEvaluation or rosterUnsubscribe == nil then
@@ -2074,19 +2097,45 @@ local function createAutoSellChickens(deps)
     function api.setAutoSell(value)
         if destroyed then return false end
         local nextValue = value == true
-        if enabled == nextValue then return true end
+
+        -- Always synchronize backend, UI intent, and destructive arming.
+        State.toggles.autoSell = nextValue
+        userArmed = nextValue
+
+        if enabled == nextValue then
+            if not nextValue and type(rosterUnsubscribe) == "function" then
+                pcall(rosterUnsubscribe)
+                rosterUnsubscribe = nil
+            end
+            return true
+        end
+
         generation = generation + 1
         enabled = nextValue
         sellInProgress = false
         lastRosterFingerprint = nil
         configRevision = configRevision + 1
-        wakeEvaluation = true
-        if not enabled then setStatus("DISABLED") return true end
+        wakeEvaluation = nextValue
+
+        if not enabled then
+            -- Important: detach roster subscription immediately. A hatch causes
+            -- a roster update, so leaving this callback connected can wake stale
+            -- Auto Sell work even though the toggle is visually OFF.
+            if type(rosterUnsubscribe) == "function" then pcall(rosterUnsubscribe) end
+            rosterUnsubscribe = nil
+            setStatus("DISABLED")
+            return true
+        end
+
         setStatus("IDLE")
         emit("Auto Sell enabled — fresh evaluation", true)
         if type(deps.subscribeRoster) == "function" then
             local ok, unsubscribe = pcall(deps.subscribeRoster, scheduleEvaluation)
-            if ok and type(unsubscribe) == "function" then rosterUnsubscribe = unsubscribe else rosterUnsubscribe = nil end
+            if ok and type(unsubscribe) == "function" then
+                rosterUnsubscribe = unsubscribe
+            else
+                rosterUnsubscribe = nil
+            end
         end
         local workerGeneration = generation
         spawn(function() worker(workerGeneration) end)
@@ -2202,6 +2251,8 @@ local function createAutoSellChickens(deps)
         if destroyed then return end
         destroyed = true
         enabled = false
+        userArmed = false
+        State.toggles.autoSell = false
         generation = generation + 1
         sellInProgress = false
         if type(rosterUnsubscribe) == "function" then pcall(rosterUnsubscribe) end
@@ -2746,6 +2797,7 @@ do
             AutoSellFeature = featOrErr
             State.diagnostics["AutoSell.Mode"] = "LIVE_ONLY_NO_DRY_RUN"
             State.diagnostics["AutoSell.MutationProtection"] = "DYNAMIC_SELECTIVE_DEFAULT_PROTECTED"
+            State.diagnostics["AutoSell.ToggleSafety"] = "HARD_ARMING_GATE_V1"
             State.diagnostics["AutoSell.Feature"] = "READY"
             log("INFO", "AutoSellFeature READY")
         else
@@ -2773,6 +2825,9 @@ State._autoFavoriteFeature = (function()
 
     local enabled = false
     local destroyed = false
+    -- Explicit arming gate mirrors Auto Sell. Roster changes from hatching must
+    -- never favorite anything while the toggle is OFF.
+    local userArmed = false
     local generation = 0
     local requestInFlight = nil
     local selectedTypeIds = {}
@@ -2894,6 +2949,18 @@ State._autoFavoriteFeature = (function()
         end
 
         local id = candidate.id
+
+        -- FINAL FAVORITE GATE.
+        if not enabled
+            or not userArmed
+            or State.toggles.autoFavorite ~= true
+            or workerGeneration ~= generation
+            or destroyed then
+            requestInFlight = nil
+            setStatus("DISABLED")
+            return
+        end
+
         requestInFlight = id
         setStatus("FAVORITING")
 
@@ -2946,12 +3013,16 @@ State._autoFavoriteFeature = (function()
     function api.setAutoFavorite(value)
         value = value == true
         if destroyed then return false end
+
+        State.toggles.autoFavorite = value
+        userArmed = value
+
         if value == enabled then
-            State.toggles.autoFavorite = enabled
+            if not value then requestInFlight = nil end
             return true
         end
+
         enabled = value
-        State.toggles.autoFavorite = value
         generation = generation + 1
         requestInFlight = nil
         if value then
@@ -3098,6 +3169,7 @@ State._autoFavoriteFeature = (function()
     function api.destroy()
         if destroyed then return end
         enabled = false
+        userArmed = false
         State.toggles.autoFavorite = false
         generation = generation + 1
         requestInFlight = nil
@@ -3109,6 +3181,7 @@ State._autoFavoriteFeature = (function()
 end)()
 
 State.diagnostics["AutoFavorite.MutationFilter"] = State._autoFavoriteFeature and "DYNAMIC_ROSTER_DISCOVERY" or "UNAVAILABLE"
+State.diagnostics["AutoFavorite.ToggleSafety"] = State._autoFavoriteFeature and "HARD_ARMING_GATE_V1" or "UNAVAILABLE"
 State.diagnostics["AutoFavorite.Feature"] = State._autoFavoriteFeature and "READY" or "MISSING DEPENDENCY"
 
 

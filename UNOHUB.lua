@@ -1,5 +1,5 @@
 --[[
-    UNO HUB1
+    UNO HUB
 ]]
 
 
@@ -3015,10 +3015,11 @@ State._autoFavoriteFeature = (function()
         value = value == true
         if destroyed then return false end
 
-        if value and State._autoUnfavoriteFeature
-            and State._autoUnfavoriteFeature.isEnabled
-            and State._autoUnfavoriteFeature.isEnabled() then
-            pcall(State._autoUnfavoriteFeature.setAutoUnfavorite, false)
+        local peerUnfavorite = State._autoUnfavoriteFeature
+        if value and type(peerUnfavorite) == "table"
+            and type(peerUnfavorite.isEnabled) == "function"
+            and peerUnfavorite.isEnabled() then
+            pcall(peerUnfavorite.setAutoUnfavorite, false)
         end
 
         State.toggles.autoFavorite = value
@@ -3353,10 +3354,11 @@ State._autoUnfavoriteFeature = (function()
         if destroyed then return false end
 
         -- Mutually exclusive with Auto Favorite at backend level.
-        if value and State._autoFavoriteFeature
-            and State._autoFavoriteFeature.isEnabled
-            and State._autoFavoriteFeature.isEnabled() then
-            pcall(State._autoFavoriteFeature.setAutoFavorite, false)
+        local peerFavorite = State._autoFavoriteFeature
+        if value and type(peerFavorite) == "table"
+            and type(peerFavorite.isEnabled) == "function"
+            and peerFavorite.isEnabled() then
+            pcall(peerFavorite.setAutoFavorite, false)
         end
 
         State.toggles.autoUnfavorite = value

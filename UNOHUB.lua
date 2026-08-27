@@ -1,5 +1,5 @@
 --[[
-    UNO HUB1
+    UNO HUB
 ]]
 
 
@@ -8273,16 +8273,40 @@ safeBuild("Auto Farm", function()
                     if ufoGoalRefresh then ufoGoalRefresh() end
                     if ufoTargetRarityRefresh then ufoTargetRarityRefresh() end
 
-                    setText(ufoChickenLabel, us.equippedName or us.equippedId or "Equipped Chicken")
+                    -- The backend's cycle state intentionally stays mostly empty while
+                    -- WAITING_FOR_UFO. Read the equipped chicken directly for the UI so
+                    -- Current Rarity and Genes are visible even before an event starts.
+                    local liveEquipped = nil
+                    if type(ufo.getEquippedSnapshot) == "function" then
+                        local okLive, snapshot = pcall(ufo.getEquippedSnapshot)
+                        if okLive and type(snapshot) == "table" then
+                            liveEquipped = snapshot
+                        end
+                    end
+
+                    local shownName = (liveEquipped and (liveEquipped.equippedName or liveEquipped.equippedId))
+                        or us.equippedName or us.equippedId or "Equipped Chicken"
+                    local shownRarity = (liveEquipped and liveEquipped.rarity) or us.rarity
+                    local shownGenome = (liveEquipped and liveEquipped.genome) or us.genome
+                    local shownCap = (liveEquipped and liveEquipped.geneCap) or us.geneCap
+                    local shownGenesMax = liveEquipped and liveEquipped.genesMax
+                    if shownGenesMax == nil then shownGenesMax = us.genesMax == true end
+
+                    State.ufoAscension.rarity = shownRarity
+                    State.ufoAscension.genome = shownGenome
+                    State.ufoAscension.geneCap = shownCap
+                    State.ufoAscension.genesMax = shownGenesMax == true
+
+                    setText(ufoChickenLabel, shownName)
                     if State.ufoAscension.goal == "rarity" then
                         setText(ufoTargetLabel, "Until " .. resolveRarityDisplayName(State.ufoAscension.targetRarity))
                     else
-                        setText(ufoTargetLabel, us.genesMax and "Max Genes" or "Until Max Genes")
+                        setText(ufoTargetLabel, shownGenesMax and "Max Genes" or "Until Max Genes")
                     end
-                    setText(ufoCurrentRarityLabel, resolveRarityDisplayName(us.rarity or "unknown"))
+                    setText(ufoCurrentRarityLabel, resolveRarityDisplayName(shownRarity or "unknown"))
                     setText(ufoStatusLabel, us.state or "IDLE")
-                    local g = us.genome
-                    local cap = us.geneCap
+                    local g = shownGenome
+                    local cap = shownCap
                     if type(g) == "table" and cap then
                         setText(ufoGenesLabel, string.format(
                             "HP %s/%s · ATK %s/%s · SPD %s/%s · PWR %s/%s · EGG %s/%s",
@@ -18076,6 +18100,29 @@ end
 function api.getGenome()
     local chicken = getEquippedChicken()
     return cloneTable(getGenome(chicken))
+end
+
+-- Read-only live snapshot for UI.
+-- Unlike state.rarity/state.genome, this does not wait for a UFO cycle/captureTarget().
+-- It lets the Events UI show the currently equipped chicken while WAITING_FOR_UFO.
+function api.getEquippedSnapshot()
+    local chicken, roster = getEquippedChicken()
+    if type(chicken) ~= "table" then
+        return nil
+    end
+
+    local genome = getGenome(chicken)
+    local rarity = getRarity(chicken)
+    local cap = getGeneCap(chicken)
+
+    return {
+        equippedId = normalizeId(chicken.id or (roster and roster.activeId)),
+        equippedName = chicken.nickname or chicken.name or chicken.displayName or chicken.type,
+        rarity = rarity,
+        genome = cloneTable(genome),
+        geneCap = cap,
+        genesMax = areGenesMaxFor(chicken, genome),
+    }
 end
 
 function api.getGeneCap()

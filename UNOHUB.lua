@@ -1,0 +1,18910 @@
+--[[
+    UNO HUB
+    UI Upgrade V1 FIX
+]]
+
+
+local function __unoRunStage(name, fn)
+    print("[UNO FINAL] START " .. name)
+    local ok, result = pcall(fn)
+    if not ok then
+        warn("[UNO FINAL] FAILED " .. name .. ": " .. tostring(result))
+        error("[UNO FINAL] " .. name .. " failed: " .. tostring(result), 0)
+    end
+    print("[UNO FINAL] OK " .. name)
+    return result
+end
+
+
+
+local function __unoStage01()
+--[[
+    UNO HUB · Responsive UIScale
+    Grow a Chicken Fighter
+    SOURCE A: createAutoSellChickens + AutoSellFeature + Chickens UI
+    SOURCE B: resolveEggDisplayName / rarity / ability + TextLabel Size
+]]
+
+local Players           = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService  = game:GetService("UserInputService")
+local TweenService      = game:GetService("TweenService")
+local Workspace         = game:GetService("Workspace")
+local CollectionService = game:GetService("CollectionService")
+local Lighting          = game:GetService("Lighting")
+local HttpService       = game:GetService("HttpService")
+
+local LocalPlayer = Players.LocalPlayer
+if not LocalPlayer then return end
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui", 8)
+if not PlayerGui then return end
+
+--------------------------------------------------------------------
+-- EXTERNAL ANTI-AFK
+-- Loaded independently from GitHub so a failure here cannot stop UNO HUB.
+--------------------------------------------------------------------
+task.spawn(function()
+    local ok, err = pcall(function()
+        local source = game:HttpGet("https://raw.githubusercontent.com/NotMySelff/UNO-HUB/refs/heads/main/uno-anti-afik.lua")
+        local chunk, compileErr = loadstring(source)
+
+        if type(chunk) ~= "function" then
+            error("Anti-AFK compile failed: " .. tostring(compileErr))
+        end
+
+        local result = chunk()
+
+        local env = (getgenv and getgenv()) or _G
+        if type(result) == "table" then
+            env.UNO_ANTI_AFK = result
+        end
+    end)
+
+    if ok then
+        print("[UNO HUB] External Anti-AFK loaded")
+    else
+        warn("[UNO HUB] External Anti-AFK failed: " .. tostring(err))
+    end
+end)
+
+do
+    local env = (getgenv and getgenv()) or _G
+    local oldIntegration = env.UNO_HUB_PRIORITY_INTEGRATION
+    if oldIntegration and type(oldIntegration.destroy) == "function" then
+        pcall(oldIntegration.destroy)
+    end
+    local old = PlayerGui:FindFirstChild("UNO_HUB")
+
+    if old then
+        old:SetAttribute("UNO_HUB_Shutdown", true)
+        old:Destroy()
+        task.wait(0.05)
+    end
+    local cover = PlayerGui:FindFirstChild("UNO_HUB_VisualCover")
+    if cover then pcall(function() cover:Destroy() end) end
+end
+
+local Theme = {
+    Background = Color3.fromRGB(18, 18, 18),
+    Surface = Color3.fromRGB(22, 22, 22),
+    SurfaceElevated = Color3.fromRGB(30, 30, 30),
+    Sidebar = Color3.fromRGB(23, 23, 23),
+    Border = Color3.fromRGB(53, 53, 53),
+    TextPrimary = Color3.fromRGB(242, 242, 242),
+    TextSecondary = Color3.fromRGB(200, 200, 205),
+    TextMuted = Color3.fromRGB(130, 130, 140),
+    Primary = Color3.fromRGB(238, 238, 238),
+    Success = Color3.fromRGB(93, 205, 135),
+    Warning = Color3.fromRGB(230, 185, 70),
+    Danger = Color3.fromRGB(225, 80, 80),
+}
+
+local Maid = {}
+Maid.__index = Maid
+function Maid.new() return setmetatable({ items = {} }, Maid) end
+function Maid:Give(item) table.insert(self.items, item) return item end
+function Maid:Connect(signal, fn) local c = signal:Connect(fn) return self:Give(c) end
+function Maid:Task(fn)
+    local token = { cancelled = false }
+    self:Give(function() token.cancelled = true end)
+    task.spawn(function() fn(token) end)
+    return token
+end
+function Maid:Cleanup()
+    for _, item in ipairs(self.items) do
+        if typeof(item) == "RBXScriptConnection" then pcall(function() item:Disconnect() end)
+        elseif type(item) == "function" then pcall(item)
+        elseif type(item) == "table" and item.cancelled ~= nil then item.cancelled = true end
+    end
+    self.items = {}
+end
+local maid = Maid.new()
+
+local State = {
+    closed = false, visible = true, page = "Home", generation = 0, windowExpanded = false,
+    sessionStart = os.clock(), towerRuns = 0, floorsCleared = 0, koCount = 0, successfulRebirths = 0,
+    log = {}, diagnostics = {}, liveEvents = {}, nameDiagSeen = {},
+    tower = { status = "IDLE", floor = nil, best = nil, streak = nil, rival = nil, lastResult = nil, continue = nil, runActive = false },
+    data = { roster = nil, rebirth = nil, towerBest = nil, chicken = nil, recyclerLevel = nil, money = nil, coop = nil, incubator = nil },
+    autoFarmRebirth = {
+        enabled = false, phase = "DISABLED", generation = 0,
+        retryDelay = 30, postRebirthDelay = 30, countdown = 0, countdownLabel = "",
+        surrenderInFlight = false, declineInFlight = false,
+        coordinatorPauseReasons = {},
+    },
+    autoTower = {
+        enabled = false, phase = "DISABLED", startDelay = 30,
+        countdown = 0, runCount = 0, lastError = nil,
+    },
+    ufoAscension = {
+        enabled = false, phase = "DISABLED", status = "Disabled",
+        targetId = nil, targetName = "Equipped Chicken", rarity = nil,
+        geneCap = nil, genome = nil, genesMax = false, ufoActive = false,
+        cycleCount = 0, recoveryInProgress = false, lastError = nil,
+        goal = "max_genes", targetRarity = "secret", goalReached = false,
+    },
+    hotEgg = {
+        enabled = false, phase = "DISABLED", generation = 0, movementMode = "Tween",
+        meteorAvoidance = true, safetyMargin = 6, exitPitAfter = true,
+        eventActive = false, holding = false, timeRemaining = nil, action = "—",
+        meteorCount = 0, nearestImpact = nil, rewardConfirmed = false, hazards = {},
+        endConfirmed = false, exitAttempts = 0,
+        coordinatorPauseReasons = {},
+        -- meteor avoidance stability (movement layer only)
+        evadeTarget = nil, evadeTargetTime = 0, lastEvadeDecision = 0,
+        lastEvadeReason = "—", threateningCount = 0, distToEgg = nil,
+    },
+    economy = {
+        buyStatus = "IDLE", upgradeStatus = "IDLE", expandStatus = "IDLE", recyclerStatus = "IDLE",
+        generatorsOwned = 0, generatorsSlots = 0, nextBuySlot = nil, nextBuyCost = nil, recyclerLevel = 0,
+        maxUpgradeGeneratorLevel = 50,
+    },
+    autoFavorite = { status = "DISABLED" },
+    autoUnfavorite = { status = "DISABLED" },
+    movementOwner = "NONE",
+    toggles = {
+        autoFarmRebirth = false, autoTower = false, useFrontierSkip = true, autoKoDismiss = true, autoHatch = false, autoCollectEgg = false,
+        autoIncubatorClaim = false, autoSell = false, autoFavorite = false, autoUnfavorite = false, autoFuse = false, autoTargetFuse = false,
+        autoBuyGenerator = false, autoUpgradeGenerator = false, autoExpandCoop = false, autoUpgradeRecycler = false, autoUpgradeIncubator = false,
+        antiAfk = true, autoRebirth = false, autoHotEgg = false, autoArena = false, autoEventCapsule = false, autoKraken = false, autoUfoAscension = false, showFloatingButton = true, reducedMotion = false,
+    },
+}
+
+local function log(level, text)
+    table.insert(State.log, 1, { t = os.clock(), level = level, text = tostring(text) })
+    while #State.log > 120 do table.remove(State.log) end
+end
+local function display(v)
+    if v == nil then return "—" end
+    if type(v) == "boolean" then return v and "Yes" or "No" end
+    return tostring(v)
+end
+local function setText(label, value)
+    if label and typeof(label) == "Instance" and label:IsA("TextLabel") then
+        label.Text = display(value)
+    end
+end
+
+local ConfigManager = nil
+local PerformanceManager = nil
+local visualCoverGui = nil
+local isApplyingConfig = false
+local function markConfigDirty()
+    if isApplyingConfig then return end
+    if ConfigManager and type(ConfigManager.markDirty) == "function" then
+        pcall(function() ConfigManager.markDirty() end)
+    end
+end
+
+-- PERFORMANCE MANAGER
+-- standalone integration-ready code
+--
+-- Conservative client-side performance controls. This module never destroys,
+-- renames, reparents, or clears Workspace objects.
+
+local VISUAL_ENABLED_CLASSES = {
+    ParticleEmitter = true,
+    Trail = true,
+    Beam = true,
+    Smoke = true,
+    Fire = true,
+    Sparkles = true,
+    Highlight = true,
+    PointLight = true,
+    SpotLight = true,
+    SurfaceLight = true,
+    BloomEffect = true,
+    BlurEffect = true,
+    ColorCorrectionEffect = true,
+    DepthOfFieldEffect = true,
+    SunRaysEffect = true,
+    Atmosphere = true,
+    Clouds = true,
+}
+
+local DEFAULT_PROTECTED_NAME = {
+    HotEgg = true,
+    NestEgg = true,
+    PitZone = true,
+    Meteor = true,
+    Hazard = true,
+    Carrier = true,
+}
+
+local function spawnThread(fn)
+    if task and type(task.spawn) == "function" then
+        return task.spawn(fn)
+    end
+    local co = coroutine.create(fn)
+    coroutine.resume(co)
+    return co
+end
+
+local function safeConnect(signal, callback)
+    if signal and type(signal.Connect) == "function" then
+        local ok, connection = pcall(function()
+            return signal:Connect(callback)
+        end)
+        if ok then
+            return connection
+        end
+    end
+    return nil
+end
+
+local function safeGetDescendants(instance)
+    if not instance or type(instance.GetDescendants) ~= "function" then
+        return {}
+    end
+    local ok, descendants = pcall(function()
+        return instance:GetDescendants()
+    end)
+    return ok and descendants or {}
+end
+
+local function safeClass(instance)
+    local ok, className = pcall(function()
+        return instance.ClassName
+    end)
+    return ok and className or nil
+end
+
+local function safeName(instance)
+    local ok, name = pcall(function()
+        return instance.Name
+    end)
+    return ok and name or ""
+end
+
+local function createPerformanceManager(deps)
+    deps = deps or {}
+    local services = deps.services or deps
+    local Players = services.Players
+    local Lighting = services.Lighting
+    local localPlayer = deps.localPlayer
+    if not localPlayer and Players then
+        local ok, value = pcall(function()
+            return Players.LocalPlayer
+        end)
+        if ok then localPlayer = value end
+    end
+
+    local config = {
+        boostFPS = false,
+        disableVFX = false,
+        disableShadows = false,
+        hideOtherPlayers = false,
+        hideOtherChickens = false,
+        whiteScreen = false,
+        ultraPerformance = false,
+        potatoMode = false,
+    }
+
+    local state = {
+        destroyed = false,
+        status = "DISABLED",
+        whiteScreenIsCover = false,
+        boostSnapshot = nil,
+        ultraSnapshot = nil,
+        potatoSnapshot = nil,
+    }
+
+    local stats = {
+        visualObjectsDisabled = 0,
+        visualObjectsRestored = 0,
+        playerPartsHidden = 0,
+        chickenPartsHidden = 0,
+        protectedObjectsSkipped = 0,
+        dynamicObjectsHandled = 0,
+        geometryObjectsOptimized = 0,
+        textureObjectsHidden = 0,
+        meshFidelityReduced = 0,
+        potatoMaterialsApplied = 0,
+        currentMode = "DISABLED",
+    }
+
+    local originals = setmetatable({}, { __mode = "k" })
+    local hiddenParts = setmetatable({}, { __mode = "k" })
+    local connections = {}
+    local rootConnections = setmetatable({}, { __mode = "k" })
+
+    local function log(message, payload)
+        if type(deps.log) == "function" then
+            pcall(deps.log, message, payload)
+        end
+    end
+
+    local function setStatus(status, payload)
+        state.status = status
+        stats.currentMode = status
+        log(status, payload)
+    end
+
+    local function isProtected(instance)
+        if type(deps.isProtectedInstance) == "function" then
+            local ok, result = pcall(deps.isProtectedInstance, instance)
+            if ok and result == true then
+                return true
+            end
+        end
+        local name = safeName(instance)
+        if DEFAULT_PROTECTED_NAME[name] then
+            return true
+        end
+        local lowered = string.lower(name)
+        for token in pairs(DEFAULT_PROTECTED_NAME) do
+            if string.find(lowered, string.lower(token), 1, true) then
+                return true
+            end
+        end
+        return false
+    end
+
+    local function remember(instance, property, value)
+        originals[instance] = originals[instance] or {}
+        if originals[instance][property] == nil then
+            originals[instance][property] = value
+        end
+    end
+
+    local function readProperty(instance, property)
+        local ok, value = pcall(function()
+            return instance[property]
+        end)
+        if ok then return true, value end
+        return false, nil
+    end
+
+    local function writeProperty(instance, property, value)
+        return pcall(function()
+            instance[property] = value
+        end)
+    end
+
+    local function disableVisual(instance)
+        if not instance or isProtected(instance) then
+            if instance and isProtected(instance) then
+                stats.protectedObjectsSkipped = stats.protectedObjectsSkipped + 1
+            end
+            return
+        end
+        local className = safeClass(instance)
+        if not VISUAL_ENABLED_CLASSES[className] then
+            return
+        end
+        local readable, enabled = readProperty(instance, "Enabled")
+        if not readable or enabled == nil then
+            return
+        end
+        remember(instance, "Enabled", enabled)
+        if enabled == true then
+            local ok = writeProperty(instance, "Enabled", false)
+            if ok then
+                stats.visualObjectsDisabled = stats.visualObjectsDisabled + 1
+            end
+        end
+    end
+
+    local function restoreVisual(instance)
+        local saved = originals[instance]
+        if not saved or saved.Enabled == nil then
+            return
+        end
+        if writeProperty(instance, "Enabled", saved.Enabled) then
+            stats.visualObjectsRestored = stats.visualObjectsRestored + 1
+        end
+        saved.Enabled = nil
+    end
+
+    local function restoreSavedProperty(instance, property)
+        local saved = originals[instance]
+        if not saved or saved[property] == nil then return false end
+        local ok = writeProperty(instance, property, saved[property])
+        if ok then saved[property] = nil end
+        return ok
+    end
+
+    local function optimizeGeometry(instance)
+        if not instance or isProtected(instance) then return end
+        local className = safeClass(instance)
+        local ultra = config.ultraPerformance == true or config.potatoMode == true
+        local potato = config.potatoMode == true
+
+        local isBasePart = className == "Part" or className == "MeshPart" or className == "UnionOperation"
+        if isBasePart then
+            if ultra then
+                local okShadow, shadow = readProperty(instance, "CastShadow")
+                if okShadow then
+                    remember(instance, "CastShadow", shadow)
+                    if shadow ~= false and writeProperty(instance, "CastShadow", false) then
+                        stats.geometryObjectsOptimized += 1
+                    end
+                end
+            else
+                restoreSavedProperty(instance, "CastShadow")
+            end
+
+            if potato then
+                local okMaterial, material = readProperty(instance, "Material")
+                if okMaterial then
+                    remember(instance, "Material", material)
+                    if material ~= Enum.Material.SmoothPlastic and writeProperty(instance, "Material", Enum.Material.SmoothPlastic) then
+                        stats.potatoMaterialsApplied += 1
+                    end
+                end
+                local okReflectance, reflectance = readProperty(instance, "Reflectance")
+                if okReflectance then
+                    remember(instance, "Reflectance", reflectance)
+                    writeProperty(instance, "Reflectance", 0)
+                end
+            else
+                restoreSavedProperty(instance, "Material")
+                restoreSavedProperty(instance, "Reflectance")
+            end
+        end
+
+        if className == "MeshPart" then
+            if ultra then
+                local okFidelity, fidelity = readProperty(instance, "RenderFidelity")
+                if okFidelity then
+                    remember(instance, "RenderFidelity", fidelity)
+                    if fidelity ~= Enum.RenderFidelity.Performance and writeProperty(instance, "RenderFidelity", Enum.RenderFidelity.Performance) then
+                        stats.meshFidelityReduced += 1
+                    end
+                end
+            else
+                restoreSavedProperty(instance, "RenderFidelity")
+            end
+        end
+
+        if className == "Texture" or className == "Decal" then
+            if ultra then
+                local okTransparency, transparency = readProperty(instance, "Transparency")
+                if okTransparency then
+                    remember(instance, "Transparency", transparency)
+                    if transparency ~= 1 and writeProperty(instance, "Transparency", 1) then
+                        stats.textureObjectsHidden += 1
+                    end
+                end
+            else
+                restoreSavedProperty(instance, "Transparency")
+            end
+        end
+    end
+
+    local function processVisual(instance)
+        if config.disableVFX or config.boostFPS or config.ultraPerformance or config.potatoMode then
+            disableVisual(instance)
+        else
+            restoreVisual(instance)
+        end
+        optimizeGeometry(instance)
+    end
+
+    local function isLocalCharacter(model)
+        if type(deps.isLocalPlayerCharacter) == "function" then
+            local ok, result = pcall(deps.isLocalPlayerCharacter, model, localPlayer)
+            if ok then return result == true end
+        end
+        return localPlayer and localPlayer.Character == model
+    end
+
+    local function isOtherPlayerCharacter(model, player)
+        if isLocalCharacter(model) then
+            return false
+        end
+        if type(deps.isOtherPlayerCharacter) == "function" then
+            local ok, result = pcall(deps.isOtherPlayerCharacter, model, player)
+            return ok and result == true
+        end
+        return player ~= nil and player ~= localPlayer
+    end
+
+    local function isOtherChickenModel(model)
+        if type(deps.isOtherChickenModel) ~= "function" then
+            return false
+        end
+        local ok, result = pcall(deps.isOtherChickenModel, model, localPlayer)
+        return ok and result == true
+    end
+
+    local function setModelHidden(model, hidden, category)
+        if not model or isProtected(model) then
+            return
+        end
+        local descendants = safeGetDescendants(model)
+        for _, instance in ipairs(descendants) do
+            local className = safeClass(instance)
+            if className == "BasePart" or className == "MeshPart" or className == "Part" or className == "UnionOperation" then
+                local readable, current = readProperty(instance, "LocalTransparencyModifier")
+                if readable then
+                    if hidden then
+                        remember(instance, "LocalTransparencyModifier", current)
+                        if writeProperty(instance, "LocalTransparencyModifier", 1) then
+                            hiddenParts[instance] = true
+                            if category == "player" then
+                                stats.playerPartsHidden = stats.playerPartsHidden + 1
+                            else
+                                stats.chickenPartsHidden = stats.chickenPartsHidden + 1
+                            end
+                        end
+                    else
+                        local saved = originals[instance]
+                        local value = saved and saved.LocalTransparencyModifier
+                        if value ~= nil then
+                            writeProperty(instance, "LocalTransparencyModifier", value)
+                            saved.LocalTransparencyModifier = nil
+                            hiddenParts[instance] = nil
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    local function processCharacter(model, player)
+        if config.hideOtherPlayers or config.ultraPerformance then
+            if isOtherPlayerCharacter(model, player) then
+                setModelHidden(model, true, "player")
+                return
+            end
+        end
+        if not config.hideOtherPlayers and not config.ultraPerformance and player ~= localPlayer then
+            setModelHidden(model, false, "player")
+        end
+    end
+
+    local function processChicken(model)
+        local shouldHide = config.hideOtherChickens or config.ultraPerformance
+        if shouldHide and isOtherChickenModel(model) then
+            setModelHidden(model, true, "chicken")
+        elseif not shouldHide and isOtherChickenModel(model) then
+            setModelHidden(model, false, "chicken")
+        end
+    end
+
+    local function processRoot(root)
+        if not root or isProtected(root) then
+            return
+        end
+        disableVisual(root)
+        for _, instance in ipairs(safeGetDescendants(root)) do
+            processVisual(instance)
+        end
+        stats.dynamicObjectsHandled = stats.dynamicObjectsHandled + 1
+    end
+
+    local function connectRoot(root)
+        if rootConnections[root] then return end
+        if root and root.DescendantAdded then
+            rootConnections[root] = safeConnect(root.DescendantAdded, function(instance)
+                if state.destroyed then return end
+                processVisual(instance)
+            end)
+        end
+    end
+
+    local function approvedRoots()
+        if type(deps.getCosmeticRoots) == "function" then
+            local ok, roots = pcall(deps.getCosmeticRoots)
+            if ok and type(roots) == "table" then return roots end
+        end
+        return deps.cosmeticRoots or {}
+    end
+
+    local function applyVisuals()
+        for _, root in ipairs(approvedRoots()) do
+            connectRoot(root)
+            processRoot(root)
+        end
+
+        -- V2: when a real performance preset is active, process the existing
+        -- client-visible world too. Instances are never destroyed/reparented.
+        local WorkspaceService = services.Workspace
+        if WorkspaceService and (config.boostFPS or config.ultraPerformance or config.potatoMode) then
+            processVisual(WorkspaceService)
+            for _, instance in ipairs(safeGetDescendants(WorkspaceService)) do
+                processVisual(instance)
+            end
+        elseif WorkspaceService then
+            -- Restore properties previously overridden by Ultra/Potato.
+            for instance in pairs(originals) do
+                processVisual(instance)
+            end
+        end
+
+        local terrain = WorkspaceService and WorkspaceService:FindFirstChildOfClass("Terrain")
+        if terrain then
+            if config.potatoMode then
+                for property, value in pairs({
+                    WaterWaveSize = 0,
+                    WaterWaveSpeed = 0,
+                    WaterReflectance = 0,
+                    Decoration = false,
+                }) do
+                    local readable, current = readProperty(terrain, property)
+                    if readable then remember(terrain, property, current); writeProperty(terrain, property, value) end
+                end
+            else
+                restoreSavedProperty(terrain, "WaterWaveSize")
+                restoreSavedProperty(terrain, "WaterWaveSpeed")
+                restoreSavedProperty(terrain, "WaterReflectance")
+                restoreSavedProperty(terrain, "Decoration")
+            end
+        end
+
+        if Lighting and config.disableShadows then
+            local readable, shadows = readProperty(Lighting, "GlobalShadows")
+            if readable then
+                remember(Lighting, "GlobalShadows", shadows)
+                writeProperty(Lighting, "GlobalShadows", false)
+            end
+        elseif Lighting then
+            local saved = originals[Lighting]
+            if saved and saved.GlobalShadows ~= nil then
+                writeProperty(Lighting, "GlobalShadows", saved.GlobalShadows)
+                saved.GlobalShadows = nil
+            end
+        end
+    end
+
+    local function applyPlayers()
+        if not Players or type(Players.GetPlayers) ~= "function" then return end
+        local ok, players = pcall(function() return Players:GetPlayers() end)
+        if not ok then return end
+        for _, player in ipairs(players) do
+            if player.Character then
+                processCharacter(player.Character, player)
+            end
+        end
+    end
+
+    local function applyModels()
+        applyVisuals()
+        applyPlayers()
+        if type(deps.getChickenModels) == "function" then
+            local ok, models = pcall(deps.getChickenModels)
+            if ok and type(models) == "table" then
+                for _, model in ipairs(models) do processChicken(model) end
+            end
+        end
+    end
+
+    local function updateModeStatus()
+        if config.potatoMode then
+            setStatus("POTATO MODE")
+        elseif config.ultraPerformance then
+            setStatus("ULTRA PERFORMANCE")
+        elseif config.boostFPS then
+            setStatus("BOOST FPS + LOW GRAPHICS")
+        elseif config.disableVFX or config.disableShadows or config.hideOtherPlayers or config.hideOtherChickens then
+            setStatus("CUSTOM PERFORMANCE")
+        else
+            setStatus("DISABLED")
+        end
+    end
+
+    local function apply()
+        if state.destroyed then return end
+        applyModels()
+        if config.whiteScreen then
+            if type(deps.setVisualCover) == "function" then
+                pcall(deps.setVisualCover, true)
+            end
+            state.whiteScreenIsCover = true
+        else
+            if type(deps.setVisualCover) == "function" then
+                pcall(deps.setVisualCover, false)
+            end
+            state.whiteScreenIsCover = false
+        end
+        updateModeStatus()
+    end
+
+    local function setFlag(key, enabled)
+        if state.destroyed then return false end
+        config[key] = enabled == true
+        apply()
+        return true
+    end
+
+    local api = {}
+
+    function api.setBoostFPS(enabled)
+        enabled = enabled == true
+        if enabled and not state.boostSnapshot then
+            state.boostSnapshot = {
+                disableVFX = config.disableVFX,
+                disableShadows = config.disableShadows,
+            }
+        elseif not enabled and state.boostSnapshot then
+            config.disableVFX = state.boostSnapshot.disableVFX
+            config.disableShadows = state.boostSnapshot.disableShadows
+            state.boostSnapshot = nil
+        end
+        config.boostFPS = enabled
+        if enabled then
+            config.disableVFX = true
+            config.disableShadows = true
+        end
+        apply()
+        return true
+    end
+
+    function api.getBoostFPS() return config.boostFPS end
+    function api.setDisableVFX(v) return setFlag("disableVFX", v) end
+    function api.getDisableVFX() return config.disableVFX end
+    function api.setDisableShadows(v) return setFlag("disableShadows", v) end
+    function api.getDisableShadows() return config.disableShadows end
+    function api.setHideOtherPlayers(v) return setFlag("hideOtherPlayers", v) end
+    function api.getHideOtherPlayers() return config.hideOtherPlayers end
+    function api.setHideOtherChickens(v) return setFlag("hideOtherChickens", v) end
+    function api.getHideOtherChickens() return config.hideOtherChickens end
+
+    function api.setWhiteScreen(v)
+        config.whiteScreen = v == true
+        apply()
+        return true
+    end
+    function api.getWhiteScreen() return config.whiteScreen end
+
+    function api.setUltraPerformance(enabled)
+        enabled = enabled == true
+        if enabled and not state.ultraSnapshot then
+            state.ultraSnapshot = {
+                boostFPS = config.boostFPS,
+                disableVFX = config.disableVFX,
+                disableShadows = config.disableShadows,
+                hideOtherPlayers = config.hideOtherPlayers,
+                hideOtherChickens = config.hideOtherChickens,
+            }
+        elseif not enabled and state.ultraSnapshot then
+            config.boostFPS = state.ultraSnapshot.boostFPS
+            config.disableVFX = state.ultraSnapshot.disableVFX
+            config.disableShadows = state.ultraSnapshot.disableShadows
+            config.hideOtherPlayers = state.ultraSnapshot.hideOtherPlayers
+            config.hideOtherChickens = state.ultraSnapshot.hideOtherChickens
+            state.ultraSnapshot = nil
+        end
+        config.ultraPerformance = enabled
+        if enabled then
+            config.boostFPS = true
+            config.disableVFX = true
+            config.disableShadows = true
+            config.hideOtherPlayers = true
+            config.hideOtherChickens = true
+        end
+        apply()
+        return true
+    end
+    function api.getUltraPerformance() return config.ultraPerformance end
+
+    function api.setPotatoMode(enabled)
+        enabled = enabled == true
+        if enabled and not state.potatoSnapshot then
+            state.potatoSnapshot = {
+                boostFPS = config.boostFPS,
+                disableVFX = config.disableVFX,
+                disableShadows = config.disableShadows,
+                hideOtherPlayers = config.hideOtherPlayers,
+                hideOtherChickens = config.hideOtherChickens,
+                ultraPerformance = config.ultraPerformance,
+            }
+        elseif not enabled and state.potatoSnapshot then
+            config.boostFPS = state.potatoSnapshot.boostFPS
+            config.disableVFX = state.potatoSnapshot.disableVFX
+            config.disableShadows = state.potatoSnapshot.disableShadows
+            config.hideOtherPlayers = state.potatoSnapshot.hideOtherPlayers
+            config.hideOtherChickens = state.potatoSnapshot.hideOtherChickens
+            config.ultraPerformance = state.potatoSnapshot.ultraPerformance
+            state.potatoSnapshot = nil
+        end
+        config.potatoMode = enabled
+        if enabled then
+            config.boostFPS = true
+            config.disableVFX = true
+            config.disableShadows = true
+            config.hideOtherPlayers = true
+            config.hideOtherChickens = true
+            config.ultraPerformance = true
+        end
+        apply()
+        return true
+    end
+    function api.getPotatoMode() return config.potatoMode == true end
+
+    function api.restoreVisuals()
+        config.boostFPS = false
+        config.disableVFX = false
+        config.disableShadows = false
+        config.hideOtherPlayers = false
+        config.hideOtherChickens = false
+        config.whiteScreen = false
+        config.ultraPerformance = false
+        config.potatoMode = false
+        state.boostSnapshot = nil
+        state.ultraSnapshot = nil
+        state.potatoSnapshot = nil
+        apply()
+        return true
+    end
+
+    function api.getStatus() return state.status end
+    function api.getStats()
+        local result = {}
+        for key, value in pairs(stats) do result[key] = value end
+        result.whiteScreenIsVisualCover = state.whiteScreenIsCover
+        result.actualRenderingDisable = false
+        return result
+    end
+
+    function api.refresh()
+        apply()
+    end
+
+    function api.destroy()
+        if state.destroyed then return end
+        state.destroyed = true
+        for _, connection in ipairs(connections) do
+            if connection and type(connection.Disconnect) == "function" then pcall(function() connection:Disconnect() end) end
+        end
+        for _, connection in pairs(rootConnections) do
+            if connection and type(connection.Disconnect) == "function" then pcall(function() connection:Disconnect() end) end
+        end
+        for instance, saved in pairs(originals) do
+            if saved.Enabled ~= nil then writeProperty(instance, "Enabled", saved.Enabled) end
+            if saved.GlobalShadows ~= nil then writeProperty(instance, "GlobalShadows", saved.GlobalShadows) end
+            if saved.LocalTransparencyModifier ~= nil then writeProperty(instance, "LocalTransparencyModifier", saved.LocalTransparencyModifier) end
+            if saved.CastShadow ~= nil then writeProperty(instance, "CastShadow", saved.CastShadow) end
+            if saved.Material ~= nil then writeProperty(instance, "Material", saved.Material) end
+            if saved.Reflectance ~= nil then writeProperty(instance, "Reflectance", saved.Reflectance) end
+            if saved.RenderFidelity ~= nil then writeProperty(instance, "RenderFidelity", saved.RenderFidelity) end
+            if saved.Transparency ~= nil then writeProperty(instance, "Transparency", saved.Transparency) end
+            if saved.WaterWaveSize ~= nil then writeProperty(instance, "WaterWaveSize", saved.WaterWaveSize) end
+            if saved.WaterWaveSpeed ~= nil then writeProperty(instance, "WaterWaveSpeed", saved.WaterWaveSpeed) end
+            if saved.WaterReflectance ~= nil then writeProperty(instance, "WaterReflectance", saved.WaterReflectance) end
+            if saved.Decoration ~= nil then writeProperty(instance, "Decoration", saved.Decoration) end
+        end
+        if type(deps.setVisualCover) == "function" then pcall(deps.setVisualCover, false) end
+        setStatus("DISABLED")
+    end
+
+    if Players then
+        table.insert(connections, safeConnect(Players.PlayerAdded, function(player)
+            if player.Character then processCharacter(player.Character, player) end
+            table.insert(connections, safeConnect(player.CharacterAdded, function(character)
+                processCharacter(character, player)
+            end))
+        end))
+        table.insert(connections, safeConnect(Players.PlayerRemoving, function(player)
+            if player.Character then processCharacter(player.Character, player) end
+        end))
+        local ok, players = pcall(function() return Players:GetPlayers() end)
+        if ok then
+            for _, player in ipairs(players) do
+                table.insert(connections, safeConnect(player.CharacterAdded, function(character)
+                    processCharacter(character, player)
+                end))
+            end
+        end
+    end
+
+    if services.Workspace and services.Workspace.DescendantAdded then
+        table.insert(connections, safeConnect(services.Workspace.DescendantAdded, function(instance)
+            -- Workspace additions are classified, never blindly destroyed.
+            if isProtected(instance) then return end
+            processVisual(instance)
+            processChicken(instance)
+        end))
+    end
+
+    return api
+end
+
+-- createPerformanceManager defined above
+
+-- CONFIG MANAGER
+-- standalone integration-ready code
+--
+-- Configuration is data only. This module never executes config text.
+
+local CONFIG_VERSION = 1
+local CONFIG_FOLDER = "UNOHUB"
+local DEFAULT_CONFIG_NAME = "default"
+
+local function clone(value, seen)
+    if type(value) ~= "table" then return value end
+    seen = seen or {}
+    if seen[value] then return seen[value] end
+    local result = {}
+    seen[value] = result
+    for key, item in pairs(value) do
+        result[clone(key, seen)] = clone(item, seen)
+    end
+    return result
+end
+
+local function safeCall(fn, ...)
+    if type(fn) ~= "function" then return false, nil end
+    return pcall(fn, ...)
+end
+
+local function delay(seconds, callback, deps)
+    if type(deps.delay) == "function" then
+        return deps.delay(seconds, callback)
+    end
+    if task and type(task.delay) == "function" then
+        return task.delay(seconds, callback)
+    end
+    return nil
+end
+
+local function getGlobal(name)
+    local env = (getgenv and getgenv()) or nil
+    if type(env) == "table" and type(env[name]) == "function" then
+        return env[name]
+    end
+    if type(_G) == "table" and type(_G[name]) == "function" then
+        return _G[name]
+    end
+    return nil
+end
+
+local function chooseFunction(container, name)
+    if type(container) == "table" and type(container[name]) == "function" then
+        return container[name]
+    end
+    return getGlobal(name)
+end
+
+local function createConfigManager(deps)
+    deps = deps or {}
+    local fs = deps.fs or {}
+    local httpService = deps.HttpService or deps.httpService
+    local encode = deps.jsonEncode
+    local decode = deps.jsonDecode
+
+    if type(encode) ~= "function" and httpService then
+        encode = function(value)
+            return httpService:JSONEncode(value)
+        end
+    end
+    if type(decode) ~= "function" and httpService then
+        decode = function(text)
+            return httpService:JSONDecode(text)
+        end
+    end
+
+    local writefile = chooseFunction(fs, "writefile")
+    local readfile = chooseFunction(fs, "readfile")
+    local isfile = chooseFunction(fs, "isfile")
+    local makefolder = chooseFunction(fs, "makefolder")
+
+    local persistenceAvailable = type(writefile) == "function"
+        and type(readfile) == "function"
+        and type(isfile) == "function"
+        and type(makefolder) == "function"
+        and type(encode) == "function"
+        and type(decode) == "function"
+
+    local config = {
+        autoSave = true,
+        restoreDestructiveAutomation = false,
+        configName = DEFAULT_CONFIG_NAME,
+    }
+
+    local function sanitizeConfigName(value)
+        value = tostring(value or "")
+        value = string.gsub(value, "^%s+", "")
+        value = string.gsub(value, "%s+$", "")
+        value = string.gsub(value, "[^%w%-%_]", "_")
+        if value == "" then value = DEFAULT_CONFIG_NAME end
+        return string.sub(value, 1, 48)
+    end
+
+    local function configPath()
+        return CONFIG_FOLDER .. "/" .. sanitizeConfigName(config.configName) .. ".json"
+    end
+    for key, value in pairs(deps.defaults or {}) do
+        config[key] = clone(value)
+    end
+    local startupDefaults = clone(config)
+
+    local sections = {}
+    local state = {
+        destroyed = false,
+        dirty = false,
+        savePending = false,
+        timerGeneration = 0,
+        status = persistenceAvailable and "READY" or "PERSISTENCE UNAVAILABLE",
+        lastError = nil,
+        lastLoadedVersion = nil,
+        lastSavedAt = nil,
+    }
+
+    local function log(message, payload)
+        if type(deps.log) == "function" then
+            pcall(deps.log, message, payload)
+        end
+    end
+
+    local function setStatus(status, errorValue)
+        state.status = status
+        state.lastError = errorValue
+        log(status, errorValue)
+    end
+
+    local function ensureFolder()
+        local ok = pcall(makefolder, CONFIG_FOLDER)
+        -- Existing-folder errors are harmless; writing the file is the
+        -- authoritative capability test.
+        return ok
+    end
+
+    local function currentDefaults()
+        local result = clone(startupDefaults)
+        result.version = CONFIG_VERSION
+        for name, section in pairs(sections) do
+            result[name] = clone(section.defaults or {})
+        end
+        return result
+    end
+
+    local function sanitizeWithDefaults(value, defaults)
+        if type(defaults) == "boolean" then
+            return type(value) == "boolean" and value or defaults
+        end
+        if type(defaults) == "number" then
+            return type(value) == "number" and value or defaults
+        end
+        if type(defaults) == "string" then
+            return type(value) == "string" and value or defaults
+        end
+        if type(defaults) ~= "table" then
+            return clone(value)
+        end
+        if type(value) ~= "table" then
+            return clone(defaults)
+        end
+        local result = {}
+        for key, defaultValue in pairs(defaults) do
+            if value[key] ~= nil then
+                result[key] = sanitizeWithDefaults(value[key], defaultValue)
+            else
+                result[key] = clone(defaultValue)
+            end
+        end
+        return result
+    end
+
+    local function validateSection(name, value, section)
+        local normalized = sanitizeWithDefaults(value, section.defaults or {})
+        if type(section.validate) == "function" then
+            local ok, result = pcall(section.validate, normalized, name)
+            if not ok or result == false then
+                return clone(section.defaults or {}), false
+            end
+            if type(result) == "table" then
+                normalized = result
+            end
+        end
+        return normalized, true
+    end
+
+    local function applyDocument(document)
+        document = type(document) == "table" and document or {}
+        local restoreDestructive = document.restoreDestructiveAutomation == true
+        config.restoreDestructiveAutomation = restoreDestructive
+        if type(document.autoSave) == "boolean" then
+            config.autoSave = document.autoSave
+        end
+        for name, section in pairs(sections) do
+            local value = document[name]
+            local normalized = validateSection(name, value, section)
+            if name == "sell" or name == "fuse" or name == "autoSell" or name == "autoFuse" then
+                if type(normalized) == "table" and not restoreDestructive then
+                    if normalized.enabled ~= nil then normalized.enabled = false end
+                    if normalized.dryRun ~= nil then normalized.dryRun = true end
+                end
+            end
+            if type(section.loader) == "function" then
+                pcall(section.loader, clone(normalized), {
+                    name = name,
+                    restoredDestructiveAutomation = restoreDestructive,
+                    fromConfig = true,
+                })
+            end
+        end
+    end
+
+    local function migrate(document)
+        local version = tonumber(document.version) or 0
+        if version > CONFIG_VERSION then
+            return nil, "UNSUPPORTED CONFIG VERSION"
+        end
+        if version < CONFIG_VERSION and type(deps.migrate) == "function" then
+            local ok, migrated = pcall(deps.migrate, clone(document), version, CONFIG_VERSION)
+            if not ok or type(migrated) ~= "table" then
+                return nil, "CONFIG MIGRATION FAILED"
+            end
+            document = migrated
+        end
+        document.version = CONFIG_VERSION
+        return document, nil
+    end
+
+    local function snapshot()
+        local document = {
+            version = CONFIG_VERSION,
+            autoSave = config.autoSave == true,
+            restoreDestructiveAutomation = config.restoreDestructiveAutomation == true,
+        }
+        for name, section in pairs(sections) do
+            if type(section.serializer) == "function" then
+                local ok, value = pcall(section.serializer)
+                if ok and type(value) == "table" then
+                    document[name] = clone(value)
+                else
+                    document[name] = clone(section.defaults or {})
+                end
+            else
+                document[name] = clone(section.defaults or {})
+            end
+        end
+        return document
+    end
+
+    local function saveNow()
+        if state.destroyed then return false, "DESTROYED" end
+        if not persistenceAvailable then
+            setStatus("PERSISTENCE UNAVAILABLE")
+            return false, "PERSISTENCE UNAVAILABLE"
+        end
+        local document = snapshot()
+        local okEncode, text = pcall(encode, document)
+        if not okEncode or type(text) ~= "string" then
+            setStatus("SAVE ERROR", "JSON ENCODE FAILED")
+            return false, "JSON ENCODE FAILED"
+        end
+        local okFolder = ensureFolder()
+        if not okFolder then
+            -- Some runtimes throw when a folder already exists. Continue to
+            -- the write attempt because writefile is the decisive operation.
+            log("CONFIG FOLDER CHECK", "CONTINUING")
+        end
+        local okWrite, writeError = pcall(writefile, configPath(), text)
+        if not okWrite then
+            setStatus("SAVE ERROR", writeError)
+            return false, writeError
+        end
+        state.dirty = false
+        state.savePending = false
+        state.lastSavedAt = os.time()
+        setStatus("SAVED")
+        return true
+    end
+
+    local function scheduleSave()
+        if state.savePending or not config.autoSave or state.destroyed then return end
+        state.savePending = true
+        state.timerGeneration = state.timerGeneration + 1
+        local generation = state.timerGeneration
+        delay(0.75, function()
+            if state.destroyed or generation ~= state.timerGeneration then return end
+            state.savePending = false
+            if state.dirty then saveNow() end
+        end, deps)
+    end
+
+    local api = {}
+
+    function api.isPersistenceAvailable()
+        return persistenceAvailable
+    end
+
+    function api.registerSection(name, serializer, loader, options)
+        if state.destroyed or type(name) ~= "string" or name == "" then
+            return false, "INVALID SECTION"
+        end
+        options = options or {}
+        sections[name] = {
+            serializer = serializer,
+            loader = loader,
+            validate = options.validate,
+            defaults = clone(options.defaults or {}),
+        }
+        return true
+    end
+
+    function api.load()
+        if state.destroyed then return false, "DESTROYED" end
+        if not persistenceAvailable then
+            applyDocument(currentDefaults())
+            setStatus("PERSISTENCE UNAVAILABLE")
+            return false, "PERSISTENCE UNAVAILABLE"
+        end
+        local existsOk, exists = pcall(isfile, configPath())
+        if not existsOk or exists ~= true then
+            applyDocument(currentDefaults())
+            setStatus("NO CONFIG")
+            return false, "NO CONFIG"
+        end
+        local okRead, text = pcall(readfile, configPath())
+        if not okRead or type(text) ~= "string" then
+            applyDocument(currentDefaults())
+            setStatus("LOAD ERROR", text)
+            return false, "LOAD ERROR"
+        end
+        local okDecode, document = pcall(decode, text)
+        if not okDecode or type(document) ~= "table" then
+            applyDocument(currentDefaults())
+            setStatus("INVALID CONFIG", "JSON DECODE FAILED")
+            return false, "INVALID CONFIG"
+        end
+        local migrated, migrationError = migrate(document)
+        if not migrated then
+            applyDocument(currentDefaults())
+            setStatus("INVALID CONFIG", migrationError)
+            return false, migrationError
+        end
+        state.lastLoadedVersion = migrated.version
+        applyDocument(migrated)
+        state.dirty = false
+        setStatus("LOADED")
+        return true
+    end
+
+    function api.save()
+        if state.destroyed then return false, "DESTROYED" end
+        state.dirty = true
+        scheduleSave()
+        return true
+    end
+
+    function api.markDirty()
+        return api.save()
+    end
+
+    function api.saveNow()
+        return saveNow()
+    end
+
+    function api.setAutoSave(enabled)
+        config.autoSave = enabled == true
+        if config.autoSave and state.dirty then scheduleSave() end
+        return true
+    end
+
+    function api.getAutoSave()
+        return config.autoSave
+    end
+
+    function api.setConfigName(value)
+        config.configName = sanitizeConfigName(value)
+        return config.configName
+    end
+
+    function api.getConfigName()
+        return config.configName
+    end
+
+    function api.getConfigPath()
+        return configPath()
+    end
+
+    function api.setRestoreDestructiveAutomation(enabled)
+        config.restoreDestructiveAutomation = enabled == true
+        api.markDirty()
+        return true
+    end
+
+    function api.getRestoreDestructiveAutomation()
+        return config.restoreDestructiveAutomation
+    end
+
+    function api.getStatus()
+        return state.status
+    end
+
+    function api.getLastError()
+        return state.lastError
+    end
+
+    function api.isDirty()
+        return state.dirty
+    end
+
+    function api.resetToDefaults(confirmed)
+        if not confirmed then
+            return false, "CONFIRMATION REQUIRED"
+        end
+        applyDocument(currentDefaults())
+        api.markDirty()
+        setStatus("RESET")
+        return true
+    end
+
+    function api.destroy()
+        if state.destroyed then return end
+        if state.dirty then saveNow() end
+        state.destroyed = true
+        state.timerGeneration = state.timerGeneration + 1
+        state.savePending = false
+        if type(deps.onDestroy) == "function" then pcall(deps.onDestroy) end
+    end
+
+    return api
+end
+
+-- createConfigManager defined above
+
+
+
+--------------------------------------------------------------------
+-- INTEGRATION
+--------------------------------------------------------------------
+local Integration = { remotes = {}, modules = {} }
+local function safeRequire(inst)
+    if not inst then return nil end
+    local ok, res = pcall(require, inst)
+    return ok and res or nil
+end
+local function findPath(root, segments)
+    local cur = root
+    for _, name in ipairs(segments) do
+        if not cur then return nil end
+        cur = cur:FindFirstChild(name)
+    end
+    return cur
+end
+
+Integration.modules.Remotes = safeRequire(findPath(ReplicatedStorage, {"Core", "Remotes"}))
+Integration.modules.DataController = safeRequire(findPath(LocalPlayer, {"PlayerScripts", "Core", "Data", "DataController"}))
+Integration.modules.RebirthBonus = safeRequire(findPath(ReplicatedStorage, {"Core", "Progression", "RebirthBonus"}))
+Integration.modules.PitZone = safeRequire(findPath(ReplicatedStorage, {"Features", "Battle", "PitZone"}))
+Integration.modules.GameConfig = safeRequire(findPath(ReplicatedStorage, {"Content", "GameConfig"}))
+Integration.modules.CoopView = safeRequire(findPath(ReplicatedStorage, {"Features", "Coop", "CoopView"}))
+Integration.modules.RecyclerView = safeRequire(findPath(ReplicatedStorage, {"Features", "Scrap", "RecyclerView"}))
+Integration.modules.Catalog = safeRequire(findPath(ReplicatedStorage, {"Content", "Catalog"}))
+Integration.modules.CatalogEggs = safeRequire(findPath(ReplicatedStorage, {"Content", "Catalog", "Eggs"}))
+Integration.modules.FusionRules = safeRequire(findPath(ReplicatedStorage, {"Features", "Chicken", "FusionRules"}))
+Integration.modules.IncubatorView = safeRequire(findPath(ReplicatedStorage, {"Features", "Incubator", "IncubatorView"}))
+
+local function findDataService()
+    local direct = safeRequire(findPath(ReplicatedStorage, {"Packages", "DataService"}))
+    if direct then return direct end
+    local packages = ReplicatedStorage:FindFirstChild("Packages")
+    if packages then
+        for _, child in ipairs(packages:GetDescendants()) do
+            if child.Name == "DataService" and child:IsA("ModuleScript") then
+                return safeRequire(child)
+            end
+        end
+    end
+    return nil
+end
+Integration.modules.DataService = findDataService()
+
+State.diagnostics["Core.Remotes"] = Integration.modules.Remotes and "FOUND" or "MISSING"
+State.diagnostics["DataController"] = Integration.modules.DataController and "FOUND" or "MISSING"
+State.diagnostics["Catalog"] = Integration.modules.Catalog and "FOUND" or "MISSING"
+State.diagnostics["Catalog.Eggs"] = Integration.modules.CatalogEggs and "FOUND" or "MISSING"
+State.diagnostics["FusionRules"] = Integration.modules.FusionRules and "FOUND" or "MISSING"
+State.diagnostics["IncubatorView"] = Integration.modules.IncubatorView and "FOUND" or "MISSING"
+State.diagnostics["AutoSell.Factory"] = "PRESENT"
+State.diagnostics["AutoFuse.Factory"] = "PRESENT"
+
+local remotesFolder = ReplicatedStorage:FindFirstChild("Remotes")
+for _, name in ipairs({
+    "TowerStart", "TowerSurrender", "TowerRunStarted", "TowerFloorCleared", "TowerRivalLanded",
+    "TowerDefeat", "TowerRunEnded", "TowerContinueOffer", "TowerContinueDecline", "TowerContinued",
+    "Rebirth", "BuyGenerator", "UpgradeGenerator", "ExpandCoop", "UpgradeRecycler",
+    "HatchEggs", "IncubatorClaim", "IncubatorUpgrade", "SellChickens", "FuseChickens", "SetChickenFavorite",
+    "LiveEventStarted", "LiveEventEnded", "HotEggEntrance", "HotEggMeteor", "HotEggReward", "HotEggFinale",
+}) do
+    local inst = remotesFolder and remotesFolder:FindFirstChild(name)
+    Integration.remotes[name] = inst
+    State.diagnostics["Remote." .. name] = inst and inst.ClassName or "MISSING"
+end
+
+local function readAtom(controller, key)
+    if not controller then return nil end
+    local atom = controller[key]
+    if type(atom) ~= "function" then return nil end
+    local ok, value = pcall(atom)
+    return ok and value or nil
+end
+local function clientGet(path)
+    local service = Integration.modules.DataService
+    local client = service and service.client
+    if not client or type(client.get) ~= "function" then return nil end
+    local ok, value = pcall(client.get, client, path)
+    return ok and value or nil
+end
+local function readMoney()
+    local dc = Integration.modules.DataController
+    local money = readAtom(dc, "money")
+    if type(money) == "table" and type(money.toNumber) == "function" then
+        local ok, value = pcall(money.toNumber, money)
+        if ok then return tonumber(value) end
+    end
+    local fromClient = clientGet({"money"})
+    if fromClient ~= nil then return tonumber(fromClient) end
+    return tonumber(money)
+end
+local function refreshData()
+    local dc = Integration.modules.DataController
+    State.data.roster = readAtom(dc, "roster")
+    if type(State.data.roster) ~= "table" then
+        local fromDs = clientGet({"roster"})
+        if type(fromDs) == "table" then State.data.roster = fromDs end
+    end
+    State.data.rebirth = readAtom(dc, "rebirth")
+    State.data.towerBest = readAtom(dc, "towerBest")
+    State.data.chicken = readAtom(dc, "chicken")
+    State.data.recyclerLevel = readAtom(dc, "recyclerLevel")
+    State.data.money = readMoney()
+    State.data.coop = clientGet({"coop"})
+    State.data.incubator = clientGet({"incubator"})
+    if State.data.towerBest ~= nil then State.tower.best = State.data.towerBest end
+end
+local function getRebirthInfo()
+    local bonus = Integration.modules.RebirthBonus
+    local rebirth = State.data.rebirth
+    local count = (type(rebirth) == "table" and tonumber(rebirth.count)) or 0
+    local best = tonumber(State.data.towerBest) or 0
+    local required, ready = nil, false
+    if bonus then
+        if type(bonus.requirementFloor) == "function" then
+            local ok, v = pcall(bonus.requirementFloor, count)
+            if ok then required = v end
+        end
+        if type(bonus.ready) == "function" then
+            local ok, v = pcall(bonus.ready, best, count)
+            if ok then ready = v == true end
+        end
+    end
+    return count, required, ready, best
+end
+local function isTowerActive()
+    if State.tower.runActive then return true end
+    local s = State.tower.status
+    if s == "RUNNING" or s == "FLOOR CLEARED" then return true end
+    if State.tower.continue and State.tower.continue.open then return true end
+    return false
+end
+local function getTowerStatus()
+    return tostring(State.tower.status)
+end
+
+local function isContinueOpen()
+    return State.tower.continue ~= nil and State.tower.continue.open == true
+end
+local function tryInvoke(name, ...)
+    local core = Integration.modules.Remotes
+    local args = table.pack(...)
+    if core and core.defs and core.defs[name] then
+        local def = core.defs[name]
+        local kind = def.kind or def.type
+        if kind == "Function" and type(core.invoke) == "function" then
+            local ok, res = pcall(function() return core.invoke(def, table.unpack(args, 1, args.n)) end)
+            return ok, res
+        end
+        if kind == "Event" and type(core.fire) == "function" then
+            local ok, err = pcall(function() core.fire(def, table.unpack(args, 1, args.n)) end)
+            return ok, err
+        end
+    end
+    local remote = Integration.remotes[name]
+    if not remote then return false, "missing" end
+    if remote:IsA("RemoteFunction") then
+        local ok, res = pcall(function() return remote:InvokeServer(table.unpack(args, 1, args.n)) end)
+        if not ok then return false, res end
+        return true, res
+    elseif remote:IsA("RemoteEvent") or remote:IsA("UnreliableRemoteEvent") then
+        local ok, err = pcall(function() remote:FireServer(table.unpack(args, 1, args.n)) end)
+        return ok, err
+    end
+    return false, "bad class"
+end
+local function responseOK(response)
+    return type(response) == "table" and response.ok == true
+end
+
+--------------------------------------------------------------------
+-- DISPLAY NAME RESOLVERS (UI only)
+--------------------------------------------------------------------
+local function titleCaseId(id)
+    local s = tostring(id or "")
+    if s == "" then return s end
+    local parts = {}
+    for word in string.gmatch(s, "[^_%-%s]+") do
+        table.insert(parts, string.upper(string.sub(word, 1, 1)) .. string.lower(string.sub(word, 2)))
+    end
+    if #parts == 0 then return s end
+    return table.concat(parts, " ")
+end
+local function resolveEggDisplayName(eggId)
+    if eggId == nil then return "unknown" end
+    local catalog = Integration.modules.Catalog
+    local eggsTable = (catalog and catalog.eggs) or Integration.modules.CatalogEggs
+    if type(eggsTable) == "table" then
+        local entry = eggsTable[eggId] or eggsTable[tostring(eggId)]
+        if type(entry) == "table" and type(entry.name) == "string" and entry.name ~= "" then
+            return entry.name
+        end
+    end
+    local fallback = tostring(eggId)
+    return fallback ~= "" and fallback or "unknown"
+end
+local function resolveRarityDisplayName(rarityId)
+    if rarityId == nil then return "unknown" end
+    local catalog = Integration.modules.Catalog
+    local rarity = catalog and (catalog.Rarity or catalog.rarity)
+    if type(rarity) == "table" then
+        if type(rarity.displayName) == "table" and type(rarity.displayName[rarityId]) == "string" and rarity.displayName[rarityId] ~= "" then
+            return rarity.displayName[rarityId]
+        end
+        local entry = rarity[rarityId]
+        if type(entry) == "table" and type(entry.name) == "string" and entry.name ~= "" then
+            return entry.name
+        end
+    end
+    local named = titleCaseId(rarityId)
+    return named ~= "" and named or tostring(rarityId)
+end
+local function resolveAbilityDisplayName(ability)
+    if type(ability) == "table" then
+        if type(ability.name) == "string" and ability.name ~= "" then return ability.name end
+        if ability.id ~= nil then return titleCaseId(ability.id) end
+    elseif ability ~= nil then
+        local catalog = Integration.modules.Catalog
+        local abilities = catalog and catalog.abilities
+        if type(abilities) == "table" then
+            local def = abilities[ability]
+            if type(def) == "table" and type(def.name) == "string" and def.name ~= "" then return def.name end
+        end
+        return titleCaseId(ability)
+    end
+    return "unknown"
+end
+local function diagNameOnce(kind, id, displayName)
+    local key = kind .. ":" .. tostring(id)
+    if State.nameDiagSeen[key] then return end
+    State.nameDiagSeen[key] = true
+    if displayName == tostring(id) then
+        log("UI", string.format("[%s UI] fallback raw id=%s", kind, tostring(id)))
+    else
+        log("UI", string.format("[%s UI] id=%s name=%s", kind, tostring(id), tostring(displayName)))
+    end
+end
+
+--------------------------------------------------------------------
+-- MOVEMENT
+--------------------------------------------------------------------
+local activeTween = nil
+local function cancelMovement()
+    if activeTween then pcall(function() activeTween:Cancel() end) activeTween = nil end
+end
+local function getHRP()
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if hrp and hrp:IsA("BasePart") then return hrp end
+    return nil
+end
+local function moveTo(targetPos, mode, owner)
+    if State.movementOwner ~= "NONE" and State.movementOwner ~= owner then
+        if owner ~= "METEOR_AVOIDANCE" and owner ~= "PIT_EXIT" then return false end
+    end
+    cancelMovement()
+    State.movementOwner = owner
+    local hrp = getHRP()
+    if not hrp then State.movementOwner = "NONE" return false end
+    mode = mode or "Walk"
+    if mode == "Teleport" then
+        hrp.CFrame = CFrame.new(targetPos + Vector3.new(0, 3, 0))
+        State.movementOwner = "NONE"
+        return true
+    end
+    if mode == "Walk" then
+        local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if hum then
+            hum:MoveTo(targetPos)
+            local deadline = os.clock() + 8
+            while os.clock() < deadline and State.movementOwner == owner do
+                if (hrp.Position - targetPos).Magnitude < 4 then break end
+                task.wait(0.15)
+            end
+        end
+        if State.movementOwner == owner then State.movementOwner = "NONE" end
+        return true
+    end
+    local dist = (hrp.Position - targetPos).Magnitude
+    local dur = math.clamp(dist / 48, 0.12, 1.8)
+    activeTween = TweenService:Create(hrp, TweenInfo.new(dur, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+        CFrame = CFrame.new(targetPos + Vector3.new(0, 3, 0))
+    })
+    activeTween:Play()
+    activeTween.Completed:Wait()
+    activeTween = nil
+    if State.movementOwner == owner then State.movementOwner = "NONE" end
+    return true
+end
+local MOVEMENT_RANK = { NONE = 0, AUTO_COLLECT_EGG = 1, AUTO_HOT_EGG = 2, PIT_EXIT = 3, METEOR_AVOIDANCE = 4 }
+local function movementCanRun(priority)
+    local owner = State.movementOwner or "NONE"
+    if owner == "NONE" or owner == priority then return true end
+    return (MOVEMENT_RANK[owner] or 0) < (MOVEMENT_RANK[priority] or 0)
+end
+local MovementAdapter = {
+    canRun = function(_, priority) return movementCanRun(priority) end,
+    isBlocked = function(_, priority) return not movementCanRun(priority) end,
+    tryAcquire = function(_, priority)
+        if not movementCanRun(priority) then return false end
+        if State.movementOwner ~= "NONE" and State.movementOwner ~= priority then
+            if (MOVEMENT_RANK[State.movementOwner] or 0) > (MOVEMENT_RANK[priority] or 0) then return false end
+            cancelMovement()
+        end
+        State.movementOwner = priority
+        return { priority = priority }
+    end,
+    release = function(lease)
+        if type(lease) == "table" and lease.priority and State.movementOwner == lease.priority then
+            State.movementOwner = "NONE"
+        elseif State.movementOwner == "AUTO_COLLECT_EGG" then
+            State.movementOwner = "NONE"
+        end
+    end,
+}
+
+--------------------------------------------------------------------
+-- createAutoSellChickens (SOURCE A — full backend restored)
+--------------------------------------------------------------------
+local function createAutoSellChickens(deps)
+    assert(type(deps) == "table", "createAutoSellChickens(deps) requires a dependency table")
+    assert(type(deps.Remotes) == "table", "deps.Remotes is required")
+    assert(type(deps.Remotes.invoke) == "function", "deps.Remotes.invoke is required")
+    assert(type(deps.Remotes.defs) == "table" and deps.Remotes.defs.SellChickens ~= nil, "SellChickens required")
+    assert(type(deps.DataController) == "table", "deps.DataController is required")
+    assert(type(deps.DataController.roster) == "function", "roster required")
+    assert(type(deps.Catalog) == "table", "deps.Catalog is required")
+    local Remotes, DataController, Catalog = deps.Remotes, deps.DataController, deps.Catalog
+    local logSink = deps.log
+    local enabled, destroyed, generation, sellInProgress = false, false, 0, false
+    -- Explicit arming flag prevents stale roster callbacks/workers from ever
+    -- performing a destructive sell after the UI toggle has been turned OFF.
+    local userArmed = false
+    local rosterUnsubscribe, wakeEvaluation, lastRosterFingerprint, lastLogKey = nil, false, nil, nil
+    local configRevision = 0
+    local selectedRarities, abilityWhitelist = {}, { voodoo = true, cycleofash = true }
+    -- Mutation protection is opt-out:
+    -- every discovered/current/future mutation is protected by default,
+    -- and only mutations explicitly unchecked by the user may be sold.
+    local unprotectedMutations = {}
+    local protectFavorites = true
+    local maxBatchSize, pollInterval, confirmationTimeout, retryDelay = 10, 1, 8, 2
+    local status, lastError = "DISABLED", nil
+    local stats = {
+        totalEvaluated = 0, totalSoldConfirmed = 0, totalProtectedActive = 0, totalProtectedFavorite = 0,
+        totalProtectedMutated = 0, totalProtectedAbility = 0, totalProtectedIncubator = 0, totalProtectedBusy = 0,
+        totalFailedNotConfirmed = 0, lastBatchSize = 0, lastError = nil,
+    }
+    local function emit(message, force)
+        if type(logSink) ~= "function" then return end
+        local key = tostring(message)
+        if force or key ~= lastLogKey then lastLogKey = key; pcall(logSink, "[AutoSell] " .. key) end
+    end
+    local function invalidateEvaluation(reason)
+        lastRosterFingerprint = nil
+        configRevision = configRevision + 1
+        wakeEvaluation = true
+        if reason then
+            emit("Evaluation forced by config change — " .. tostring(reason), true)
+        end
+    end
+    local function setStatus(nextStatus, detail)
+        status = nextStatus
+        if detail then emit(nextStatus .. " — " .. tostring(detail)) else emit(nextStatus) end
+    end
+        local function sleep(seconds)
+        task.wait(seconds)
+    end
+
+    local function spawn(fn)
+        if task and type(task.spawn) == "function" then return task.spawn(fn) end
+        return coroutine.wrap(fn)()
+    end
+    local function copyMap(source)
+        local result = {}
+        for key, value in pairs(source or {}) do result[key] = value end
+        return result
+    end
+    local function copyArray(source)
+        local result = {}
+        for i, value in ipairs(source or {}) do result[i] = value end
+        return result
+    end
+    local function readRoster()
+        local ok, roster = pcall(DataController.roster)
+        if not ok or type(roster) ~= "table" then return nil, "ROSTER UNAVAILABLE" end
+        return roster
+    end
+    local function rarityCatalog() return Catalog.Rarity or Catalog.rarity or {} end
+    local function rarityRank(rarityId)
+        local rarity = rarityCatalog()
+        if type(rarity.rankOf) == "function" then
+            local ok, rank = pcall(rarity.rankOf, rarityId)
+            if ok and type(rank) == "number" then return rank end
+        end
+        if type(rarity.rank) == "table" and type(rarity.rank[rarityId]) == "number" then return rarity.rank[rarityId] end
+        return math.huge
+    end
+    local function getAvailableRarities()
+        local rarity, result, seen = rarityCatalog(), {}, {}
+        local rankTable = rarity.rank
+        if type(rankTable) == "table" then
+            for id in pairs(rankTable) do
+                if type(id) == "string" and not seen[id] then seen[id] = true; table.insert(result, id) end
+            end
+        end
+        table.sort(result, function(a, b)
+            local ar, br = rarityRank(a), rarityRank(b)
+            if ar == br then return a < b end
+            return ar < br
+        end)
+        return result
+    end
+    local function resolveRarity(chicken)
+        if chicken.rarity ~= nil then return chicken.rarity end
+        local typeDef = chicken.typeId and Catalog.chickenTypes and Catalog.chickenTypes[chicken.typeId]
+        if typeDef and typeDef.rarity ~= nil then return typeDef.rarity end
+        local defaultType = Catalog.defaultChickenType
+        return defaultType and defaultType.rarity or nil
+    end
+    local function resolveAbility(chicken)
+        local ability = chicken.ability
+        if ability == nil then
+            local typeDef = chicken.typeId and Catalog.chickenTypes and Catalog.chickenTypes[chicken.typeId]
+            ability = typeDef and typeDef.signature or nil
+        end
+        if ability == nil then
+            local defaultType = Catalog.defaultChickenType
+            ability = defaultType and defaultType.signature or nil
+        end
+        if ability == nil then ability = "beyblade" end
+        return ability
+    end
+    local function resolveMutationId(chicken)
+        if type(chicken) ~= "table" then return nil end
+        local mutation = chicken.mutation
+        if mutation == nil then return nil end
+
+        if type(mutation) == "string" or type(mutation) == "number" then
+            local id = string.lower(tostring(mutation))
+            return id ~= "" and id or nil
+        end
+
+        -- Future-proof fallback if the game later changes mutation from a
+        -- plain string id into a small descriptor table.
+        if type(mutation) == "table" then
+            local raw = mutation.id or mutation.mutationId or mutation.typeId or mutation.name
+            if raw ~= nil then
+                local id = string.lower(tostring(raw))
+                return id ~= "" and id or nil
+            end
+        end
+
+        return nil
+    end
+
+    local function getAvailableMutations()
+        local result, seen = {}, {}
+        local roster = readRoster()
+        if type(roster) == "table" then
+            for _, chicken in ipairs(roster.chickens or {}) do
+                local mutationId = resolveMutationId(chicken)
+                if mutationId ~= nil and not seen[mutationId] then
+                    seen[mutationId] = true
+                    table.insert(result, mutationId)
+                end
+            end
+        end
+
+        -- Keep explicitly unchecked ids visible after config restore even when
+        -- no current chicken happens to carry that mutation.
+        for mutationId, excluded in pairs(unprotectedMutations) do
+            if excluded == true and not seen[mutationId] then
+                seen[mutationId] = true
+                table.insert(result, mutationId)
+            end
+        end
+
+        table.sort(result)
+        return result
+    end
+
+    local function getAvailableAbilities()
+        local result, abilities = {}, Catalog.abilities
+        if type(abilities) ~= "table" then return result end
+        for key, definition in pairs(abilities) do
+            if type(key) == "string" then
+                table.insert(result, {
+                    id = definition and definition.id or key,
+                    name = definition and definition.name or key,
+                    rarity = definition and definition.rarity or nil,
+                })
+            end
+        end
+        table.sort(result, function(a, b) return tostring(a.id) < tostring(b.id) end)
+        return result
+    end
+    local function getIncubatorDecision()
+        if type(deps.getIncubatorOccupantId) == "function" then
+            local ok, occupantId = pcall(deps.getIncubatorOccupantId)
+            if ok and occupantId ~= nil then return "ID", occupantId end
+        end
+        if type(deps.isIncubatorOccupied) == "function" then
+            local ok, isOccupied = pcall(deps.isIncubatorOccupied)
+            if not ok then return "PAUSE", nil end
+            if isOccupied == true then return "PAUSE", nil end
+            return "NONE", nil
+        end
+        return "UNAVAILABLE", nil
+    end
+    local function globalPauseReason()
+        local incubatorMode = getIncubatorDecision()
+        if incubatorMode == "PAUSE" then return "PAUSED — INCUBATOR OCCUPIED" end
+        if type(deps.isTradeActive) == "function" then
+            local ok, active = pcall(deps.isTradeActive)
+            if not ok or active == true then return "PAUSED — TRADE ACTIVE" end
+        end
+        if type(deps.isFusionActive) == "function" then
+            local ok, active = pcall(deps.isFusionActive)
+            if not ok or active == true then return "PAUSED — FUSION ACTIVE" end
+        end
+        return nil
+    end
+    local function makeLookup(roster)
+        local lookup = {}
+        for _, chicken in ipairs(roster.chickens or {}) do
+            if type(chicken) == "table" and chicken.id ~= nil then lookup[chicken.id] = chicken end
+        end
+        return lookup
+    end
+    local function evaluateChicken(chicken, roster, incubatorMode, incubatorId)
+        stats.totalEvaluated = stats.totalEvaluated + 1
+        local rarity = resolveRarity(chicken)
+        local ability = resolveAbility(chicken)
+        local function decide(shouldSell, reason)
+            emit(string.format("id=%s rarity=%s ability=%s decision=%s",
+                tostring(chicken.id), tostring(rarity), tostring(ability), tostring(reason)))
+            return shouldSell, reason
+        end
+        if chicken.id == roster.activeId then
+            stats.totalProtectedActive = stats.totalProtectedActive + 1
+            return decide(false, "KEEP_ACTIVE")
+        end
+        if protectFavorites and chicken.favorite == true then
+            stats.totalProtectedFavorite = stats.totalProtectedFavorite + 1
+            return decide(false, "KEEP_FAVORITE")
+        end
+        if incubatorMode == "ID" and chicken.id == incubatorId then
+            stats.totalProtectedIncubator = stats.totalProtectedIncubator + 1
+            return decide(false, "KEEP_INCUBATOR")
+        end
+        if type(deps.isChickenBusy) == "function" then
+            local ok, busy = pcall(deps.isChickenBusy, chicken.id)
+            if not ok or busy == true then
+                stats.totalProtectedBusy = stats.totalProtectedBusy + 1
+                return decide(false, "KEEP_BUSY")
+            end
+        end
+        local mutationId = resolveMutationId(chicken)
+        if mutationId ~= nil and unprotectedMutations[mutationId] ~= true then
+            stats.totalProtectedMutated = stats.totalProtectedMutated + 1
+            return decide(false, "KEEP_MUTATION:" .. mutationId)
+        end
+        if abilityWhitelist[ability] then
+            stats.totalProtectedAbility = stats.totalProtectedAbility + 1
+            return decide(false, "KEEP_ABILITY")
+        end
+        -- normalize rarity key to lowercase string for map lookup (Catalog uses lowercase ids)
+        local rarityKey = rarity ~= nil and string.lower(tostring(rarity)) or nil
+        if rarityKey ~= nil and selectedRarities[rarityKey] then
+            return decide(true, "SELL")
+        end
+        -- also try exact key if catalog already lowercase
+        if rarity ~= nil and selectedRarities[rarity] then
+            return decide(true, "SELL")
+        end
+        return decide(false, "KEEP_RARITY")
+    end
+    local function collectCandidates(roster)
+        local incubatorMode, incubatorId = getIncubatorDecision()
+        local ids, reasons = {}, {}
+        if incubatorMode == "PAUSE" then return nil, reasons, "PAUSED — INCUBATOR OCCUPIED" end
+        for _, chicken in ipairs(roster.chickens or {}) do
+            if type(chicken) == "table" and chicken.id ~= nil then
+                local shouldSell, reason = evaluateChicken(chicken, roster, incubatorMode, incubatorId)
+                reasons[chicken.id] = reason
+                if shouldSell then table.insert(ids, chicken.id) end
+            end
+        end
+        return ids, reasons, nil
+    end
+    local function revalidateBatch(candidateIds)
+        local roster, err = readRoster()
+        if not roster then return {}, err end
+        local pause = globalPauseReason()
+        if pause then return {}, pause end
+        local incubatorMode, incubatorId = getIncubatorDecision()
+        if incubatorMode == "PAUSE" then return {}, "PAUSED — INCUBATOR OCCUPIED" end
+        local lookup, finalIds = makeLookup(roster), {}
+        for _, id in ipairs(candidateIds) do
+            local chicken = lookup[id]
+            if chicken and evaluateChicken(chicken, roster, incubatorMode, incubatorId) then
+                table.insert(finalIds, id)
+            end
+        end
+        return finalIds, nil
+    end
+    local function waitForConfirmation(requestedIds, requestGeneration)
+        local deadline = os.clock() + confirmationTimeout
+        local confirmed = {}
+        while os.clock() < deadline do
+            if destroyed or not enabled or requestGeneration ~= generation then return confirmed, "CANCELLED" end
+            local roster = readRoster()
+            if type(roster) == "table" then
+                local lookup = makeLookup(roster)
+                local count = 0
+                for _, id in ipairs(requestedIds) do
+                    if not confirmed[id] and lookup[id] == nil then confirmed[id] = true end
+                    if confirmed[id] then count = count + 1 end
+                end
+                if count == #requestedIds then break end
+            end
+            sleep(0.25)
+        end
+        return confirmed, nil
+    end
+    local function fingerprint(roster)
+        local parts = {}
+        for _, chicken in ipairs(roster.chickens or {}) do
+            if type(chicken) == "table" then
+                table.insert(parts, tostring(chicken.id) .. ":" .. tostring(chicken.level) .. ":" .. tostring(chicken.favorite) .. ":" .. tostring(chicken.mutation) .. ":" .. tostring(chicken.ability))
+            end
+        end
+        table.sort(parts)
+        return table.concat(parts, "|") .. "|active=" .. tostring(roster.activeId)
+    end
+    local function performEvaluation(workerGeneration)
+        if destroyed or not enabled or workerGeneration ~= generation or sellInProgress then return end
+        local pause = globalPauseReason()
+        if pause then setStatus(pause) return end
+        setStatus("SCANNING")
+        local roster, rosterError = readRoster()
+        if not roster then
+            lastError = rosterError; stats.lastError = rosterError
+            setStatus("ERROR", rosterError) return
+        end
+        local currentFingerprint = fingerprint(roster) .. "|cfg=" .. tostring(configRevision)
+        if currentFingerprint == lastRosterFingerprint then setStatus("IDLE") return end
+        lastRosterFingerprint = currentFingerprint
+        -- log selected rarities once per forced eval
+        do
+            local sel = {}
+            for id, on in pairs(selectedRarities) do if on then table.insert(sel, id) end end
+            table.sort(sel)
+            emit("Selected rarities: " .. (#sel > 0 and table.concat(sel, ", ") or "(none)"), true)
+        end
+        local candidateIds, _, collectionError = collectCandidates(roster)
+        if collectionError then setStatus(collectionError) return end
+        if #candidateIds == 0 then setStatus("NO MATCHING CHICKENS") return end
+        setStatus("CANDIDATES FOUND", tostring(#candidateIds))
+        local offset = 1
+        while offset <= #candidateIds and enabled and not destroyed and workerGeneration == generation do
+            local requested = {}
+            for index = offset, math.min(offset + maxBatchSize - 1, #candidateIds) do
+                table.insert(requested, candidateIds[index])
+            end
+            offset = offset + #requested
+            local finalIds, validationError = revalidateBatch(requested)
+            if validationError then
+                lastError = validationError; stats.lastError = validationError
+                setStatus(validationError) return
+            end
+            if #finalIds == 0 then continue end
+            stats.lastBatchSize = #finalIds
+
+            -- FINAL DESTRUCTIVE GATE.
+            -- Roster changes (including hatching) may wake old callbacks, but
+            -- no sell remote is allowed unless Auto Sell is explicitly armed
+            -- *right now* and this worker still belongs to the current generation.
+            if not enabled
+                or not userArmed
+                or State.toggles.autoSell ~= true
+                or workerGeneration ~= generation
+                or destroyed then
+                sellInProgress = false
+                setStatus("DISABLED")
+                return
+            end
+
+            sellInProgress = true
+            setStatus("SELLING", tostring(#finalIds))
+            local requestGeneration = generation
+            local ok, response = pcall(Remotes.invoke, Remotes.defs.SellChickens, finalIds)
+            if not ok then
+                sellInProgress = false
+                lastError = tostring(response); stats.lastError = lastError
+                stats.totalFailedNotConfirmed = stats.totalFailedNotConfirmed + #finalIds
+                setStatus("ERROR", lastError)
+                sleep(retryDelay)
+                continue
+            end
+            setStatus("WAITING CONFIRMATION")
+            local confirmed = waitForConfirmation(finalIds, requestGeneration)
+            sellInProgress = false
+            local confirmedCount = 0
+            for _, id in ipairs(finalIds) do
+                if confirmed[id] then
+                    confirmedCount = confirmedCount + 1
+                    stats.totalSoldConfirmed = stats.totalSoldConfirmed + 1
+                else
+                    stats.totalFailedNotConfirmed = stats.totalFailedNotConfirmed + 1
+                end
+            end
+            if confirmedCount == #finalIds then setStatus("CONFIRMED")
+            else setStatus("WAITING CONFIRMATION", "partial"); sleep(retryDelay) end
+        end
+    end
+    local function scheduleEvaluation()
+        if destroyed or not enabled or not userArmed or State.toggles.autoSell ~= true then
+            return
+        end
+        wakeEvaluation = true
+    end
+    local function worker(workerGeneration)
+        while not destroyed and enabled and workerGeneration == generation do
+            if wakeEvaluation or rosterUnsubscribe == nil then
+                wakeEvaluation = false
+                performEvaluation(workerGeneration)
+            end
+            if rosterUnsubscribe ~= nil then sleep(0.25) else sleep(pollInterval) end
+        end
+        if workerGeneration == generation then sellInProgress = false end
+    end
+    local api = {}
+    function api.setAutoSell(value)
+        if destroyed then return false end
+        local nextValue = value == true
+
+        -- Always synchronize backend, UI intent, and destructive arming.
+        State.toggles.autoSell = nextValue
+        userArmed = nextValue
+
+        if enabled == nextValue then
+            if not nextValue and type(rosterUnsubscribe) == "function" then
+                pcall(rosterUnsubscribe)
+                rosterUnsubscribe = nil
+            end
+            return true
+        end
+
+        generation = generation + 1
+        enabled = nextValue
+        sellInProgress = false
+        lastRosterFingerprint = nil
+        configRevision = configRevision + 1
+        wakeEvaluation = nextValue
+
+        if not enabled then
+            -- Important: detach roster subscription immediately. A hatch causes
+            -- a roster update, so leaving this callback connected can wake stale
+            -- Auto Sell work even though the toggle is visually OFF.
+            if type(rosterUnsubscribe) == "function" then pcall(rosterUnsubscribe) end
+            rosterUnsubscribe = nil
+            setStatus("DISABLED")
+            return true
+        end
+
+        setStatus("IDLE")
+        emit("Auto Sell enabled — fresh evaluation", true)
+        if type(deps.subscribeRoster) == "function" then
+            local ok, unsubscribe = pcall(deps.subscribeRoster, scheduleEvaluation)
+            if ok and type(unsubscribe) == "function" then
+                rosterUnsubscribe = unsubscribe
+            else
+                rosterUnsubscribe = nil
+            end
+        end
+        local workerGeneration = generation
+        spawn(function() worker(workerGeneration) end)
+        return true
+    end
+    function api.isEnabled() return enabled end
+    function api.setRaritySelected(rarityId, value)
+        if type(rarityId) ~= "string" or rarityId == "" then return false end
+        local key = string.lower(rarityId)
+        selectedRarities[key] = value == true
+        invalidateEvaluation("rarity:" .. key .. "=" .. tostring(value == true))
+        return true
+    end
+    function api.isRaritySelected(rarityId)
+        if type(rarityId) ~= "string" then return false end
+        return selectedRarities[string.lower(rarityId)] == true or selectedRarities[rarityId] == true
+    end
+    function api.getSelectedRarities()
+        local result = {}
+        for id, selected in pairs(selectedRarities) do if selected then table.insert(result, id) end end
+        table.sort(result, function(a, b)
+            local ar, br = rarityRank(a), rarityRank(b)
+            if ar == br then return a < b end
+            return ar < br
+        end)
+        return result
+    end
+    function api.clearRaritySelection() selectedRarities = {}; invalidateEvaluation("clear rarities") end
+    function api.selectAllRarities()
+        for _, id in ipairs(getAvailableRarities()) do selectedRarities[string.lower(id)] = true end
+        invalidateEvaluation("select all rarities")
+    end
+    function api.getAvailableRarities() return getAvailableRarities() end
+    function api.setMutationProtected(mutationId, value)
+        mutationId = string.lower(tostring(mutationId or ""))
+        if mutationId == "" then return false end
+        if value == true then
+            unprotectedMutations[mutationId] = nil
+        else
+            unprotectedMutations[mutationId] = true
+        end
+        invalidateEvaluation("mutationProtected:" .. mutationId .. "=" .. tostring(value == true))
+        return true
+    end
+
+    function api.isMutationProtected(mutationId)
+        mutationId = string.lower(tostring(mutationId or ""))
+        return mutationId ~= "" and unprotectedMutations[mutationId] ~= true
+    end
+
+    function api.getAvailableMutations()
+        return getAvailableMutations()
+    end
+
+    function api.getProtectedMutations()
+        local result = {}
+        for _, mutationId in ipairs(getAvailableMutations()) do
+            if unprotectedMutations[mutationId] ~= true then
+                table.insert(result, mutationId)
+            end
+        end
+        return result
+    end
+
+    function api.getUnprotectedMutations()
+        local result = {}
+        for mutationId, excluded in pairs(unprotectedMutations) do
+            if excluded == true then table.insert(result, mutationId) end
+        end
+        table.sort(result)
+        return result
+    end
+
+    function api.clearMutationProtectionExclusions()
+        unprotectedMutations = {}
+        invalidateEvaluation("mutation protection reset")
+    end
+
+    function api.setMutationUnprotected(mutationId, value)
+        -- Config-oriented alias. true means this mutation may be sold.
+        return api.setMutationProtected(mutationId, value ~= true)
+    end
+    function api.setProtectFavorites(value) protectFavorites = value == true; invalidateEvaluation("protectFavorites=" .. tostring(value == true)) end
+    function api.getProtectFavorites() return protectFavorites end
+    function api.setAbilityWhitelisted(abilityId, value)
+        if type(abilityId) ~= "string" or abilityId == "" then return false end
+        abilityWhitelist[abilityId] = value == true
+        invalidateEvaluation("ability:" .. abilityId .. "=" .. tostring(value == true))
+        return true
+    end
+    function api.isAbilityWhitelisted(abilityId) return abilityWhitelist[abilityId] == true end
+    function api.getAbilityWhitelist() return copyMap(abilityWhitelist) end
+    function api.getAvailableAbilities() return getAvailableAbilities() end
+    function api.clearAbilityWhitelist() abilityWhitelist = {}; invalidateEvaluation("clear ability whitelist") end
+    function api.setMaxBatchSize(value)
+        local number = tonumber(value)
+        if not number then return false end
+        maxBatchSize = math.clamp(math.floor(number), 1, 100)
+        return true
+    end
+    function api.getMaxBatchSize() return maxBatchSize end
+    function api.getStatus() return status end
+    function api.getStats()
+        local result = copyMap(stats)
+        result.selectedRarities = copyArray(api.getSelectedRarities())
+        result.abilityWhitelist = copyMap(abilityWhitelist)
+        result.protectedMutations = copyArray(api.getProtectedMutations())
+        result.unprotectedMutations = copyArray(api.getUnprotectedMutations())
+        result.maxBatchSize = maxBatchSize
+        return result
+    end
+    function api.destroy()
+        if destroyed then return end
+        destroyed = true
+        enabled = false
+        userArmed = false
+        State.toggles.autoSell = false
+        generation = generation + 1
+        sellInProgress = false
+        if type(rosterUnsubscribe) == "function" then pcall(rosterUnsubscribe) end
+        rosterUnsubscribe = nil
+        setStatus("DISABLED")
+    end
+    return api
+end
+
+--------------------------------------------------------------------
+-- createAutoCollectEggs (NestEgg — preserved)
+--------------------------------------------------------------------
+local function createAutoCollectEggs(deps)
+    assert(type(deps) == "table", "createAutoCollectEggs(deps) requires a dependency table")
+    local CollectionService = assert(deps.CollectionService, "CollectionService is required")
+    local PlayersSvc = assert(deps.Players, "Players is required")
+    local TweenSvc = assert(deps.TweenService, "TweenService is required")
+    local LP = assert(deps.LocalPlayer or PlayersSvc.LocalPlayer, "LocalPlayer is required")
+    local movement = deps.movement
+    local DataController = deps.DataController
+    local logSink = deps.log
+    local PRIORITY = "AUTO_COLLECT_EGG"
+    local MODES = { Walk = true, Tween = true, Teleport = true }
+    local trackedEggs, attributeWaits, connections, temporaryConnections = {}, {}, {}, {}
+    local serial, generation, workerRunning, enabled, destroyed = 0, 0, false, false, false
+    local movementLease, activeTw, activeTweenConnection, activeMoveConnection = nil, nil, nil, nil
+    local currentTarget, movementMode, status, lastError = nil, "Tween", "DISABLED", nil
+    local inventoryConfirmation, retryCount, failedUntil = "UNAVAILABLE", 0, {}
+    local CONFIG = {
+        attributeWaitSeconds = 1.25, pollSeconds = 0.25, arrivalDistance = 3.5, arrivalHeight = 2.25,
+        collectionTimeout = 4.5, maxRetries = 3, retryDelay = 0.7, failedCooldown = 8,
+        positionRefreshDistance = 2.5, tweenDuration = 0.65, inventoryConfirmSeconds = 0.9,
+    }
+    local function now() return os.clock() end
+    local function clog(message)
+        if type(logSink) == "function" then pcall(logSink, "[CollectEgg] " .. tostring(message)) end
+    end
+    local function setStatus(nextStatus, detail)
+        status = nextStatus
+        if detail ~= nil then lastError = tostring(detail) end
+    end
+    local function disconnect(connection)
+        if connection then pcall(function() connection:Disconnect() end) end
+    end
+    local function disconnectList(list)
+        for key, connection in pairs(list) do disconnect(connection); list[key] = nil end
+    end
+    local function isValidInstance(instance)
+        return instance and instance:IsA("BasePart") and instance.Parent ~= nil and CollectionService:HasTag(instance, "NestEgg")
+    end
+    local function getRootAndHumanoid()
+        local character = LP.Character
+        if not character then return nil, nil end
+        local root = character:FindFirstChild("HumanoidRootPart")
+        local humanoid = character:FindFirstChildOfClass("Humanoid")
+        if not (root and root:IsA("BasePart") and humanoid and humanoid.Health > 0) then return nil, nil end
+        return root, humanoid
+    end
+    local function horizontalDistance(a, b)
+        local delta = a - b
+        return Vector3.new(delta.X, 0, delta.Z).Magnitude
+    end
+    local function safeInventory()
+        if type(deps.getRoster) == "function" then
+            local ok, roster = pcall(deps.getRoster)
+            if ok and type(roster) == "table" then return roster end
+        end
+        if DataController and type(DataController.roster) == "function" then
+            local ok, roster = pcall(function() return DataController.roster() end)
+            if ok and type(roster) == "table" then return roster end
+        end
+        return nil
+    end
+    local function inventoryAmount(tier)
+        local roster = safeInventory()
+        if not roster or type(roster.eggs) ~= "table" then return nil end
+        local value = roster.eggs[tier]
+        return type(value) == "number" and value or nil
+    end
+    local function clearAttributeWait(instance)
+        local waitState = attributeWaits[instance]
+        if not waitState then return end
+        for _, connection in pairs(waitState.connections) do disconnect(connection) end
+        attributeWaits[instance] = nil
+    end
+    local function removeTracked(instance)
+        clearAttributeWait(instance)
+        trackedEggs[instance] = nil
+        failedUntil[instance] = nil
+        if currentTarget == instance then currentTarget = nil end
+    end
+    local function registerReady(instance)
+        if destroyed or not isValidInstance(instance) then return false end
+        local owner = instance:GetAttribute("owner")
+        local tier = instance:GetAttribute("tier")
+        if owner == nil or tier == nil then return false end
+        if owner ~= LP.UserId then removeTracked(instance) return false end
+        serial = serial + 1
+        local existing = trackedEggs[instance]
+        local record = existing or { serial = serial, retries = 0 }
+        record.tier = tier
+        record.position = instance.Position - Vector3.new(0, instance.Size.Y / 2, 0)
+        record.rawPosition = instance.Position
+        record.inventoryBefore = inventoryAmount(tier)
+        record.lastSeen = now()
+        trackedEggs[instance] = record
+        clearAttributeWait(instance)
+        if not existing then clog(("NestEgg detected | tier = %s"):format(tostring(tier))) end
+        return true
+    end
+    local function waitForAttributes(instance)
+        if destroyed or attributeWaits[instance] or trackedEggs[instance] then return end
+        if not instance or not instance:IsA("BasePart") then return end
+        local deadline = now() + CONFIG.attributeWaitSeconds
+        local waitState = { connections = {}, deadline = deadline }
+        attributeWaits[instance] = waitState
+        local function tryReady()
+            if destroyed or not isValidInstance(instance) then clearAttributeWait(instance) return end
+            if instance:GetAttribute("owner") ~= nil and instance:GetAttribute("tier") ~= nil then
+                registerReady(instance)
+            end
+        end
+        waitState.connections.owner = instance:GetAttributeChangedSignal("owner"):Connect(tryReady)
+        waitState.connections.tier = instance:GetAttributeChangedSignal("tier"):Connect(tryReady)
+        temporaryConnections[instance] = task.spawn(function()
+            while not destroyed and attributeWaits[instance] == waitState and now() < deadline do
+                tryReady()
+                if not attributeWaits[instance] then return end
+                task.wait(0.1)
+            end
+            if attributeWaits[instance] == waitState then clearAttributeWait(instance) end
+            temporaryConnections[instance] = nil
+        end)
+        tryReady()
+    end
+    local function onAdded(instance)
+        if not instance or not instance:IsA("BasePart") then return end
+        if instance:GetAttribute("owner") == nil or instance:GetAttribute("tier") == nil then
+            waitForAttributes(instance) return
+        end
+        registerReady(instance)
+    end
+    local function inventoryConfirmationFor(record)
+        if not record or record.inventoryBefore == nil then
+            inventoryConfirmation = "UNAVAILABLE" return
+        end
+        local deadline = now() + CONFIG.inventoryConfirmSeconds
+        while not destroyed and now() < deadline do
+            local currentAmount = inventoryAmount(record.tier)
+            if currentAmount ~= nil then
+                if currentAmount > record.inventoryBefore then
+                    inventoryConfirmation = "AVAILABLE — INCREASE OBSERVED" return
+                end
+                inventoryConfirmation = "AVAILABLE — INCREASE NOT OBSERVED"
+            end
+            task.wait(0.1)
+        end
+    end
+    local function onRemoved(instance)
+        local record = trackedEggs[instance]
+        local wasTarget = currentTarget == instance
+        if not record then clearAttributeWait(instance) return end
+        removeTracked(instance)
+        if not wasTarget or destroyed then return end
+        setStatus("COLLECTED")
+        clog(("Target removed | tier = %s"):format(tostring(record.tier)))
+        inventoryConfirmation = "UNAVAILABLE"
+        inventoryConfirmationFor(record)
+        if enabled and not destroyed then currentTarget = nil end
+    end
+    local function initialScan()
+        for _, instance in CollectionService:GetTagged("NestEgg") do onAdded(instance) end
+    end
+    local function releaseMovement()
+        if activeTw then pcall(function() activeTw:Cancel() end) activeTw = nil end
+        disconnect(activeTweenConnection); activeTweenConnection = nil
+        disconnect(activeMoveConnection); activeMoveConnection = nil
+        if movementLease ~= nil and movement and type(movement.release) == "function" then
+            pcall(movement.release, movementLease)
+        end
+        movementLease = nil
+    end
+    local function movementAvailable()
+        if not movement then return true end
+        if type(movement.canRun) == "function" then
+            local ok, result = pcall(movement.canRun, movement, PRIORITY)
+            if ok and result == false then return false end
+        end
+        if type(movement.isBlocked) == "function" then
+            local ok, result = pcall(movement.isBlocked, movement, PRIORITY)
+            if ok and result == true then return false end
+        end
+        return true
+    end
+    local function acquireMovement()
+        if movementLease ~= nil then return true end
+        if not movementAvailable() then setStatus("PAUSED MOVEMENT BUSY") return false end
+        if movement and type(movement.tryAcquire) == "function" then
+            local ok, lease = pcall(movement.tryAcquire, movement, PRIORITY)
+            if not ok or lease == false or lease == nil then
+                setStatus("PAUSED MOVEMENT BUSY") return false
+            end
+            movementLease = lease
+        end
+        return true
+    end
+    local function targetStillValid(instance)
+        return enabled and not destroyed and trackedEggs[instance] ~= nil and isValidInstance(instance)
+    end
+    local function chooseTarget()
+        local root = select(1, getRootAndHumanoid())
+        if not root then return nil end
+        local best, bestDistance, bestSerial
+        local currentTime = now()
+        for instance, record in pairs(trackedEggs) do
+            if isValidInstance(instance) and instance:GetAttribute("owner") == LP.UserId then
+                record.position = instance.Position - Vector3.new(0, instance.Size.Y / 2, 0)
+                record.rawPosition = instance.Position
+                local blockedUntil = failedUntil[instance] or 0
+                if currentTime >= blockedUntil then
+                    local distance = horizontalDistance(root.Position, record.rawPosition)
+                    if not bestDistance or distance < bestDistance or (distance == bestDistance and record.serial < bestSerial) then
+                        best = instance; bestDistance = distance; bestSerial = record.serial
+                    end
+                end
+            else
+                removeTracked(instance)
+            end
+        end
+        return best, bestDistance
+    end
+    local function targetDistance(instance)
+        local root = select(1, getRootAndHumanoid())
+        if not root or not trackedEggs[instance] or not isValidInstance(instance) then return nil end
+        return horizontalDistance(root.Position, instance.Position)
+    end
+    local function waitForCollection(instance, token)
+        setStatus("WAITING COLLECTION")
+        local deadline = now() + CONFIG.collectionTimeout
+        while enabled and not destroyed and generation == token do
+            if not targetStillValid(instance) then return true end
+            if now() >= deadline then return false end
+            task.wait(CONFIG.pollSeconds)
+        end
+        return true
+    end
+    local function walkTo(instance, token)
+        local root, humanoid = getRootAndHumanoid()
+        if not root or not humanoid then return false, "character unavailable" end
+        local record = trackedEggs[instance]
+        if not record then return true end
+        setStatus("MOVING")
+        humanoid:MoveTo(record.rawPosition)
+        local moveFinished = false
+        activeMoveConnection = humanoid.MoveToFinished:Connect(function() moveFinished = true end)
+        local deadline = now() + CONFIG.collectionTimeout
+        local lastDestination = record.rawPosition
+        while enabled and not destroyed and generation == token and targetStillValid(instance) do
+            local currentRoot = select(1, getRootAndHumanoid())
+            if not currentRoot then break end
+            local currentRecord = trackedEggs[instance]
+            if not currentRecord then return true end
+            if horizontalDistance(currentRoot.Position, instance.Position) <= CONFIG.arrivalDistance then
+                setStatus("ARRIVED") return true
+            end
+            if horizontalDistance(lastDestination, currentRecord.rawPosition) >= CONFIG.positionRefreshDistance then
+                lastDestination = currentRecord.rawPosition
+                humanoid:MoveTo(lastDestination)
+            end
+            if now() >= deadline then break end
+            task.wait(CONFIG.pollSeconds)
+        end
+        disconnect(activeMoveConnection); activeMoveConnection = nil
+        return targetStillValid(instance), "walk timeout"
+    end
+    local function tweenTo(instance, token)
+        local root = select(1, getRootAndHumanoid())
+        if not root then return false, "character unavailable" end
+        local record = trackedEggs[instance]
+        if not record then return true end
+        setStatus("MOVING")
+        local destination = instance.Position + Vector3.new(0, CONFIG.arrivalHeight, 0)
+        -- Match the smoother Hot Egg / Event Capsule tween profile.
+        -- Distance-based timing avoids slow long-distance Walk/pathing and reduces
+        -- the chance of getting stuck behind fences or coop geometry.
+        local distance = (root.Position - destination).Magnitude
+        local duration = math.clamp(distance / 48, 0.12, 1.8)
+        local tween = TweenSvc:Create(root, TweenInfo.new(
+            duration,
+            Enum.EasingStyle.Quad,
+            Enum.EasingDirection.Out
+        ), {
+            CFrame = CFrame.new(destination),
+        })
+        activeTw = tween
+        local completed = false
+        activeTweenConnection = tween.Completed:Connect(function() completed = true end)
+        tween:Play()
+        while enabled and not destroyed and generation == token and targetStillValid(instance) and not completed do
+            task.wait(CONFIG.pollSeconds)
+        end
+        if activeTw == tween then activeTw = nil end
+        disconnect(activeTweenConnection); activeTweenConnection = nil
+        if not targetStillValid(instance) then return true end
+        setStatus("ARRIVED")
+        return true
+    end
+    local function teleportTo(instance)
+        local root = select(1, getRootAndHumanoid())
+        if not root then return false, "character unavailable" end
+        local record = trackedEggs[instance]
+        if not record or not targetStillValid(instance) then return true end
+        setStatus("MOVING")
+        root.CFrame = CFrame.new(instance.Position + Vector3.new(0, CONFIG.arrivalHeight, 0))
+        setStatus("ARRIVED")
+        return true
+    end
+    local function moveToTarget(instance, token)
+        if not acquireMovement() then return false, "movement busy" end
+        if movementMode == "Walk" then return walkTo(instance, token)
+        elseif movementMode == "Tween" then return tweenTo(instance, token)
+        elseif movementMode == "Teleport" then return teleportTo(instance) end
+        return false, "invalid movement mode"
+    end
+    local function handleTargetFailure(instance)
+        local record = trackedEggs[instance]
+        if not record then return end
+        record.retries = (record.retries or 0) + 1
+        retryCount = record.retries
+        if record.retries <= CONFIG.maxRetries then
+            failedUntil[instance] = now() + CONFIG.retryDelay
+        else
+            failedUntil[instance] = now() + CONFIG.failedCooldown
+        end
+        setStatus("RETRYING")
+    end
+    local function worker(token)
+        if workerRunning then return end
+        workerRunning = true
+        while enabled and not destroyed and generation == token do
+            if not movementAvailable() then
+                releaseMovement()
+                setStatus("PAUSED MOVEMENT BUSY")
+                task.wait(CONFIG.pollSeconds)
+                continue
+            end
+            local target = chooseTarget()
+            if not target then
+                releaseMovement()
+                setStatus(next(trackedEggs) and "SEARCHING" or "NO EGGS")
+                task.wait(CONFIG.pollSeconds)
+                continue
+            end
+            currentTarget = target
+            local moved, moveError = moveToTarget(target, token)
+            if not enabled or destroyed or generation ~= token then break end
+            if not moved then
+                if moveError == "movement busy" then setStatus("PAUSED MOVEMENT BUSY")
+                else lastError = moveError; setStatus("ERROR", moveError) end
+                releaseMovement()
+                task.wait(CONFIG.pollSeconds)
+                continue
+            end
+            if targetStillValid(target) then
+                local collected = waitForCollection(target, token)
+                if collected and not targetStillValid(target) then
+                    setStatus("COLLECTED")
+                else
+                    handleTargetFailure(target)
+                end
+            end
+            releaseMovement()
+            currentTarget = nil
+        end
+        releaseMovement()
+        workerRunning = false
+    end
+    local function startWorker()
+        if workerRunning or destroyed then return end
+        generation = generation + 1
+        local token = generation
+        task.spawn(function()
+            local ok, err = xpcall(function() worker(token) end, debug.traceback)
+            if not ok and not destroyed and generation == token then
+                lastError = tostring(err)
+                setStatus("ERROR", err)
+                workerRunning = false
+                releaseMovement()
+            end
+        end)
+    end
+    local function setAutoCollectEggs(value)
+        if destroyed then return false end
+        enabled = value == true
+        generation = generation + 1
+        if not enabled then
+            setStatus("DISABLED")
+            currentTarget = nil
+            releaseMovement()
+            return true
+        end
+        lastError = nil
+        setStatus("SEARCHING")
+        startWorker()
+        return true
+    end
+    local function setMovementMode(mode)
+        if type(mode) ~= "string" or not MODES[mode] then return false end
+        if movementMode ~= mode then releaseMovement() end
+        movementMode = mode
+        return true
+    end
+    local function getTrackedEggs()
+        local result = {}
+        for instance, record in pairs(trackedEggs) do
+            if isValidInstance(instance) and instance:GetAttribute("owner") == LP.UserId then
+                table.insert(result, {
+                    instance = instance, tier = record.tier, position = record.position,
+                    distance = targetDistance(instance), retries = record.retries or 0,
+                })
+            end
+        end
+        return result
+    end
+    local function getStatus()
+        return {
+            state = status, enabled = enabled, movementMode = movementMode,
+            trackedEggCount = #getTrackedEggs(),
+            currentTargetTier = currentTarget and trackedEggs[currentTarget] and trackedEggs[currentTarget].tier or nil,
+            currentTargetDistance = currentTarget and targetDistance(currentTarget) or nil,
+            inventoryConfirmation = inventoryConfirmation, retryCount = retryCount, lastError = lastError,
+        }
+    end
+    local function destroy()
+        if destroyed then return end
+        destroyed = true
+        enabled = false
+        generation = generation + 1
+        currentTarget = nil
+        releaseMovement()
+        disconnectList(connections)
+        for instance in pairs(attributeWaits) do clearAttributeWait(instance) end
+        disconnectList(temporaryConnections)
+        table.clear(trackedEggs)
+        table.clear(failedUntil)
+    end
+    connections.added = CollectionService:GetInstanceAddedSignal("NestEgg"):Connect(onAdded)
+    connections.removed = CollectionService:GetInstanceRemovedSignal("NestEgg"):Connect(onRemoved)
+    initialScan()
+    return {
+        setAutoCollectEggs = setAutoCollectEggs,
+        setMovementMode = setMovementMode,
+        getMovementMode = function() return movementMode end,
+        getStatus = getStatus,
+        getTrackedEggs = getTrackedEggs,
+        getTrackedEggCount = function() return #getTrackedEggs() end,
+        destroy = destroy,
+    }
+end
+
+--------------------------------------------------------------------
+-- Feature construction
+--------------------------------------------------------------------
+local AutoCollectEggFeature = nil
+local AutoSellFeature = nil
+
+do
+    local ok, feat = pcall(function()
+        return createAutoCollectEggs({
+            CollectionService = CollectionService,
+            Players = Players,
+            TweenService = TweenService,
+            LocalPlayer = LocalPlayer,
+            DataController = Integration.modules.DataController,
+            movement = MovementAdapter,
+            log = function(msg) log("COLLECT", msg) end,
+            getRoster = function()
+                if Integration.modules.DataController then
+                    local ok2, r = pcall(function() return Integration.modules.DataController.roster() end)
+                    if ok2 and type(r) == "table" then return r end
+                end
+                return State.data.roster
+            end,
+        })
+    end)
+    if ok then
+        AutoCollectEggFeature = feat
+        State.diagnostics["AutoCollectEggs"] = "READY"
+    else
+        State.diagnostics["AutoCollectEggs"] = "ERROR: " .. tostring(feat)
+        log("ERROR", "AutoCollectEggs: " .. tostring(feat))
+    end
+end
+
+do
+    local remotes = Integration.modules.Remotes
+    local dc = Integration.modules.DataController
+    local catalog = Integration.modules.Catalog
+    State.diagnostics["AutoSell.Remotes"] = remotes and "FOUND" or "MISSING"
+    State.diagnostics["AutoSell.DataController"] = dc and "FOUND" or "MISSING"
+    State.diagnostics["AutoSell.Catalog"] = catalog and "FOUND" or "MISSING"
+    local sellDef = remotes and remotes.defs and remotes.defs.SellChickens
+    State.diagnostics["AutoSell.SellChickens"] = sellDef and "FOUND" or "MISSING"
+    if not remotes then
+        State.diagnostics["AutoSell.Feature"] = "ERROR: Core.Remotes missing"
+    elseif type(remotes.invoke) ~= "function" then
+        State.diagnostics["AutoSell.Feature"] = "ERROR: Remotes.invoke missing"
+    elseif not sellDef then
+        State.diagnostics["AutoSell.Feature"] = "ERROR: Remotes.defs.SellChickens missing"
+    elseif not dc then
+        State.diagnostics["AutoSell.Feature"] = "ERROR: DataController missing"
+    elseif type(dc.roster) ~= "function" then
+        State.diagnostics["AutoSell.Feature"] = "ERROR: DataController.roster missing"
+    elseif not catalog then
+        State.diagnostics["AutoSell.Feature"] = "ERROR: Catalog missing"
+    else
+        local ok, featOrErr = pcall(function()
+            return createAutoSellChickens({
+                Remotes = remotes,
+                DataController = dc,
+                Catalog = catalog,
+                log = function(msg) log("SELL", msg) end,
+                getIncubatorOccupantId = function()
+                    local inc = State.data.incubator
+                    if type(inc) == "table" then return inc.occupantId or inc.chickenId or inc.activeId end
+                    return nil
+                end,
+                -- Only treat as occupied when an actual chicken occupant id field exists.
+                -- Incubator egg storage (#eggs > 0) is NOT occupancy and must not pause Auto Sell.
+                isIncubatorOccupied = function()
+                    local inc = State.data.incubator
+                    if type(inc) ~= "table" then return false end
+                    if inc.occupantId ~= nil or inc.chickenId ~= nil then return true end
+                    if type(inc.occupant) == "table" and (inc.occupant.id ~= nil or inc.occupant.chickenId ~= nil) then
+                        return true
+                    end
+                    return false
+                end,
+            })
+        end)
+        if ok and featOrErr then
+            AutoSellFeature = featOrErr
+            State.diagnostics["AutoSell.Mode"] = "LIVE_ONLY_NO_DRY_RUN"
+            State.diagnostics["AutoSell.MutationProtection"] = "DYNAMIC_SELECTIVE_DEFAULT_PROTECTED"
+            State.diagnostics["AutoSell.ToggleSafety"] = "HARD_ARMING_GATE_V1"
+            State.diagnostics["AutoSell.Feature"] = "READY"
+            log("INFO", "AutoSellFeature READY")
+        else
+            State.diagnostics["AutoSell.Feature"] = "ERROR: " .. tostring(featOrErr)
+            log("ERROR", "AutoSell construct: " .. tostring(featOrErr))
+        end
+    end
+end
+
+--------------------------------------------------------------------
+-- FAVORITE / UNFAVORITE SHARED ACTION ENGINE
+-- V3: shared factory is stored on State, NOT as a new outer local.
+-- This avoids the local/register issue that broke V1.
+--------------------------------------------------------------------
+State._createFavoriteActionFeature = function(desiredState, toggleKey, stateKey, setterName, activeStatus)
+    local Remotes = Integration.modules.Remotes
+    local DataController = Integration.modules.DataController
+    local Catalog = Integration.modules.Catalog
+    local favoriteDef = Remotes and Remotes.defs and Remotes.defs.SetChickenFavorite
+
+    if type(Remotes) ~= "table" or type(Remotes.invoke) ~= "function"
+        or type(DataController) ~= "table" or type(DataController.roster) ~= "function"
+        or type(Catalog) ~= "table" or type(Catalog.chickenTypes) ~= "table"
+        or favoriteDef == nil then
+        return nil
+    end
+
+    local enabled = false
+    local destroyed = false
+    local userArmed = false
+    local generation = 0
+    local requestInFlight = nil
+    local selectedTypeIds = {}
+    local selectedRarities = {}
+    local selectedMutations = {}
+    local retryAfter = {}
+    local status = "DISABLED"
+    local lastError = nil
+
+    local function setStatus(value, err)
+        status = tostring(value or "IDLE")
+        local stateBucket = State[stateKey]
+        if type(stateBucket) == "table" then
+            stateBucket.status = status
+        end
+        lastError = err
+    end
+
+    local function readRoster()
+        local ok, roster = pcall(DataController.roster)
+        if ok and type(roster) == "table" and type(roster.chickens) == "table" then
+            return roster
+        end
+        return nil
+    end
+
+    local function resolveRarity(chicken)
+        if type(chicken) ~= "table" then return nil end
+        if chicken.rarity ~= nil then return string.lower(tostring(chicken.rarity)) end
+        local def = chicken.typeId and Catalog.chickenTypes[chicken.typeId]
+        if type(def) == "table" and def.rarity ~= nil then
+            return string.lower(tostring(def.rarity))
+        end
+        return nil
+    end
+
+    local function resolveMutationId(chicken)
+        if type(chicken) ~= "table" then return nil end
+        local mutation = chicken.mutation
+        if mutation == nil then return nil end
+
+        if type(mutation) == "string" or type(mutation) == "number" then
+            local id = string.lower(tostring(mutation))
+            return id ~= "" and id or nil
+        end
+
+        if type(mutation) == "table" then
+            local raw = mutation.id or mutation.mutationId or mutation.typeId or mutation.name
+            if raw ~= nil then
+                local id = string.lower(tostring(raw))
+                return id ~= "" and id or nil
+            end
+        end
+        return nil
+    end
+
+    local function hasFilters()
+        return next(selectedTypeIds) ~= nil
+            or next(selectedRarities) ~= nil
+            or next(selectedMutations) ~= nil
+    end
+
+    local function matches(chicken)
+        if type(chicken) ~= "table" then return false end
+
+        local typeId = chicken.typeId
+        if typeId ~= nil and selectedTypeIds[tostring(typeId)] == true then
+            return true
+        end
+
+        local rarity = resolveRarity(chicken)
+        if rarity ~= nil and selectedRarities[rarity] == true then
+            return true
+        end
+
+        local mutationId = resolveMutationId(chicken)
+        return mutationId ~= nil and selectedMutations[mutationId] == true
+    end
+
+    local function findChickenById(roster, id)
+        for _, chicken in pairs((type(roster) == "table" and roster.chickens) or {}) do
+            if type(chicken) == "table" and chicken.id == id then
+                return chicken
+            end
+        end
+        return nil
+    end
+
+    local function isAlreadyDesired(chicken)
+        return (chicken.favorite == true) == desiredState
+    end
+
+    local function processOnce(workerGeneration)
+        if destroyed or not enabled or workerGeneration ~= generation then return end
+        if not hasFilters() then
+            setStatus("NO FILTERS")
+            return
+        end
+
+        local roster = readRoster()
+        if not roster then
+            setStatus("NO ROSTER", "ROSTER UNAVAILABLE")
+            return
+        end
+
+        local now = os.clock()
+        local candidate = nil
+        for _, chicken in pairs(roster.chickens) do
+            if type(chicken) == "table"
+                and chicken.id ~= nil
+                and not isAlreadyDesired(chicken)
+                and matches(chicken)
+                and (retryAfter[chicken.id] == nil or retryAfter[chicken.id] <= now) then
+                candidate = chicken
+                break
+            end
+        end
+
+        if not candidate then
+            setStatus("IDLE")
+            return
+        end
+
+        local id = candidate.id
+
+        if not enabled
+            or not userArmed
+            or State.toggles[toggleKey] ~= true
+            or workerGeneration ~= generation
+            or destroyed then
+            requestInFlight = nil
+            setStatus("DISABLED")
+            return
+        end
+
+        requestInFlight = id
+        setStatus(activeStatus)
+
+        local ok, response = pcall(Remotes.invoke, favoriteDef, id, desiredState)
+        if not ok then
+            requestInFlight = nil
+            retryAfter[id] = os.clock() + 2
+            setStatus("ERROR", tostring(response))
+            return
+        end
+
+        setStatus("WAITING CONFIRMATION")
+        local deadline = os.clock() + 6
+        local confirmed = false
+        while os.clock() < deadline and enabled and not destroyed and workerGeneration == generation do
+            local latestRoster = readRoster()
+            local latest = latestRoster and findChickenById(latestRoster, id) or nil
+            if latest and isAlreadyDesired(latest) then
+                confirmed = true
+                break
+            end
+            task.wait(0.20)
+        end
+
+        requestInFlight = nil
+        if confirmed then
+            retryAfter[id] = nil
+            setStatus("CONFIRMED")
+        elseif enabled and not destroyed and workerGeneration == generation then
+            retryAfter[id] = os.clock() + 2
+            setStatus("NOT CONFIRMED")
+        end
+    end
+
+    local function worker(workerGeneration)
+        while enabled and not destroyed and workerGeneration == generation do
+            local ok, err = pcall(processOnce, workerGeneration)
+            if not ok then
+                setStatus("ERROR", tostring(err))
+                task.wait(1.5)
+            else
+                task.wait(0.45)
+            end
+        end
+        if not enabled then setStatus("DISABLED") end
+    end
+
+    local api = {}
+
+    api[setterName] = function(value)
+        value = value == true
+        if destroyed then return false end
+
+        State.toggles[toggleKey] = value
+        userArmed = value
+
+        if value == enabled then
+            if not value then requestInFlight = nil end
+            return true
+        end
+
+        enabled = value
+        generation = generation + 1
+        requestInFlight = nil
+        if value then
+            setStatus(hasFilters() and "IDLE" or "NO FILTERS")
+            local myGeneration = generation
+            task.spawn(function() worker(myGeneration) end)
+        else
+            setStatus("DISABLED")
+        end
+        return true
+    end
+
+    function api.isEnabled() return enabled end
+    function api.getStatus()
+        return { status = status, enabled = enabled, requestInFlight = requestInFlight, lastError = lastError }
+    end
+
+    function api.setTypeSelected(typeId, value)
+        typeId = tostring(typeId or "")
+        if typeId == "" then return false end
+        if value == true then selectedTypeIds[typeId] = true else selectedTypeIds[typeId] = nil end
+        return true
+    end
+    function api.isTypeSelected(typeId) return selectedTypeIds[tostring(typeId or "")] == true end
+    function api.clearTypeSelection() table.clear(selectedTypeIds) end
+    function api.getSelectedTypeIds()
+        local out = {}
+        for id, on in pairs(selectedTypeIds) do if on then table.insert(out, id) end end
+        table.sort(out)
+        return out
+    end
+
+    function api.setRaritySelected(rarityId, value)
+        rarityId = string.lower(tostring(rarityId or ""))
+        if rarityId == "" then return false end
+        if value == true then selectedRarities[rarityId] = true else selectedRarities[rarityId] = nil end
+        return true
+    end
+    function api.isRaritySelected(rarityId)
+        return selectedRarities[string.lower(tostring(rarityId or ""))] == true
+    end
+    function api.clearRaritySelection() table.clear(selectedRarities) end
+    function api.getSelectedRarities()
+        local out = {}
+        for id, on in pairs(selectedRarities) do if on then table.insert(out, id) end end
+        table.sort(out)
+        return out
+    end
+
+    function api.setMutationSelected(mutationId, value)
+        mutationId = string.lower(tostring(mutationId or ""))
+        if mutationId == "" then return false end
+        if value == true then selectedMutations[mutationId] = true else selectedMutations[mutationId] = nil end
+        return true
+    end
+    function api.isMutationSelected(mutationId)
+        return selectedMutations[string.lower(tostring(mutationId or ""))] == true
+    end
+    function api.clearMutationSelection() table.clear(selectedMutations) end
+    function api.getSelectedMutations()
+        local out = {}
+        for id, on in pairs(selectedMutations) do if on then table.insert(out, id) end end
+        table.sort(out)
+        return out
+    end
+
+    function api.getAvailableMutations()
+        local out, seen = {}, {}
+        local roster = readRoster()
+        for _, chicken in pairs((type(roster) == "table" and roster.chickens) or {}) do
+            local id = resolveMutationId(chicken)
+            if id ~= nil and not seen[id] then
+                seen[id] = true
+                table.insert(out, id)
+            end
+        end
+        for id, on in pairs(selectedMutations) do
+            if on and not seen[id] then
+                seen[id] = true
+                table.insert(out, id)
+            end
+        end
+        table.sort(out)
+        return out
+    end
+
+    function api.getAvailableChickenTypes()
+        local out = {}
+        for typeId, def in pairs(Catalog.chickenTypes or {}) do
+            if type(def) == "table" then
+                local id = tostring(def.id or typeId)
+                local name = tostring(def.name or id)
+                table.insert(out, { id = id, name = name })
+            end
+        end
+        table.sort(out, function(a, b)
+            local an, bn = string.lower(a.name), string.lower(b.name)
+            if an == bn then return a.id < b.id end
+            return an < bn
+        end)
+        return out
+    end
+
+    function api.getAvailableRarities()
+        local out, seen = {}, {}
+        local rarity = Catalog.Rarity or Catalog.rarity or {}
+        if type(rarity.rank) == "table" then
+            for id in pairs(rarity.rank) do
+                id = string.lower(tostring(id))
+                if id ~= "" and not seen[id] then seen[id] = true; table.insert(out, id) end
+            end
+            table.sort(out, function(a, b)
+                local ar = tonumber(rarity.rank[a]) or math.huge
+                local br = tonumber(rarity.rank[b]) or math.huge
+                if ar == br then return a < b end
+                return ar < br
+            end)
+        end
+        if #out == 0 then
+            out = { "common", "uncommon", "rare", "epic", "legendary", "mythic", "divine", "celestial", "cosmic", "secret" }
+        end
+        return out
+    end
+
+    function api.destroy()
+        if destroyed then return end
+        enabled = false
+        userArmed = false
+        State.toggles[toggleKey] = false
+        generation = generation + 1
+        requestInFlight = nil
+        destroyed = true
+        setStatus("DISABLED")
+    end
+
+    return api
+end
+
+State._autoFavoriteFeature = State._createFavoriteActionFeature(
+    true,
+    "autoFavorite",
+    "autoFavorite",
+    "setAutoFavorite",
+    "FAVORITING"
+)
+
+State._autoUnfavoriteFeature = State._createFavoriteActionFeature(
+    false,
+    "autoUnfavorite",
+    "autoUnfavorite",
+    "setAutoUnfavorite",
+    "UNFAVORITING"
+)
+
+State.diagnostics["AutoFavorite.Engine"] = State._autoFavoriteFeature and "SHARED_STATE_FACTORY_V3" or "UNAVAILABLE"
+State.diagnostics["AutoUnfavorite.Engine"] = State._autoUnfavoriteFeature and "SHARED_STATE_FACTORY_V3" or "UNAVAILABLE"
+State.diagnostics["AutoUnfavorite.Feature"] = State._autoUnfavoriteFeature and "READY_BACKEND_UI_SHARED_BUILDER" or "MISSING DEPENDENCY"
+State.diagnostics["AutoUnfavorite.UIBinding"] = State._autoUnfavoriteFeature and "PASSED_FEATURE_INSTANCE_V5_1" or "UNAVAILABLE"
+State.diagnostics["AutoFavorite.MutationFilter"] = State._autoFavoriteFeature and "DYNAMIC_ROSTER_DISCOVERY" or "UNAVAILABLE"
+State.diagnostics["AutoFavorite.ToggleSafety"] = State._autoFavoriteFeature and "HARD_ARMING_GATE_V1" or "UNAVAILABLE"
+State.diagnostics["AutoFavorite.Feature"] = State._autoFavoriteFeature and "READY" or "MISSING DEPENDENCY"
+
+
+
+--------------------------------------------------------------------
+-- createAutoFuseChickens (FINAL verified/safety-patched backend — embedded)
+--------------------------------------------------------------------
+local RARITY_ORDER_FUSE = {
+    "common", "uncommon", "rare", "epic", "legendary",
+    "mythic", "divine", "celestial", "cosmic", "secret",
+}
+local RARITY_RANK_FUSE = {}
+for index, rarity in ipairs(RARITY_ORDER_FUSE) do
+    RARITY_RANK_FUSE[rarity] = index
+end
+local DEFAULT_FUSE_ABILITIES = {
+    voodoo = true,
+    cycleofash = true,
+}
+local function fuseCopyMap(source)
+    local result = {}
+    for key, value in pairs(source or {}) do
+        result[key] = value
+    end
+    return result
+end
+local function fuseCopyArray(source)
+    local result = {}
+    for index, value in ipairs(source or {}) do
+        result[index] = value
+    end
+    return result
+end
+local function fuseStableId(id)
+    return tostring(id)
+end
+local function fuseWaitFor(seconds, deps)
+    if type(deps.wait) == "function" then
+        deps.wait(seconds)
+        else
+        task.wait(seconds)
+    end
+end
+
+local function fuseSpawnThread(fn)
+    if task and type(task.spawn) == "function" then
+        return task.spawn(fn)
+    end
+    local co = coroutine.create(fn)
+    coroutine.resume(co)
+    return co
+end
+local function fuseReadRoster(DataController)
+    if not DataController then return nil end
+    local ok, roster = pcall(function() return DataController.roster() end)
+    if ok and type(roster) == "table" then return roster end
+    return nil
+end
+local function fuseReadMoney(DataController)
+    if not DataController then return nil end
+    local ok, money = pcall(function() return DataController.money() end)
+    if ok then return money end
+    return nil
+end
+local function fuseFindChicken(roster, id)
+    for _, chicken in ipairs((roster and roster.chickens) or {}) do
+        if chicken and chicken.id == id then return chicken end
+    end
+    return nil
+end
+local function fuseMakeSpec(chicken)
+    return {
+        id = chicken.id,
+        typeId = chicken.typeId,
+        level = chicken.level or 1,
+        genome = chicken.genome,
+        ability = chicken.ability,
+        rarity = chicken.rarity,
+        mutation = chicken.mutation,
+        eggs = chicken.eggs,
+        look = chicken.look,
+    }
+end
+local function fuseCompareByLevelThenId(a, b)
+    local levelA = tonumber(a.level) or 1
+    local levelB = tonumber(b.level) or 1
+    if levelA ~= levelB then return levelA < levelB end
+    return fuseStableId(a.id) < fuseStableId(b.id)
+end
+
+local function createAutoFuseChickens(deps)
+    deps = deps or {}
+    assert(type(deps.Remotes) == "table", "Auto Fuse requires deps.Remotes")
+    assert(type(deps.DataController) == "table", "Auto Fuse requires deps.DataController")
+    assert(type(deps.Catalog) == "table", "Auto Fuse requires deps.Catalog")
+    assert(type(deps.FusionRules) == "table", "Auto Fuse requires deps.FusionRules")
+    assert(type(deps.Remotes.invoke) == "function", "Auto Fuse requires Remotes.invoke")
+    assert(type(deps.Remotes.defs) == "table", "Auto Fuse requires Remotes.defs")
+    assert(deps.Remotes.defs.FuseChickens ~= nil, "Auto Fuse requires Remotes.defs.FuseChickens")
+    assert(type(deps.FusionRules.cost) == "function", "Auto Fuse requires FusionRules.cost")
+    local Remotes = deps.Remotes
+    local DataController = deps.DataController
+    local Catalog = deps.Catalog
+    local FusionRules = deps.FusionRules
+    local config = {
+        enabled = false,
+        dryRun = true,
+        matchMode = nil,
+        selectedRarities = {},
+        protectFavorites = true,
+        protectMutated = true,
+        abilityWhitelist = fuseCopyMap(DEFAULT_FUSE_ABILITIES),
+        keepCopies = 0,
+    }
+    local lifecycle = {
+        destroyed = false,
+        generation = 0,
+        fusionInProgress = false,
+        operationHeld = false,
+        rosterDisconnect = nil,
+    }
+    local state = {
+        status = "DISABLED",
+        lastResponse = nil,
+        lastPair = nil,
+        lastResult = nil,
+        lastReserveReports = {},
+        configRevision = 0,
+        evaluationRevision = -1,
+    }
+    local stats = {
+        totalEvaluated = 0,
+        eligibleChickens = 0,
+        pairsBuilt = 0,
+        confirmedFusions = 0,
+        protectedActive = 0,
+        protectedFavorite = 0,
+        protectedMutated = 0,
+        protectedAbility = 0,
+        protectedIncubator = 0,
+        protectedBusy = 0,
+        noPairCount = 0,
+        reservedKeepCopies = 0,
+        lastKeepCopyBlock = nil,
+        lastParentA = nil,
+        lastParentB = nil,
+        lastResultId = nil,
+        lastResultRarity = nil,
+        lastAscended = nil,
+        lastCost = nil,
+        lastError = nil,
+    }
+    local function log(message, payload)
+        if type(deps.log) == "function" then
+            pcall(deps.log, message, payload)
+        end
+    end
+    local function setStatus(status, payload)
+        state.status = status
+        if payload then log(status, payload) else log(status) end
+    end
+    local function invalidate()
+        state.configRevision = state.configRevision + 1
+        state.evaluationRevision = -1
+    end
+    local function typeDefinition(chicken)
+        local types = Catalog.chickenTypes
+        if type(types) == "table" and chicken and chicken.typeId then
+            return types[chicken.typeId]
+        end
+        return nil
+    end
+    local function resolvedRarity(chicken)
+        if chicken and chicken.rarity then return chicken.rarity end
+        local definition = typeDefinition(chicken)
+        if definition and definition.rarity then return definition.rarity end
+        local defaultDefinition = Catalog.defaultChickenType
+        if type(defaultDefinition) == "table" then return defaultDefinition.rarity end
+        return nil
+    end
+    local function resolvedAbility(chicken)
+        if chicken and chicken.ability then return chicken.ability end
+        local definition = typeDefinition(chicken)
+        if definition and definition.signature then return definition.signature end
+        local defaultDefinition = Catalog.defaultChickenType
+        if type(defaultDefinition) == "table" and defaultDefinition.signature then
+            return defaultDefinition.signature
+        end
+        return "beyblade"
+    end
+    local function availableAbilities()
+        local result = {}
+        local abilities = Catalog.abilities
+        if type(abilities) == "table" then
+            for key, value in pairs(abilities) do
+                local id = key
+                if type(value) == "table" and value.id then id = value.id end
+                if type(id) == "string" then
+                    result[id] = {
+                        id = id,
+                        name = type(value) == "table" and value.name or id,
+                    }
+                end
+            end
+        end
+        return result
+    end
+    local function moneyIsEnough(money, cost)
+        if money == nil or cost == nil then return false end
+        if type(money) == "table" and type(money.moreEquals) == "function" then
+            local ok, result = pcall(function() return money:moreEquals(cost) end)
+            return ok and result == true
+        end
+        if type(money) == "number" and type(cost) == "number" then
+            return money >= cost
+        end
+        return false
+    end
+    local function getIncubatorState()
+        local occupied = false
+        local occupantId = nil
+        if type(deps.isIncubatorOccupied) == "function" then
+            local ok, value = pcall(deps.isIncubatorOccupied)
+            if not ok then return true, nil, true end
+            occupied = value == true
+        end
+        if type(deps.getIncubatorOccupantId) == "function" then
+            local ok, value = pcall(deps.getIncubatorOccupantId)
+            if not ok then return occupied, nil, true end
+            occupantId = value
+            if occupantId ~= nil then occupied = true end
+        end
+        return occupied, occupantId, false
+    end
+    local function globalOperationState()
+        if type(deps.isTradeActive) == "function" then
+            local ok, active = pcall(deps.isTradeActive)
+            if not ok or active == true then return "PAUSED — TRADE ACTIVE" end
+        end
+        if type(deps.isFusionActive) == "function" then
+            local ok, active = pcall(deps.isFusionActive)
+            if not ok or active == true then return "PAUSED — FUSION BUSY" end
+        end
+        if type(deps.canOperate) == "function" then
+            local ok, allowed = pcall(deps.canOperate, "AUTO_FUSE")
+            if not ok or allowed == false then return "PAUSED — FUSION BUSY" end
+        end
+        return nil
+    end
+    local function chickenProtection(chicken, roster, incubatorOccupied, occupantId, incubatorUnknown)
+        if chicken.id == roster.activeId then
+            stats.protectedActive = stats.protectedActive + 1
+            return "ACTIVE"
+        end
+        if config.protectFavorites and chicken.favorite == true then
+            stats.protectedFavorite = stats.protectedFavorite + 1
+            return "FAVORITE"
+        end
+        if incubatorOccupied and (incubatorUnknown or occupantId == nil or chicken.id == occupantId) then
+            stats.protectedIncubator = stats.protectedIncubator + 1
+            return "INCUBATOR"
+        end
+        if type(deps.isChickenBusy) == "function" then
+            local ok, busy = pcall(deps.isChickenBusy, chicken.id)
+            if not ok or busy == true then
+                stats.protectedBusy = stats.protectedBusy + 1
+                return "BUSY"
+            end
+        end
+        if config.protectMutated and chicken.mutation ~= nil then
+            stats.protectedMutated = stats.protectedMutated + 1
+            return "MUTATED"
+        end
+        if config.abilityWhitelist[resolvedAbility(chicken)] == true then
+            stats.protectedAbility = stats.protectedAbility + 1
+            return "ABILITY"
+        end
+        local rarity = resolvedRarity(chicken)
+        if not rarity or not config.selectedRarities[rarity] then
+            return "RARITY"
+        end
+        return nil
+    end
+    local function buildPairs(roster)
+        stats.reservedKeepCopies = 0
+        local groups = {}
+        local eligibleByType = {}
+        local protectedByType = {}
+        local typeTotals = {}
+        local incubatorOccupied, occupantId, incubatorUnknown = getIncubatorState()
+        local globalPause = globalOperationState()
+        if incubatorOccupied and (incubatorUnknown or occupantId == nil) then
+            setStatus("PAUSED — INCUBATOR OCCUPIED")
+            return {}, globalPause
+        end
+        if globalPause then
+            setStatus(globalPause)
+            return {}, globalPause
+        end
+        local chickens = roster.chickens or {}
+        for _, chicken in ipairs(chickens) do
+            if chicken and chicken.id ~= nil then
+                stats.totalEvaluated = stats.totalEvaluated + 1
+                local typeId = chicken.typeId
+                local reason = chickenProtection(chicken, roster, incubatorOccupied, occupantId, incubatorUnknown)
+                if typeId == nil then
+                    reason = reason or "UNKNOWN TYPE"
+                end
+                if typeId ~= nil then
+                    typeTotals[typeId] = (typeTotals[typeId] or 0) + 1
+                    if reason then
+                        protectedByType[typeId] = (protectedByType[typeId] or 0) + 1
+                    else
+                        eligibleByType[typeId] = eligibleByType[typeId] or {}
+                        table.insert(eligibleByType[typeId], chicken)
+                    end
+                end
+            end
+        end
+        local keep = math.max(0, tonumber(config.keepCopies) or 0)
+        local candidates = {}
+        local reservedThisEvaluation = 0
+        for typeId, eligible in pairs(eligibleByType) do
+            table.sort(eligible, fuseCompareByLevelThenId)
+            local protected = protectedByType[typeId] or 0
+            local additionalReserve = math.max(0, keep - protected)
+            additionalReserve = math.min(additionalReserve, #eligible)
+            local consumableCount = math.max(0, #eligible - additionalReserve)
+            reservedThisEvaluation = reservedThisEvaluation + additionalReserve
+            for index = 1, consumableCount do
+                table.insert(candidates, eligible[index])
+            end
+        end
+        stats.reservedKeepCopies = reservedThisEvaluation
+        stats.eligibleChickens = #candidates
+        for _, chicken in ipairs(candidates) do
+            local key
+            if config.matchMode == "Same Chicken" then
+                key = chicken.typeId
+            else
+                key = resolvedRarity(chicken)
+            end
+            if key ~= nil then
+                groups[key] = groups[key] or {}
+                table.insert(groups[key], chicken)
+            end
+        end
+        local fusionPairs = {}
+        for _, group in pairs(groups) do
+            table.sort(group, fuseCompareByLevelThenId)
+            local pairable = math.floor(#group / 2) * 2
+            local index = 1
+            while index + 1 <= pairable do
+                table.insert(fusionPairs, { a = group[index], b = group[index + 1] })
+                index = index + 2
+            end
+        end
+        stats.pairsBuilt = #fusionPairs
+        if #fusionPairs == 0 then
+            stats.noPairCount = stats.noPairCount + 1
+        end
+        return fusionPairs, nil
+    end
+    local function selectedRarityCount()
+        local count = 0
+        for _, rarity in ipairs(RARITY_ORDER_FUSE) do
+            if config.selectedRarities[rarity] then count = count + 1 end
+        end
+        return count
+    end
+    local function canConsumePairWithKeepCopies(roster, parentA, parentB)
+        local keep = math.max(0, tonumber(config.keepCopies) or 0)
+        local counts = {}
+        for _, chicken in ipairs(roster.chickens or {}) do
+            if chicken and chicken.typeId ~= nil then
+                counts[chicken.typeId] = (counts[chicken.typeId] or 0) + 1
+            end
+        end
+        local typeA = parentA.typeId
+        local typeB = parentB.typeId
+        if typeA == nil or typeB == nil then
+            return false, {
+                reason = "PAIR INVALID — KEEP COPIES",
+                typeId = typeA or typeB,
+                current = 0,
+                wouldRemain = 0,
+                required = keep,
+            }
+        end
+        local countA = counts[typeA] or 0
+        local countB = counts[typeB] or 0
+        local remainingA = countA - 1
+        local remainingB = countB - 1
+        if typeA == typeB then
+            remainingA = countA - 2
+            remainingB = remainingA
+        end
+        if remainingA < keep then
+            return false, {
+                reason = "PAIR INVALID — KEEP COPIES",
+                typeId = typeA,
+                current = countA,
+                wouldRemain = remainingA,
+                required = keep,
+            }
+        end
+        if typeB ~= typeA and remainingB < keep then
+            return false, {
+                reason = "PAIR INVALID — KEEP COPIES",
+                typeId = typeB,
+                current = countB,
+                wouldRemain = remainingB,
+                required = keep,
+            }
+        end
+        return true, nil
+    end
+    local function currentPairIsValid(roster, pair)
+        local a = fuseFindChicken(roster, pair.a.id)
+        local b = fuseFindChicken(roster, pair.b.id)
+        if not a or not b or a.id == b.id then return false, "PAIR REMOVED" end
+        if a.id == roster.activeId or b.id == roster.activeId then return false, "ACTIVE" end
+        local incubatorOccupied, occupantId, incubatorUnknown = getIncubatorState()
+        if incubatorOccupied and (incubatorUnknown or occupantId == nil) then
+            return false, "PAUSED — INCUBATOR OCCUPIED"
+        end
+        if incubatorOccupied and (a.id == occupantId or b.id == occupantId) then
+            return false, "INCUBATOR"
+        end
+        local globalPause = globalOperationState()
+        if globalPause then return false, globalPause end
+        local function validOne(chicken)
+            if config.protectFavorites and chicken.favorite == true then return false end
+            if config.protectMutated and chicken.mutation ~= nil then return false end
+            if config.abilityWhitelist[resolvedAbility(chicken)] == true then return false end
+            local rarity = resolvedRarity(chicken)
+            if not rarity or not config.selectedRarities[rarity] then return false end
+            if type(deps.isChickenBusy) == "function" then
+                local ok, busy = pcall(deps.isChickenBusy, chicken.id)
+                if not ok or busy == true then return false end
+            end
+            return true
+        end
+        if not validOne(a) or not validOne(b) then return false, "PROTECTED" end
+        if config.matchMode == "Same Chicken" and a.typeId ~= b.typeId then
+            return false, "MATCH CHANGED"
+        end
+        if config.matchMode == "Same Rarity" and resolvedRarity(a) ~= resolvedRarity(b) then
+            return false, "MATCH CHANGED"
+        end
+        local keepOk, keepDetails = canConsumePairWithKeepCopies(roster, a, b)
+        if not keepOk then
+            stats.lastKeepCopyBlock = keepDetails
+            log("[AutoFuse] Pair invalidated by Keep Copies", keepDetails)
+            return false, "PAIR INVALID — KEEP COPIES"
+        end
+        return true, a, b
+    end
+    local function calculateCost(a, b)
+        local specA = fuseMakeSpec(a)
+        local specB = fuseMakeSpec(b)
+        local ok, cost = pcall(function() return FusionRules.cost(specA, specB) end)
+        if not ok then return nil, "COST ERROR" end
+        return cost, nil
+    end
+    local function acquireOperation()
+        if lifecycle.operationHeld then return true end
+        if type(deps.acquireOperation) == "function" then
+            local ok, acquired = pcall(deps.acquireOperation, "AUTO_FUSE")
+            if not ok or acquired == false then return false end
+        end
+        lifecycle.operationHeld = true
+        return true
+    end
+    local function releaseOperation()
+        if lifecycle.operationHeld and type(deps.releaseOperation) == "function" then
+            pcall(deps.releaseOperation, "AUTO_FUSE")
+        end
+        lifecycle.operationHeld = false
+    end
+    local function rosterHas(roster, id)
+        return fuseFindChicken(roster, id) ~= nil
+    end
+    local function waitForRosterConfirmation(oldA, oldB, resultId, generation)
+        local deadline = os.clock() + 8
+        while os.clock() < deadline do
+            if lifecycle.destroyed or lifecycle.generation ~= generation then
+                return false, "CANCELLED"
+            end
+            local roster = fuseReadRoster(DataController)
+            if roster then
+                local sourcesGone = not rosterHas(roster, oldA) and not rosterHas(roster, oldB)
+                local resultPresent = resultId == nil or rosterHas(roster, resultId)
+                if sourcesGone and resultPresent then return true, nil end
+            end
+            fuseWaitFor(0.85, deps)
+        end
+        return false, "NOT CONFIRMED"
+    end
+    local function invokeFusion(a, b, generation)
+        local leaseHeld = false
+        local roster
+        if config.dryRun then
+            roster = fuseReadRoster(DataController)
+            if not roster then return false, "ROSTER UNAVAILABLE" end
+        else
+            if not acquireOperation() then
+                setStatus("PAUSED — FUSION BUSY")
+                return false, "PAUSED — FUSION BUSY"
+            end
+            leaseHeld = true
+            roster = fuseReadRoster(DataController)
+            if not roster then
+                releaseOperation()
+                return false, "ROSTER UNAVAILABLE"
+            end
+        end
+        local valid, valueA, valueB = currentPairIsValid(roster, { a = a, b = b })
+        if not valid then
+            if leaseHeld then releaseOperation() end
+            return false, valueA
+        end
+        a, b = valueA, valueB
+        local cost, costError = calculateCost(a, b)
+        if costError then
+            stats.lastError = costError
+            if leaseHeld then releaseOperation() end
+            return false, costError
+        end
+        stats.lastCost = cost
+        local money = fuseReadMoney(DataController)
+        if not moneyIsEnough(money, cost) then
+            if leaseHeld then releaseOperation() end
+            setStatus("WAITING FOR MONEY", { cost = cost })
+            return false, "WAITING FOR MONEY"
+        end
+        local levelA = tonumber(a.level) or 1
+        local levelB = tonumber(b.level) or 1
+        local levelSide = if levelA >= levelB then "a" else "b"
+        local locks = {}
+        stats.lastParentA = a.id
+        stats.lastParentB = b.id
+        stats.lastCost = cost
+        state.lastPair = { a = a.id, b = b.id, levelSide = levelSide, cost = cost }
+        local payload = {
+            parentA = a.id, parentB = b.id, matchMode = config.matchMode,
+            rarity = resolvedRarity(a), typeIdA = a.typeId, typeIdB = b.typeId,
+            levelA = levelA, levelB = levelB, cost = cost, levelSide = levelSide,
+        }
+        if config.dryRun then
+            setStatus("DRY RUN", payload)
+            log("WOULD FUSE", payload)
+            return true, "DRY RUN"
+        end
+        lifecycle.fusionInProgress = true
+        setStatus("FUSING", payload)
+        local ok, response = pcall(function()
+            return Remotes.invoke(
+                Remotes.defs.FuseChickens,
+                a.id,
+                b.id,
+                locks,
+                nil,
+                levelSide
+            )
+        end)
+        lifecycle.fusionInProgress = false
+        if leaseHeld then
+            releaseOperation()
+            leaseHeld = false
+        end
+        if lifecycle.destroyed or lifecycle.generation ~= generation then
+            return false, "CANCELLED"
+        end
+        if not ok then
+            stats.lastError = tostring(response)
+            setStatus("ERROR", { error = response })
+            return false, "ERROR"
+        end
+        state.lastResponse = response
+        if type(response) ~= "table" or response.ok ~= true or type(response.data) ~= "table" then
+            local errorValue = type(response) == "table" and response.error or nil
+            stats.lastError = errorValue
+            setStatus("ERROR", { error = errorValue, response = response })
+            return false, "ERROR"
+        end
+        local result = response.data
+        local resultId = result.chickenId
+        state.lastResult = result
+        stats.lastResultId = resultId
+        stats.lastResultRarity = result.rarity
+        stats.lastAscended = result.ascended
+        setStatus("WAITING CONFIRMATION", { resultId = resultId })
+        local confirmed, confirmationError = waitForRosterConfirmation(a.id, b.id, resultId, generation)
+        if not confirmed then
+            stats.lastError = confirmationError
+            setStatus("NOT CONFIRMED", { error = confirmationError })
+            return false, confirmationError
+        end
+        stats.confirmedFusions = stats.confirmedFusions + 1
+        stats.lastError = nil
+        setStatus("CONFIRMED", {
+            parentA = a.id, parentB = b.id, resultId = resultId,
+            rarity = result.rarity, ascended = result.ascended,
+        })
+        return true, result
+    end
+    local function worker(generation)
+        while config.enabled and not lifecycle.destroyed and lifecycle.generation == generation do
+            if config.matchMode ~= "Same Chicken" and config.matchMode ~= "Same Rarity" then
+                stats.reservedKeepCopies = 0
+                setStatus("NO MATCH MODE")
+                fuseWaitFor(0.9, deps)
+            elseif selectedRarityCount() == 0 then
+                stats.reservedKeepCopies = 0
+                setStatus("NO RARITY SELECTED")
+                fuseWaitFor(0.9, deps)
+            else
+                setStatus("SCANNING")
+                local roster = fuseReadRoster(DataController)
+                if not roster then
+                    stats.reservedKeepCopies = 0
+                    stats.lastError = "ROSTER UNAVAILABLE"
+                    setStatus("ERROR")
+                    fuseWaitFor(1, deps)
+                else
+                    local fusionPairs, pause = buildPairs(roster)
+                    if pause then
+                        fuseWaitFor(1, deps)
+                    elseif #fusionPairs == 0 then
+                        if stats.eligibleChickens == 0 then
+                            setStatus("NO ELIGIBLE CHICKENS")
+                        else
+                            setStatus("NO PAIR AVAILABLE")
+                        end
+                        fuseWaitFor(0.9, deps)
+                    else
+                        local pair = fusionPairs[1]
+                        setStatus("PAIR READY", { a = pair.a.id, b = pair.b.id })
+                        local success, result = invokeFusion(pair.a, pair.b, generation)
+                        if success and result == "DRY RUN" then
+                            fuseWaitFor(1, deps)
+                        elseif not success then
+                            fuseWaitFor(1.5, deps)
+                        else
+                            fuseWaitFor(0.85, deps)
+                        end
+                    end
+                end
+            end
+        end
+        if not lifecycle.destroyed and lifecycle.generation == generation and not config.enabled then
+            setStatus("DISABLED")
+        end
+    end
+    local api = {}
+    function api.setAutoFuse(enabled)
+        if lifecycle.destroyed then return false end
+        enabled = enabled == true
+        if config.enabled == enabled then return true end
+        config.enabled = enabled
+        lifecycle.generation = lifecycle.generation + 1
+        if not enabled then
+            if not lifecycle.fusionInProgress then releaseOperation() end
+            setStatus("DISABLED")
+            return true
+        end
+        local generation = lifecycle.generation
+        fuseSpawnThread(function()
+            local ok, err = xpcall(function()
+                worker(generation)
+            end, function(e)
+                return debug.traceback(tostring(e), 2)
+            end)
+            if not ok and lifecycle.generation == generation then
+                stats.lastError = tostring(err)
+                setStatus("ERROR")
+                log("[AutoFuse] worker error", tostring(err))
+            end
+        end)
+        return true
+    end
+    function api.isEnabled() return config.enabled == true end
+    function api.setMatchMode(mode)
+        if mode == nil then
+            config.matchMode = nil
+            invalidate()
+            return true
+        end
+        if mode ~= "Same Chicken" and mode ~= "Same Rarity" then
+            return false, "INVALID MATCH MODE"
+        end
+        config.matchMode = mode
+        invalidate()
+        return true
+    end
+    function api.getMatchMode() return config.matchMode end
+    function api.setRaritySelected(rarityId, enabled)
+        if type(rarityId) ~= "string" or RARITY_RANK_FUSE[rarityId] == nil then
+            return false, "UNKNOWN RARITY"
+        end
+        config.selectedRarities[rarityId] = enabled == true or nil
+        invalidate()
+        return true
+    end
+    function api.isRaritySelected(rarityId) return config.selectedRarities[rarityId] == true end
+    function api.getSelectedRarities()
+        local result = {}
+        for _, rarity in ipairs(RARITY_ORDER_FUSE) do
+            if config.selectedRarities[rarity] then table.insert(result, rarity) end
+        end
+        return result
+    end
+    function api.clearRaritySelection() config.selectedRarities = {}; invalidate() end
+    function api.selectAllRarities()
+        for _, rarity in ipairs(RARITY_ORDER_FUSE) do config.selectedRarities[rarity] = true end
+        invalidate()
+    end
+    function api.getAvailableRarities() return fuseCopyArray(RARITY_ORDER_FUSE) end
+    function api.setProtectFavorites(enabled) config.protectFavorites = enabled == true; invalidate() end
+    function api.getProtectFavorites() return config.protectFavorites end
+    function api.setProtectMutated(enabled) config.protectMutated = enabled == true; invalidate() end
+    function api.getProtectMutated() return config.protectMutated end
+    function api.setAbilityWhitelisted(abilityId, enabled)
+        if type(abilityId) ~= "string" then return false, "INVALID ABILITY" end
+        config.abilityWhitelist[abilityId] = enabled == true or nil
+        invalidate()
+        return true
+    end
+    function api.isAbilityWhitelisted(abilityId) return config.abilityWhitelist[abilityId] == true end
+    function api.getAbilityWhitelist() return fuseCopyMap(config.abilityWhitelist) end
+    function api.clearAbilityWhitelist() config.abilityWhitelist = {}; invalidate() end
+    function api.getAvailableAbilities() return availableAbilities() end
+    function api.setKeepCopies(n)
+        n = tonumber(n)
+        if not n then return false, "INVALID KEEP COPIES" end
+        config.keepCopies = math.max(0, math.floor(n))
+        invalidate()
+        return true
+    end
+    function api.getKeepCopies() return config.keepCopies end
+    function api.setDryRun(enabled) config.dryRun = enabled == true; invalidate() end
+    function api.getDryRun() return config.dryRun end
+    function api.getStatus() return state.status end
+    function api.getStats()
+        local result = {}
+        for key, value in pairs(stats) do result[key] = value end
+        return result
+    end
+    function api.getLastResponse() return state.lastResponse end
+    function api.getLastResult() return state.lastResult end
+    function api.forceEvaluation()
+        invalidate()
+        if config.enabled and not lifecycle.fusionInProgress then
+            lifecycle.generation = lifecycle.generation + 1
+            local generation = lifecycle.generation
+            fuseSpawnThread(function()
+                local ok, err = xpcall(function()
+                    worker(generation)
+                end, function(e)
+                    return debug.traceback(tostring(e), 2)
+                end)
+                if not ok and lifecycle.generation == generation then
+                    stats.lastError = tostring(err)
+                    setStatus("ERROR")
+                    log("[AutoFuse] worker error", tostring(err))
+                end
+            end)
+        end
+    end
+    function api.destroy()
+        if lifecycle.destroyed then return end
+        lifecycle.destroyed = true
+        config.enabled = false
+        lifecycle.generation = lifecycle.generation + 1
+        if not lifecycle.fusionInProgress then releaseOperation() end
+        if type(lifecycle.rosterDisconnect) == "function" then
+            pcall(lifecycle.rosterDisconnect)
+            lifecycle.rosterDisconnect = nil
+        end
+        setStatus("DISABLED")
+    end
+    if type(deps.subscribeRoster) == "function" then
+        local ok, disconnect = pcall(deps.subscribeRoster, function()
+            if config.enabled and not lifecycle.fusionInProgress then
+                state.evaluationRevision = -1
+            end
+        end)
+        if ok and type(disconnect) == "function" then
+            lifecycle.rosterDisconnect = disconnect
+        end
+    end
+    return api
+end
+
+--------------------------------------------------------------------
+-- Auto Fuse feature instance (ONE instance)
+--------------------------------------------------------------------
+local AutoFuseFeature = nil
+do
+    local remotes = Integration.modules.Remotes
+    local dc = Integration.modules.DataController
+    local catalog = Integration.modules.Catalog
+    local fusionRules = Integration.modules.FusionRules
+    State.diagnostics["AutoFuse.Remotes"] = remotes and "FOUND" or "MISSING"
+    State.diagnostics["AutoFuse.DataController"] = dc and "FOUND" or "MISSING"
+    State.diagnostics["AutoFuse.Catalog"] = catalog and "FOUND" or "MISSING"
+    State.diagnostics["AutoFuse.FusionRules"] = fusionRules and "FOUND" or "MISSING"
+    local fuseDef = remotes and remotes.defs and remotes.defs.FuseChickens
+    State.diagnostics["AutoFuse.FuseChickens"] = fuseDef and "FOUND" or "MISSING"
+    if not remotes or not fuseDef or type(remotes.invoke) ~= "function" then
+        State.diagnostics["AutoFuse.Feature"] = "ERROR: FuseChickens remote missing"
+    elseif not dc or type(dc.roster) ~= "function" then
+        State.diagnostics["AutoFuse.Feature"] = "ERROR: DataController.roster missing"
+    elseif not catalog then
+        State.diagnostics["AutoFuse.Feature"] = "ERROR: Catalog missing"
+    elseif not fusionRules or type(fusionRules.cost) ~= "function" then
+        State.diagnostics["AutoFuse.Feature"] = "ERROR: FusionRules.cost missing"
+    else
+        local ok, featOrErr = pcall(function()
+            return createAutoFuseChickens({
+                Remotes = remotes,
+                DataController = dc,
+                Catalog = catalog,
+                FusionRules = fusionRules,
+                log = function(msg, payload)
+                    if payload ~= nil then
+                        log("FUSE", tostring(msg) .. " " .. tostring(payload))
+                    else
+                        log("FUSE", tostring(msg))
+                    end
+                end,
+                getIncubatorOccupantId = function()
+                    local inc = State.data.incubator
+                    if type(inc) == "table" then
+                        return inc.occupantId or inc.chickenId or inc.activeId
+                    end
+                    return nil
+                end,
+                isIncubatorOccupied = function()
+                    local inc = State.data.incubator
+                    if type(inc) ~= "table" then return false end
+                    if inc.occupantId ~= nil or inc.chickenId ~= nil then return true end
+                    if type(inc.occupant) == "table" and (inc.occupant.id ~= nil or inc.occupant.chickenId ~= nil) then
+                        return true
+                    end
+                    return false
+                end,
+                -- No inventing busy/trade/fusion predicates when unverified
+            })
+        end)
+        if ok and featOrErr then
+            AutoFuseFeature = featOrErr
+            AutoFuseFeature.setDryRun(true)
+            State.diagnostics["AutoFuse.Feature"] = "READY"
+            log("INFO", "AutoFuseFeature READY (DryRun ON, no rarity selected)")
+        else
+            State.diagnostics["AutoFuse.Feature"] = "ERROR: " .. tostring(featOrErr)
+            log("ERROR", "AutoFuse construct: " .. tostring(featOrErr))
+        end
+    end
+end
+
+
+--------------------------------------------------------------------
+-- TARGET FUSE (single exact target + safe materials + Fusion Locks)
+-- Runtime research validated:
+--   * exact owned instance identity = chicken.id
+--   * FuseChickens(targetId, materialId, locks, nil, "a")
+--   * result continuity = response.data.chickenId (new instance ID)
+--   * lock item shape = { field = <key>, from = <source chicken id> }
+--------------------------------------------------------------------
+State._targetFuseFeature = (function()
+    local Remotes = Integration.modules.Remotes
+    local DataController = Integration.modules.DataController
+    local Catalog = Integration.modules.Catalog
+    local FusionRules = Integration.modules.FusionRules
+    local GameConfig = Integration.modules.GameConfig
+    local Products = safeRequire(findPath(ReplicatedStorage, {"Content", "Products"}))
+
+    if type(Remotes) ~= "table" or type(Remotes.invoke) ~= "function"
+        or type(Remotes.defs) ~= "table" or Remotes.defs.FuseChickens == nil
+        or type(DataController) ~= "table" or type(DataController.roster) ~= "function"
+        or type(Catalog) ~= "table" or type(FusionRules) ~= "table"
+        or type(FusionRules.cost) ~= "function" then
+        State.diagnostics["TargetFuse.Feature"] = "MISSING DEPENDENCY"
+        return nil
+    end
+
+    local config = {
+        enabled = false,
+        targetId = nil,
+        selectedRarities = {},
+        selectedLocks = {},
+    }
+    local life = {
+        destroyed = false,
+        generation = 0,
+        inFlight = false,
+    }
+    local runtime = {
+        status = "DISABLED",
+        lastError = nil,
+        lastResponse = nil,
+        lastResultId = nil,
+        lastMaterialId = nil,
+        lastCost = nil,
+        confirmed = 0,
+    }
+
+    local rarityOrder = {
+        "common", "uncommon", "rare", "epic", "legendary",
+        "mythic", "divine", "celestial", "cosmic", "secret",
+    }
+    local rarityRank = {}
+    for i, rarity in ipairs(rarityOrder) do rarityRank[rarity] = i end
+
+    local function setStatus(value, err)
+        runtime.status = tostring(value or "IDLE")
+        runtime.lastError = err
+        if err ~= nil then
+            log("TARGET FUSE", runtime.status .. " " .. tostring(err))
+        end
+    end
+
+    local function roster()
+        local ok, value = pcall(DataController.roster)
+        return ok and type(value) == "table" and value or nil
+    end
+
+    local function findChicken(r, id)
+        if type(r) ~= "table" or type(r.chickens) ~= "table" or id == nil then return nil end
+        for _, chicken in pairs(r.chickens) do
+            if type(chicken) == "table" and tostring(chicken.id) == tostring(id) then
+                return chicken
+            end
+        end
+        return nil
+    end
+
+    local function resolvedRarity(chicken)
+        if type(chicken) ~= "table" then return nil end
+        if chicken.rarity ~= nil then return string.lower(tostring(chicken.rarity)) end
+        local defs = Catalog.chickenTypes
+        local def = type(defs) == "table" and defs[chicken.typeId] or nil
+        return type(def) == "table" and def.rarity and string.lower(tostring(def.rarity)) or nil
+    end
+
+    local function speciesName(chicken)
+        if type(chicken) ~= "table" then return "Unknown" end
+        local defs = Catalog.chickenTypes
+        local def = type(defs) == "table" and defs[chicken.typeId] or nil
+        if type(def) == "table" and type(def.name) == "string" and def.name ~= "" then return def.name end
+        return titleCaseId(chicken.typeId or "Unknown")
+    end
+
+    local function displayName(chicken)
+        if type(chicken) ~= "table" then return "No target" end
+        if type(chicken.nickname) == "string" and chicken.nickname ~= "" then return chicken.nickname end
+        return speciesName(chicken)
+    end
+
+    local function availableRarities()
+        local out, seen = {}, {}
+        local rarity = Catalog.Rarity or Catalog.rarity
+        if type(rarity) == "table" and type(rarity.rank) == "table" then
+            for id in pairs(rarity.rank) do
+                id = string.lower(tostring(id))
+                if id ~= "" and not seen[id] then seen[id] = true; table.insert(out, id) end
+            end
+            table.sort(out, function(a,b)
+                local ar = tonumber(rarity.rank[a]) or math.huge
+                local br = tonumber(rarity.rank[b]) or math.huge
+                return ar == br and a < b or ar < br
+            end)
+        end
+        if #out == 0 then for _, id in ipairs(rarityOrder) do table.insert(out, id) end end
+        return out
+    end
+
+    local function purchases()
+        return readAtom(DataController, "purchases")
+    end
+
+    local function lockCapacity()
+        local slots = GameConfig and GameConfig.fusion and GameConfig.fusion.lockSlots
+        local free = slots and tonumber(slots.free) or 2
+        local cap = slots and tonumber(slots.cap) or 8
+        local purchaseState = purchases()
+        local ownedPasses = 0
+        local passes = type(purchaseState) == "table" and purchaseState.passes or nil
+        for productId, product in pairs(type(Products) == "table" and Products.passes or {}) do
+            if type(product) == "table" and product.fusionSlot == true and type(passes) == "table"
+                and (passes[productId] == true or passes[product.id] == true) then
+                ownedPasses += 1
+            end
+        end
+        local credits = type(purchaseState) == "table" and math.max(0, tonumber(purchaseState.fusionLocks) or 0) or 0
+        local permanent = math.min(cap, free + ownedPasses)
+        local allowed = math.min(cap, permanent + credits)
+        return allowed, free, cap, permanent, credits
+    end
+
+    local function selectedLockCount()
+        local n = 0
+        for _, enabled in pairs(config.selectedLocks) do if enabled == true then n += 1 end end
+        return n
+    end
+
+    -- Fusion Lock availability is SLOT/CAPABILITY based, not current-value based.
+    --
+    -- Runtime/UI research confirmed the Fusion UI exposes these lock categories:
+    --   Level, Ability, Eggs/Lays, Color, Hat, Mask, Feet.
+    --
+    -- A target is not required to currently have a cosmetic/value for its lock
+    -- slot to be valid. Example: target.look.hat == nil must NOT make Hat
+    -- "Unavailable"; the Fusion UI can still expose that slot.
+    --
+    -- FusionRules.LOOK_SLOTS also contains "aura", but Aura is resolver-only in
+    -- the currently observed Fusion UI and is intentionally not exposed here.
+    local SUPPORTED_TARGET_LOCKS = {
+        { field = "level",     label = "Level" },
+        { field = "ability",   label = "Ability" },
+        { field = "eggs",      label = "Eggs / Lays" },
+        { field = "cos:color", label = "Color" },
+        { field = "cos:hat",   label = "Hat" },
+        { field = "cos:mask",  label = "Mask" },
+        { field = "cos:feet",  label = "Feet" },
+    }
+
+    local SUPPORTED_TARGET_LOCK_FIELDS = {}
+    for _, item in ipairs(SUPPORTED_TARGET_LOCKS) do
+        SUPPORTED_TARGET_LOCK_FIELDS[item.field] = true
+    end
+
+    local function availableLocks(target)
+        local targetPresent = target ~= nil
+        local list = {}
+        for _, item in ipairs(SUPPORTED_TARGET_LOCKS) do
+            table.insert(list, {
+                field = item.field,
+                label = item.label,
+                available = targetPresent,
+            })
+        end
+        return list
+    end
+
+    local function lockLabel(field)
+        for _, item in ipairs(availableLocks(findChicken(roster(), config.targetId))) do
+            if item.field == field then return item.label end
+        end
+        return tostring(field)
+    end
+
+    local function targetSnapshot()
+        local r = roster()
+        local chicken = findChicken(r, config.targetId)
+        if not chicken then return nil end
+        return {
+            id = chicken.id,
+            typeId = chicken.typeId,
+            nickname = chicken.nickname,
+            displayName = displayName(chicken),
+            speciesName = speciesName(chicken),
+            level = tonumber(chicken.level) or 1,
+            rarity = resolvedRarity(chicken),
+            favorite = chicken.favorite == true,
+            mutation = chicken.mutation,
+            active = r and tostring(r.activeId) == tostring(chicken.id) or false,
+            ability = chicken.ability,
+            eggs = chicken.eggs,
+            look = chicken.look,
+        }
+    end
+
+    local function inventory(search)
+        local r = roster()
+        local out = {}
+        local query = string.lower(tostring(search or ""))
+        for _, chicken in pairs(type(r) == "table" and r.chickens or {}) do
+            if type(chicken) == "table" and chicken.id ~= nil then
+                local species = speciesName(chicken)
+                local nick = type(chicken.nickname) == "string" and chicken.nickname or ""
+                local hay = string.lower(table.concat({ tostring(chicken.id), tostring(chicken.typeId), species, nick }, " "))
+                if query == "" or string.find(hay, query, 1, true) then
+                    table.insert(out, {
+                        id = tostring(chicken.id),
+                        typeId = chicken.typeId,
+                        nickname = chicken.nickname,
+                        displayName = displayName(chicken),
+                        speciesName = species,
+                        level = tonumber(chicken.level) or 1,
+                        rarity = resolvedRarity(chicken),
+                        favorite = chicken.favorite == true,
+                        mutation = chicken.mutation,
+                        active = r and tostring(r.activeId) == tostring(chicken.id) or false,
+                    })
+                end
+            end
+        end
+        table.sort(out, function(a,b)
+            local an, bn = string.lower(a.displayName), string.lower(b.displayName)
+            if an ~= bn then return an < bn end
+            if a.level ~= b.level then return a.level > b.level end
+            return a.id < b.id
+        end)
+        return out
+    end
+
+    local function buildLocks(target)
+        local allowed = lockCapacity()
+        if selectedLockCount() > allowed then return nil, "LOCK CAPACITY EXCEEDED" end
+        local available = {}
+        for _, item in ipairs(availableLocks(target)) do available[item.field] = item.available == true end
+        local result = {}
+        for field, enabled in pairs(config.selectedLocks) do
+            if enabled == true then
+                if SUPPORTED_TARGET_LOCK_FIELDS[field] ~= true then
+                    -- Ignore stale/obsolete selections (for example cos:aura)
+                    -- instead of blocking the whole Auto Target Fuse cycle.
+                    config.selectedLocks[field] = nil
+                elseif available[field] ~= true then
+                    return nil, "LOCK UNAVAILABLE: " .. tostring(field)
+                else
+                    table.insert(result, { field = field, from = target.id })
+                end
+            end
+        end
+        table.sort(result, function(a,b) return tostring(a.field) < tostring(b.field) end)
+        return result
+    end
+
+    local function moneyEnough(money, cost)
+        if money == nil or cost == nil then return false end
+        if type(money) == "table" and type(money.moreEquals) == "function" then
+            local ok, yes = pcall(function() return money:moreEquals(cost) end)
+            return ok and yes == true
+        end
+        return tonumber(money) ~= nil and tonumber(cost) ~= nil and tonumber(money) >= tonumber(cost)
+    end
+
+    local function materialCandidates(r, target)
+        local list = {}
+        local occupantId = nil
+        local inc = State.data.incubator
+        if type(inc) == "table" then occupantId = inc.occupantId or inc.chickenId or inc.activeId end
+        for _, chicken in pairs(type(r) == "table" and r.chickens or {}) do
+            if type(chicken) == "table" and chicken.id ~= nil
+                and tostring(chicken.id) ~= tostring(target.id)
+                and tostring(chicken.id) ~= tostring(r.activeId)
+                and (occupantId == nil or tostring(chicken.id) ~= tostring(occupantId))
+                and chicken.favorite ~= true
+                and (chicken.mutation == nil or chicken.mutation == "") then
+                local rarity = resolvedRarity(chicken)
+                if rarity and config.selectedRarities[rarity] == true then
+                    table.insert(list, chicken)
+                end
+            end
+        end
+        table.sort(list, function(a,b)
+            local ar, br = rarityRank[resolvedRarity(a)] or math.huge, rarityRank[resolvedRarity(b)] or math.huge
+            if ar ~= br then return ar < br end
+            local al, bl = tonumber(a.level) or 1, tonumber(b.level) or 1
+            if al ~= bl then return al < bl end
+            return tostring(a.id) < tostring(b.id)
+        end)
+        return list
+    end
+
+    local function waitForResult(oldTargetId, materialId, resultId, generation)
+        local deadline = os.clock() + 10
+        while os.clock() < deadline and not life.destroyed and life.generation == generation do
+            local r = roster()
+            if r then
+                local result = findChicken(r, resultId)
+                if result and not findChicken(r, oldTargetId) and not findChicken(r, materialId) then
+                    return result
+                end
+            end
+            task.wait(0.4)
+        end
+        return nil
+    end
+
+    local function tick(generation)
+        while config.enabled and not life.destroyed and life.generation == generation do
+            if config.targetId == nil or config.targetId == "" then
+                setStatus("NO TARGET SELECTED")
+                task.wait(0.8)
+                continue
+            end
+            local r = roster()
+            local target = findChicken(r, config.targetId)
+            if not r or not target then
+                config.enabled = false
+                State.toggles.autoTargetFuse = false
+                setStatus("TARGET MISSING — STOPPED")
+                break
+            end
+            if tostring(r.activeId) == tostring(target.id) then
+                setStatus("TARGET ACTIVE / EQUIPPED")
+                task.wait(1)
+                continue
+            end
+            local hasRarity = false
+            for _, enabled in pairs(config.selectedRarities) do if enabled == true then hasRarity = true break end end
+            if not hasRarity then
+                setStatus("NO MATERIAL RARITY")
+                task.wait(0.8)
+                continue
+            end
+            local locks, lockError = buildLocks(target)
+            if not locks then
+                setStatus("LOCK ERROR", lockError)
+                task.wait(1)
+                continue
+            end
+            local materials = materialCandidates(r, target)
+            if #materials == 0 then
+                setStatus("NO SAFE MATERIAL")
+                task.wait(1)
+                continue
+            end
+            local material = materials[1]
+            local okCost, cost = pcall(FusionRules.cost, fuseMakeSpec(target), fuseMakeSpec(material))
+            if not okCost then
+                setStatus("COST ERROR", cost)
+                task.wait(1)
+                continue
+            end
+            runtime.lastCost = cost
+            if not moneyEnough(fuseReadMoney(DataController), cost) then
+                setStatus("WAITING FOR MONEY")
+                task.wait(1)
+                continue
+            end
+            life.inFlight = true
+            runtime.lastMaterialId = material.id
+            setStatus("FUSING")
+            local requestOk, response = pcall(function()
+                return Remotes.invoke(Remotes.defs.FuseChickens, target.id, material.id, locks, nil, "a")
+            end)
+            life.inFlight = false
+            if not config.enabled or life.destroyed or life.generation ~= generation then break end
+            runtime.lastResponse = response
+            if not requestOk or type(response) ~= "table" or response.ok ~= true or type(response.data) ~= "table"
+                or response.data.chickenId == nil then
+                runtime.lastError = requestOk and (type(response) == "table" and response.error or "BAD RESPONSE") or tostring(response)
+                setStatus("FUSE ERROR", runtime.lastError)
+                task.wait(1.2)
+                continue
+            end
+            local newId = tostring(response.data.chickenId)
+            setStatus("WAITING RESULT")
+            local result = waitForResult(target.id, material.id, newId, generation)
+            if not result then
+                config.enabled = false
+                State.toggles.autoTargetFuse = false
+                setStatus("RESULT NOT CONFIRMED — STOPPED")
+                break
+            end
+            config.targetId = newId
+            runtime.lastResultId = newId
+            runtime.confirmed += 1
+            runtime.lastError = nil
+            setStatus("CONFIRMED")
+            markConfigDirty()
+            task.wait(0.45)
+        end
+        if not config.enabled and runtime.status ~= "TARGET MISSING — STOPPED" and runtime.status ~= "RESULT NOT CONFIRMED — STOPPED" then
+            setStatus("DISABLED")
+        end
+    end
+
+    local api = {}
+    function api.setEnabled(enabled)
+        enabled = enabled == true
+        if life.destroyed then return false end
+        if enabled == config.enabled then return true end
+        config.enabled = enabled
+        State.toggles.autoTargetFuse = enabled
+        life.generation += 1
+        if enabled then
+            local generation = life.generation
+            task.spawn(function()
+                local ok, err = xpcall(function() tick(generation) end, function(e) return debug.traceback(tostring(e), 2) end)
+                if not ok and life.generation == generation then
+                    config.enabled = false
+                    State.toggles.autoTargetFuse = false
+                    setStatus("ERROR", err)
+                end
+            end)
+        else
+            setStatus("DISABLED")
+        end
+        return true
+    end
+    function api.isEnabled() return config.enabled == true end
+    function api.getStatus() return runtime.status end
+    function api.getLastError() return runtime.lastError end
+    function api.getRuntime() return runtime end
+    function api.setTargetId(id)
+        id = id ~= nil and tostring(id) or nil
+        if id == "" then id = nil end
+        if id ~= nil and not findChicken(roster(), id) then return false, "TARGET ID MISSING" end
+        config.targetId = id
+        return true
+    end
+    function api.getTargetId() return config.targetId end
+    function api.getTarget() return targetSnapshot() end
+    function api.getInventory(search) return inventory(search) end
+    function api.refreshInventory() return inventory("") end
+    function api.getAvailableRarities() return availableRarities() end
+    function api.isRaritySelected(id) return config.selectedRarities[string.lower(tostring(id))] == true end
+    function api.setRaritySelected(id, enabled)
+        id = string.lower(tostring(id or "")); if id == "" then return false end
+        config.selectedRarities[id] = enabled == true or nil
+        return true
+    end
+    function api.clearRarities() config.selectedRarities = {} end
+    function api.getSelectedRarities()
+        local out = {}
+        for _, id in ipairs(availableRarities()) do if config.selectedRarities[id] then table.insert(out, id) end end
+        return out
+    end
+    function api.getLockCapacity() return lockCapacity() end
+    function api.getAvailableLocks()
+        return availableLocks(findChicken(roster(), config.targetId))
+    end
+    function api.isLockSelected(field) return config.selectedLocks[tostring(field)] == true end
+    function api.setLockSelected(field, enabled)
+        field = tostring(field or "")
+        if field == "" then return false, "INVALID LOCK" end
+        if SUPPORTED_TARGET_LOCK_FIELDS[field] ~= true then
+            return false, "LOCK UNSUPPORTED"
+        end
+        if enabled == true and not config.selectedLocks[field] then
+            local allowed = lockCapacity()
+            if selectedLockCount() >= allowed then return false, "LOCK CAPACITY REACHED" end
+            local found = false
+            for _, item in ipairs(availableLocks(findChicken(roster(), config.targetId))) do
+                if item.field == field and item.available == true then found = true break end
+            end
+            if not found then return false, "LOCK UNAVAILABLE" end
+            config.selectedLocks[field] = true
+        else
+            config.selectedLocks[field] = nil
+        end
+        return true
+    end
+    function api.clearLocks() config.selectedLocks = {} end
+    function api.getSelectedLocks()
+        local out = {}
+        for field, enabled in pairs(config.selectedLocks) do if enabled then table.insert(out, field) end end
+        table.sort(out)
+        return out
+    end
+    function api.getLockLabel(field) return lockLabel(field) end
+    function api.destroy()
+        config.enabled = false
+        State.toggles.autoTargetFuse = false
+        life.generation += 1
+        life.destroyed = true
+        setStatus("DISABLED")
+    end
+    State.diagnostics["TargetFuse.LockDetector"] = "SLOT_CAPABILITY_V1"
+    State.diagnostics["TargetFuse.Feature"] = "READY"
+    return api
+end)()
+
+--------------------------------------------------------------------
+-- AUTO HATCH (resilient roster + Catalog display names)
+--------------------------------------------------------------------
+local function createAutoHatch(deps)
+    local Remotes = deps.Remotes
+    local DataController = deps.DataController
+    local GameConfig = deps.GameConfig
+    local feature = {
+        enabled = false, generation = 0, inProgress = false, status = "DISABLED",
+        selected = {}, selectedOriginal = {}, userCustomized = false, selectAllMode = false,
+        currentTarget = nil, currentQty = 0, currentBatch = 0, lastError = nil,
+        rosterAvailable = true, lastKnownTypes = {},
+    }
+    local function getBatchMax()
+        local max = 10
+        if GameConfig and GameConfig.roster and GameConfig.roster.hatch and type(GameConfig.roster.hatch.batchMax) == "number" then
+            max = GameConfig.roster.hatch.batchMax
+        end
+        return max
+    end
+    local function getRoster()
+        if DataController then
+            local ok, roster = pcall(function() return DataController.roster() end)
+            if ok and type(roster) == "table" then return roster end
+        end
+        if type(State.data.roster) == "table" then return State.data.roster end
+        local fromDs = clientGet({"roster"})
+        if type(fromDs) == "table" then return fromDs end
+        return nil
+    end
+    local function getRosterEggs()
+        local roster = getRoster()
+        if type(roster) ~= "table" or type(roster.eggs) ~= "table" then
+            feature.rosterAvailable = false
+            return {}
+        end
+        feature.rosterAvailable = true
+        return roster.eggs
+    end
+    function feature.getAvailableEggTypes()
+        local eggs = getRosterEggs()
+        local list = {}
+        if not feature.rosterAvailable then
+            for _, cached in ipairs(feature.lastKnownTypes) do
+                table.insert(list, { id = cached.id, key = cached.key, quantity = 0, displayName = cached.displayName })
+            end
+            return list, false
+        end
+        for eggId, qty in pairs(eggs) do
+            local n = tonumber(qty) or 0
+            if n > 0 then
+                local friendly = resolveEggDisplayName(eggId)
+                diagNameOnce("HATCH", eggId, friendly)
+                table.insert(list, {
+                    id = eggId,
+                    key = tostring(eggId),
+                    quantity = n,
+                    displayName = friendly,
+                })
+            end
+        end
+        table.sort(list, function(a, b) return tostring(a.displayName) < tostring(b.displayName) end)
+        if #list > 0 then feature.lastKnownTypes = list end
+        return list, true
+    end
+    function feature.getSelectedEggs()
+        local out = {}
+        for key, on in pairs(feature.selected) do
+            if on and feature.selectedOriginal[key] ~= nil then table.insert(out, feature.selectedOriginal[key]) end
+        end
+        return out
+    end
+    function feature.isEggSelected(eggId) return feature.selected[tostring(eggId)] == true end
+    function feature.setEggSelected(eggId, enabled)
+        feature.userCustomized = true
+        feature.selectAllMode = false
+        local key = tostring(eggId)
+        if enabled then feature.selected[key] = true; feature.selectedOriginal[key] = eggId
+        else feature.selected[key] = nil; feature.selectedOriginal[key] = nil end
+    end
+    function feature.clearEggSelection()
+        feature.userCustomized = true; feature.selectAllMode = false
+        feature.selected = {}; feature.selectedOriginal = {}
+    end
+    function feature.selectAllAvailableEggs()
+        feature.selected = {}; feature.selectedOriginal = {}
+        for _, egg in ipairs(feature.getAvailableEggTypes()) do
+            feature.selected[egg.key] = true
+            feature.selectedOriginal[egg.key] = egg.id
+        end
+        feature.selectAllMode = true
+    end
+    local function invokeHatch(tier, batch)
+        if Remotes and Remotes.defs and Remotes.defs.HatchEggs and type(Remotes.invoke) == "function" then
+            local ok, res = pcall(function() return Remotes.invoke(Remotes.defs.HatchEggs, tier, batch) end)
+            return ok, res
+        end
+        return tryInvoke("HatchEggs", tier, batch)
+    end
+    local function pickTarget()
+        local available, ok = feature.getAvailableEggTypes()
+        if not ok and #available == 0 then return nil, 0, "NO_ROSTER" end
+        if feature.selectAllMode then
+            for _, egg in ipairs(available) do
+                if feature.selected[egg.key] == nil and egg.quantity > 0 then
+                    feature.selected[egg.key] = true
+                    feature.selectedOriginal[egg.key] = egg.id
+                end
+            end
+        end
+        local byKey = {}
+        for _, egg in ipairs(available) do byKey[egg.key] = egg end
+        local keys = {}
+        for key, on in pairs(feature.selected) do if on then table.insert(keys, key) end end
+        table.sort(keys)
+        if #keys == 0 then return nil, 0, "NO_SELECTION" end
+        for _, key in ipairs(keys) do
+            local egg = byKey[key]
+            if egg and egg.quantity > 0 then return egg.id, egg.quantity, "OK" end
+        end
+        return nil, 0, "WAITING_QTY"
+    end
+    local function worker(token, myGen)
+        while not token.cancelled and feature.enabled and myGen == feature.generation do
+            if feature.inProgress then task.wait(0.25) continue end
+            refreshData()
+            local tier, qty, reason = pickTarget()
+            feature.currentTarget = tier; feature.currentQty = qty
+            if reason == "NO_ROSTER" then feature.status = "ROSTER DATA UNAVAILABLE"; feature.currentBatch = 0; task.wait(1) continue end
+            if reason == "NO_SELECTION" then feature.status = "NO EGG TYPE SELECTED"; feature.currentBatch = 0; task.wait(0.8) continue end
+            if not tier or qty <= 0 then feature.status = "WAITING FOR SELECTED EGGS"; feature.currentBatch = 0; task.wait(0.8) continue end
+            local batch = math.min(qty, getBatchMax())
+            if batch <= 0 then feature.status = "WAITING FOR SELECTED EGGS"; task.wait(0.8) continue end
+            feature.inProgress = true
+            feature.status = "HATCHING " .. resolveEggDisplayName(tier)
+            feature.currentBatch = batch
+            local eggsBefore = getRosterEggs()
+            local beforeQty = tonumber(eggsBefore[tier]) or qty
+            local ok, response = invokeHatch(tier, batch)
+            if not ok or not responseOK(response) then
+                feature.status = "ERROR"; feature.lastError = tostring(response)
+                feature.inProgress = false; task.wait(1.2) continue
+            end
+            local results = response.data and response.data.results
+            if type(results) ~= "table" or #results == 0 then
+                feature.status = "ERROR"; feature.lastError = "empty results"
+                feature.inProgress = false; task.wait(1.2) continue
+            end
+            local deadline = os.clock() + 6
+            while os.clock() < deadline and feature.enabled and myGen == feature.generation do
+                refreshData()
+                local afterQty = tonumber(getRosterEggs()[tier]) or beforeQty
+                if afterQty < beforeQty then break end
+                task.wait(0.3)
+            end
+            feature.inProgress = false
+            task.wait(0.35)
+        end
+        if not feature.enabled then feature.status = "DISABLED" end
+    end
+    function feature.setAutoHatch(on)
+        feature.enabled = on == true
+        State.toggles.autoHatch = feature.enabled
+        feature.generation += 1
+        feature.inProgress = false
+        local myGen = feature.generation
+        if not feature.enabled then
+            feature.status = "DISABLED"
+            feature.currentTarget = nil; feature.currentQty = 0; feature.currentBatch = 0
+            return
+        end
+        if not feature.userCustomized then
+            feature.selectAllAvailableEggs()
+            feature.userCustomized = false
+            feature.selectAllMode = true
+        end
+        feature.status = "RUNNING"
+        maid:Task(function(token) worker(token, myGen) end)
+    end
+    function feature.getStatus()
+        return {
+            enabled = feature.enabled, status = feature.status, selected = feature.getSelectedEggs(),
+            target = feature.currentTarget, quantity = feature.currentQty, batch = feature.currentBatch,
+            selectAllMode = feature.selectAllMode, lastError = feature.lastError, rosterAvailable = feature.rosterAvailable,
+        }
+    end
+    return feature
+end
+
+local function createAutoIncubatorClaim(deps)
+    local Remotes = deps.Remotes
+    local DataService = deps.DataService
+    local feature = { enabled = false, generation = 0, inProgress = false, status = "DISABLED", lastError = nil }
+    local function getIncubator()
+        local client = DataService and DataService.client
+        if client and type(client.get) == "function" then
+            local ok, value = pcall(client.get, client, {"incubator"})
+            if ok and type(value) == "table" then return value end
+        end
+        return State.data.incubator
+    end
+    local function eggCount(inc)
+        if type(inc) ~= "table" then return 0 end
+        if type(inc.eggs) == "table" then return #inc.eggs end
+        return tonumber(inc.eggCount) or tonumber(inc.stored) or 0
+    end
+    local function invokeClaim()
+        if Remotes and Remotes.defs and Remotes.defs.IncubatorClaim and type(Remotes.invoke) == "function" then
+            local ok, res = pcall(function() return Remotes.invoke(Remotes.defs.IncubatorClaim) end)
+            return ok, res
+        end
+        return tryInvoke("IncubatorClaim")
+    end
+    local function worker(token, myGen)
+        while not token.cancelled and feature.enabled and myGen == feature.generation do
+            if feature.inProgress then task.wait(0.25) continue end
+            refreshData()
+            local count = eggCount(getIncubator())
+            if count <= 0 then feature.status = "WAITING"; task.wait(0.9) continue end
+            feature.inProgress = true; feature.status = "CLAIMING"
+            local before = count
+            local ok = invokeClaim()
+            if not ok then feature.status = "ERROR"; feature.inProgress = false; task.wait(1.2) continue end
+            local deadline = os.clock() + 6
+            while os.clock() < deadline and feature.enabled and myGen == feature.generation do
+                refreshData()
+                if eggCount(getIncubator()) < before then break end
+                task.wait(0.3)
+            end
+            feature.status = "CONFIRMED"
+            feature.inProgress = false
+            task.wait(0.5)
+        end
+        if not feature.enabled then feature.status = "DISABLED" end
+    end
+    function feature.setAutoIncubatorClaim(on)
+        feature.enabled = on == true
+        State.toggles.autoIncubatorClaim = feature.enabled
+        feature.generation += 1
+        feature.inProgress = false
+        local myGen = feature.generation
+        if not feature.enabled then feature.status = "DISABLED" return end
+        feature.status = "WAITING"
+        maid:Task(function(token) worker(token, myGen) end)
+    end
+    function feature.getStatus()
+        local inc = getIncubator()
+        return {
+            enabled = feature.enabled, status = feature.status, eggCount = eggCount(inc),
+            level = inc and (inc.level or inc.Level), lastError = feature.lastError,
+        }
+    end
+    return feature
+end
+
+local HatchFeature = createAutoHatch({
+    Remotes = Integration.modules.Remotes,
+    DataController = Integration.modules.DataController,
+    GameConfig = Integration.modules.GameConfig,
+})
+local IncubatorClaimFeature = createAutoIncubatorClaim({
+    Remotes = Integration.modules.Remotes,
+    DataService = Integration.modules.DataService,
+})
+
+--------------------------------------------------------------------
+-- AUTO UPGRADE INCUBATOR (IncubatorUpgrade no-arg + IncubatorView)
+--------------------------------------------------------------------
+local AutoUpgradeIncubatorFeature = nil
+do
+    local feature = {
+        enabled = false,
+        generation = 0,
+        upgradeInProgress = false,
+        status = "DISABLED",
+        level = nil,
+        nextCost = nil,
+        requiredRebirth = nil,
+        lastError = nil,
+    }
+
+    local function getIncubator()
+        local fromState = State.data.incubator
+        if type(fromState) == "table" then return fromState end
+        local ds = Integration.modules.DataService
+        local client = ds and ds.client
+        if client and type(client.get) == "function" then
+            local ok, value = pcall(client.get, client, {"incubator"})
+            if ok and type(value) == "table" then return value end
+        end
+        return nil
+    end
+
+    local function getIncubatorLevel()
+        local inc = getIncubator()
+        if type(inc) ~= "table" then return 0 end
+        local level = tonumber(inc.level) or tonumber(inc.Level) or 0
+        return level
+    end
+
+    local function getRebirthCount()
+        local count = select(1, getRebirthInfo())
+        return tonumber(count) or 0
+    end
+
+    local function getMoneyNumber()
+        refreshData()
+        local m = State.data.money
+        if type(m) == "number" then return m end
+        if type(m) == "table" and type(m.toNumber) == "function" then
+            local ok, v = pcall(m.toNumber, m)
+            if ok then return tonumber(v) end
+        end
+        return tonumber(m) or 0
+    end
+
+    local function moneyEnough(cost)
+        if cost == nil then return false end
+        local money = State.data.money
+        -- Prefer Number-like moreEquals when available
+        if type(money) == "table" and type(money.moreEquals) == "function" then
+            local ok, res = pcall(function() return money:moreEquals(cost) end)
+            if ok then return res == true end
+        end
+        local mn = getMoneyNumber()
+        local cn = tonumber(cost)
+        if cn == nil then return false end
+        return mn >= cn
+    end
+
+    local function invokeUpgrade()
+        local Remotes = Integration.modules.Remotes
+        if Remotes and Remotes.defs and Remotes.defs.IncubatorUpgrade and type(Remotes.invoke) == "function" then
+            local ok, res = pcall(function()
+                return Remotes.invoke(Remotes.defs.IncubatorUpgrade)
+            end)
+            return ok, res
+        end
+        return tryInvoke("IncubatorUpgrade")
+    end
+
+    local function worker(token, myGen)
+        while not token.cancelled and feature.enabled and myGen == feature.generation do
+            if feature.upgradeInProgress then
+                task.wait(0.25)
+                continue
+            end
+            refreshData()
+            local view = Integration.modules.IncubatorView
+            if not view then
+                feature.status = "ERROR"
+                feature.lastError = "IncubatorView missing"
+                task.wait(1.2)
+                continue
+            end
+
+            local level = getIncubatorLevel()
+            feature.level = level
+            local rebirth = getRebirthCount()
+            local maxLevel = tonumber(view.maxLevel) or 0
+
+            if maxLevel > 0 and level >= maxLevel then
+                feature.status = "MAXED"
+                feature.nextCost = nil
+                feature.requiredRebirth = nil
+                task.wait(1.0)
+                continue
+            end
+
+            local can, needRebirth = false, nil
+            if type(view.canUpgrade) == "function" then
+                local ok, a, b = pcall(view.canUpgrade, level, rebirth)
+                if ok then
+                    can, needRebirth = a == true, b
+                end
+            end
+
+            local nextLevel = level + 1
+            if nextLevel < 1 then nextLevel = 1 end
+            local cost = nil
+            if type(view.upgradeCost) == "function" then
+                local ok, c = pcall(view.upgradeCost, nextLevel)
+                if ok then cost = c end
+            end
+            feature.nextCost = cost
+            feature.requiredRebirth = needRebirth
+
+            if not can then
+                if needRebirth ~= nil then
+                    feature.status = "WAITING FOR REBIRTH"
+                else
+                    feature.status = "SCANNING"
+                end
+                task.wait(1.0)
+                continue
+            end
+
+            if not moneyEnough(cost) then
+                feature.status = "WAITING FOR MONEY"
+                task.wait(1.0)
+                continue
+            end
+
+            feature.upgradeInProgress = true
+            feature.status = "UPGRADING"
+            local beforeLevel = level
+            local ok, response = invokeUpgrade()
+            if not ok then
+                feature.status = "ERROR"
+                feature.lastError = tostring(response)
+                feature.upgradeInProgress = false
+                task.wait(1.5)
+                continue
+            end
+            if type(response) == "table" and response.ok == false then
+                feature.status = "ERROR"
+                feature.lastError = tostring(response.error or "rejected")
+                feature.upgradeInProgress = false
+                task.wait(1.5)
+                continue
+            end
+
+            feature.status = "WAITING CONFIRMATION"
+            local confirmed = false
+            local deadline = os.clock() + 8
+            while os.clock() < deadline and feature.enabled and myGen == feature.generation do
+                refreshData()
+                local nowLevel = getIncubatorLevel()
+                feature.level = nowLevel
+                if nowLevel > beforeLevel then
+                    confirmed = true
+                    break
+                end
+                task.wait(0.35)
+            end
+            if confirmed then
+                feature.status = "CONFIRMED"
+                feature.lastError = nil
+            else
+                feature.status = "ERROR"
+                feature.lastError = "level not confirmed"
+            end
+            feature.upgradeInProgress = false
+            task.wait(0.75)
+        end
+        if not feature.enabled then feature.status = "DISABLED" end
+    end
+
+    function feature.setAutoUpgradeIncubator(on)
+        feature.enabled = on == true
+        State.toggles.autoUpgradeIncubator = feature.enabled
+        feature.generation += 1
+        feature.upgradeInProgress = false
+        local myGen = feature.generation
+        if not feature.enabled then
+            feature.status = "DISABLED"
+            return
+        end
+        feature.status = "SCANNING"
+        maid:Task(function(token)
+            worker(token, myGen)
+        end)
+    end
+
+    function feature.getStatus()
+        return {
+            status = feature.status,
+            level = feature.level,
+            nextCost = feature.nextCost,
+            requiredRebirth = feature.requiredRebirth,
+            lastError = feature.lastError,
+            enabled = feature.enabled,
+        }
+    end
+
+    AutoUpgradeIncubatorFeature = feature
+    State.diagnostics["AutoUpgradeIncubator.Feature"] = "READY"
+    State.diagnostics["Remote.IncubatorUpgrade"] = Integration.remotes.IncubatorUpgrade and Integration.remotes.IncubatorUpgrade.ClassName
+        or (Integration.modules.Remotes and Integration.modules.Remotes.defs and Integration.modules.Remotes.defs.IncubatorUpgrade and "DEF")
+        or "MISSING"
+end
+
+
+--------------------------------------------------------------------
+-- ECONOMY / HOT EGG / AFR (same contracts as previous working base)
+--------------------------------------------------------------------
+local function coopSnapshot()
+    local coop = clientGet({"coop"}) or State.data.coop
+    if type(coop) ~= "table" then return nil end
+    local snapshot = { slots = tonumber(coop.slots) or 0, generators = {} }
+    for _, generator in ipairs(coop.generators or {}) do
+        local slot = tonumber(generator.slot)
+        if slot then snapshot.generators[slot] = { slot = slot, level = tonumber(generator.level) or 0, corn = tonumber(generator.corn) or 0 } end
+    end
+    return snapshot
+end
+local function generatorView(snapshot)
+    local view = Integration.modules.CoopView
+    if not snapshot or not view then return nil end
+    local count = 0
+    for _ in pairs(snapshot.generators) do count += 1 end
+    local result = { buySlot = nil, buyCost = nil, expandCost = nil, canExpand = false, generators = {}, owned = count }
+    if type(view.buyGeneratorCost) == "function" then result.buyCost = view.buyGeneratorCost(count) end
+    if type(view.expandCost) == "function" then result.expandCost = view.expandCost(snapshot.slots) end
+    if type(view.canExpand) == "function" then result.canExpand = view.canExpand(snapshot.slots) == true end
+    if type(view.canBuyGenerator) == "function" and view.canBuyGenerator(snapshot.slots, count) then result.buySlot = count + 1 end
+    for slot, generator in pairs(snapshot.generators) do
+        local item = { slot = generator.slot, level = generator.level, corn = generator.corn, upgradeCost = nil, canUpgrade = false }
+        if type(view.upgradeCost) == "function" then item.upgradeCost = view.upgradeCost(generator.level) end
+        if type(view.canUpgrade) == "function" then item.canUpgrade = view.canUpgrade(generator.level) == true end
+        result.generators[slot] = item
+    end
+    return result
+end
+local function waitForCoopChange(before, predicate, timeout)
+    local deadline = os.clock() + (timeout or 8)
+    while os.clock() < deadline and not State.closed do
+        refreshData()
+        local after = coopSnapshot()
+        if after and predicate(before, after) then return after end
+        task.wait(0.35)
+    end
+    return nil
+end
+local function refreshEconomyStatus()
+    refreshData()
+    local snap = coopSnapshot()
+    local view = generatorView(snap)
+    local owned = 0
+    if snap then for _ in pairs(snap.generators) do owned += 1 end end
+    State.economy.generatorsOwned = owned
+    State.economy.generatorsSlots = snap and snap.slots or 0
+    State.economy.nextBuySlot = view and view.buySlot or nil
+    State.economy.nextBuyCost = view and view.buyCost or nil
+    State.economy.recyclerLevel = tonumber(State.data.recyclerLevel) or 0
+end
+local Economy = { generations = {} }
+local function stopEconomy(name) Economy.generations[name] = (Economy.generations[name] or 0) + 1 end
+local function economyWorker(name, enabled, body)
+    stopEconomy(name)
+    if not enabled then return end
+    local generation = Economy.generations[name]
+    maid:Task(function(token)
+        while not token.cancelled and not State.closed and State.toggles[name] and generation == Economy.generations[name] do
+            pcall(body, generation)
+            task.wait(0.85)
+        end
+    end)
+end
+local function setAutoBuyGenerator(on)
+    State.toggles.autoBuyGenerator = on
+    if not on then State.economy.buyStatus = "IDLE" end
+    economyWorker("autoBuyGenerator", on, function()
+        refreshEconomyStatus()
+        local before = coopSnapshot()
+        local view = generatorView(before)
+        if not before or not view then State.economy.buyStatus = "NO DATA" return end
+        local owned = 0
+        for _ in pairs(before.generators) do owned += 1 end
+        if owned >= before.slots then State.economy.buyStatus = "FULL" return end
+        if not view.buySlot then State.economy.buyStatus = "NO SLOT" return end
+        local money = readMoney() or 0
+        if view.buyCost and money < view.buyCost then State.economy.buyStatus = "WAITING MONEY" return end
+        State.economy.buyStatus = "BUYING"
+        local sent, response = tryInvoke("BuyGenerator", view.buySlot)
+        if sent and responseOK(response) then
+            local target = view.buySlot
+            local after = waitForCoopChange(before, function(_, new) return new.generators[target] ~= nil end, 8)
+            State.economy.buyStatus = after and "SUCCESS" or "TIMEOUT"
+        else State.economy.buyStatus = "FAILED" end
+    end)
+end
+State._generatorMaxLevelVisualSetters = State._generatorMaxLevelVisualSetters or {}
+
+State._getGeneratorGameMaxLevel = function()
+    local gameConfig = Integration.modules.GameConfig
+    local generators = gameConfig and gameConfig.generators
+    local runtimeMax = generators and tonumber(generators.maxLevel)
+    return math.max(1, math.floor(runtimeMax or 50))
+end
+
+State._getMaxUpgradeGeneratorLevel = function()
+    local gameMax = State._getGeneratorGameMaxLevel()
+    local value = tonumber(State.economy.maxUpgradeGeneratorLevel) or 50
+    return math.clamp(math.floor(value + 0.5), 1, gameMax)
+end
+
+State._setMaxUpgradeGeneratorLevel = function(value)
+    local gameMax = State._getGeneratorGameMaxLevel()
+    local numeric = tonumber(value)
+    if numeric == nil then
+        numeric = State._getMaxUpgradeGeneratorLevel()
+    end
+    numeric = math.clamp(math.floor(numeric + 0.5), 1, gameMax)
+    State.economy.maxUpgradeGeneratorLevel = numeric
+    for _, refresh in ipairs(State._generatorMaxLevelVisualSetters) do
+        if type(refresh) == "function" then
+            pcall(refresh, numeric)
+        end
+    end
+    markConfigDirty()
+    return numeric
+end
+
+local function setAutoUpgradeGenerator(on)
+    State.toggles.autoUpgradeGenerator = on
+    if not on then State.economy.upgradeStatus = "IDLE" end
+    economyWorker("autoUpgradeGenerator", on, function()
+        refreshEconomyStatus()
+        local before = coopSnapshot()
+        local view = generatorView(before)
+        if not view then State.economy.upgradeStatus = "NO DATA" return end
+        local candidates = {}
+        local configuredMaxLevel = State._getMaxUpgradeGeneratorLevel()
+        for _, gen in pairs(view.generators) do
+            local level = tonumber(gen.level)
+            if gen.canUpgrade and level ~= nil and level < configuredMaxLevel then
+                table.insert(candidates, gen)
+            end
+        end
+        table.sort(candidates, function(a, b) if a.level == b.level then return a.slot < b.slot end return a.level < b.level end)
+        if #candidates == 0 then State.economy.upgradeStatus = "NONE" return end
+        local money = readMoney() or 0
+        for _, gen in ipairs(candidates) do
+            if gen.upgradeCost and money < gen.upgradeCost then State.economy.upgradeStatus = "WAITING MONEY" continue end
+            State.economy.upgradeStatus = "UPGRADING"
+            local sent, response = tryInvoke("UpgradeGenerator", gen.slot)
+            if sent and responseOK(response) then
+                local slot = gen.slot
+                local after = waitForCoopChange(before, function(old, new)
+                    return new.generators[slot] and old.generators[slot] and new.generators[slot].level > old.generators[slot].level
+                end, 8)
+                State.economy.upgradeStatus = after and "SUCCESS" or "TIMEOUT"
+            else State.economy.upgradeStatus = "FAILED" end
+            return
+        end
+    end)
+end
+local function setAutoExpandCoop(on)
+    State.toggles.autoExpandCoop = on
+    if not on then State.economy.expandStatus = "IDLE" end
+    economyWorker("autoExpandCoop", on, function()
+        refreshEconomyStatus()
+        local before = coopSnapshot()
+        local view = generatorView(before)
+        if not before or not view or not view.canExpand then State.economy.expandStatus = "UNAVAILABLE" return end
+        local money = readMoney() or 0
+        if view.expandCost and money < view.expandCost then State.economy.expandStatus = "WAITING MONEY" return end
+        State.economy.expandStatus = "EXPANDING"
+        local sent, response = tryInvoke("ExpandCoop")
+        if sent and responseOK(response) then
+            local after = waitForCoopChange(before, function(old, new) return new.slots > old.slots end, 8)
+            State.economy.expandStatus = after and "SUCCESS" or "TIMEOUT"
+        else State.economy.expandStatus = "FAILED" end
+    end)
+end
+local function setAutoUpgradeRecycler(on)
+    State.toggles.autoUpgradeRecycler = on
+    if not on then State.economy.recyclerStatus = "IDLE" end
+    economyWorker("autoUpgradeRecycler", on, function()
+        refreshData()
+        local view = Integration.modules.RecyclerView
+        local level = tonumber(State.data.recyclerLevel) or 0
+        local rebirth = State.data.rebirth
+        local count = type(rebirth) == "table" and tonumber(rebirth.count) or 0
+        if not view or type(view.canUpgrade) ~= "function" or not view.canUpgrade(level, count) then
+            State.economy.recyclerStatus = "UNAVAILABLE" return
+        end
+        local cost = type(view.upgradeCost) == "function" and view.upgradeCost(level) or nil
+        local money = readMoney() or 0
+        if cost and money < cost then State.economy.recyclerStatus = "WAITING MONEY" return end
+        State.economy.recyclerStatus = "UPGRADING"
+        local sent, response = tryInvoke("UpgradeRecycler")
+        if sent and responseOK(response) then
+            local deadline = os.clock() + 8
+            while os.clock() < deadline and State.toggles.autoUpgradeRecycler do
+                refreshData()
+                if (tonumber(State.data.recyclerLevel) or 0) > level then
+                    State.economy.recyclerStatus = "SUCCESS" return
+                end
+                task.wait(0.35)
+            end
+            State.economy.recyclerStatus = "TIMEOUT"
+        else State.economy.recyclerStatus = "FAILED" end
+    end)
+end
+
+local HE = State.hotEgg
+local function pitCenter()
+    local pz = Integration.modules.PitZone
+    if pz and typeof(pz.center) == "Vector3" then return pz.center end
+    return Vector3.new(0, 0, 0)
+end
+local function pitRadius()
+    local pz = Integration.modules.PitZone
+    if pz and type(pz.radius) == "number" then return pz.radius end
+    local gc = Integration.modules.GameConfig
+    if gc and gc.pit and type(gc.pit.radius) == "number" then return gc.pit.radius end
+    return 40
+end
+local function isInsidePit(pos)
+    local pz = Integration.modules.PitZone
+    if pz and type(pz.contains) == "function" then
+        local ok, res = pcall(pz.contains, pos)
+        if ok then return res == true end
+    end
+    local c = pitCenter()
+    return Vector3.new(pos.X - c.X, 0, pos.Z - c.Z).Magnitude <= pitRadius()
+end
+local function exitClearance()
+    local gc = Integration.modules.GameConfig
+    if gc and gc.pit and type(gc.pit.exitClearance) == "number" then return gc.pit.exitClearance end
+    return 8
+end
+local function getHotEggPart()
+    local p = Workspace:FindFirstChild("HotEgg")
+    if p and p:IsA("BasePart") then return p end
+    return nil
+end
+local function isLocalHolding()
+    local egg = getHotEggPart()
+    if not egg then return false end
+    local c = egg:GetAttribute("Carrier")
+    return typeof(c) == "number" and c == LocalPlayer.UserId
+end
+local function getEventName(payload)
+    if type(payload) == "string" then return payload end
+    if type(payload) == "table" then return payload.eventName or payload.id or payload.name end
+    return nil
+end
+local function isHotEggEventName(name)
+    if type(name) ~= "string" then return false end
+    local lower = string.lower(name)
+    return lower == "hotegg" or lower == "hot_egg" or lower == "hot egg"
+end
+local function clearHotEggLiveEvents()
+    State.liveEvents["hotEgg"] = nil
+    State.liveEvents["HotEgg"] = nil
+    for k in pairs(State.liveEvents) do
+        if isHotEggEventName(k) then State.liveEvents[k] = nil end
+    end
+end
+local function clearEvadeState()
+    HE.evadeTarget = nil
+    HE.evadeTargetTime = 0
+    HE.lastEvadeDecision = 0
+    HE.lastEvadeReason = "—"
+    HE.threateningCount = 0
+end
+local function markHotEggEventFinished(reason)
+    HE.eventActive = false; HE.endConfirmed = true; HE.timeRemaining = 0
+    HE.holding = false; HE.hazards = {}; HE.meteorCount = 0; HE.nearestImpact = nil
+    clearEvadeState()
+    clearHotEggLiveEvents()
+end
+local function markHotEggEventStarted()
+    HE.endConfirmed = false; HE.eventActive = true; HE.rewardConfirmed = false
+    HE.holding = false; HE.hazards = {}; HE.meteorCount = 0; HE.nearestImpact = nil; HE.exitAttempts = 0
+    clearEvadeState()
+end
+local function setTowerStatus(status, payload)
+    State.tower.status = status
+    if type(payload) == "table" then
+        State.tower.floor = payload.floor or payload.currentFloor or State.tower.floor
+        State.tower.best = payload.best or payload.towerBest or State.tower.best
+    end
+end
+local function connectRemoteEvent(name, callback)
+    local remote = Integration.remotes[name]
+    if not remote then return end
+    if not remote:IsA("RemoteEvent") and not remote:IsA("UnreliableRemoteEvent") then return end
+    maid:Connect(remote.OnClientEvent, callback)
+end
+
+connectRemoteEvent("TowerRunStarted", function(payload)
+    State.towerRuns += 1; State.tower.runActive = true
+    State.autoFarmRebirth.surrenderInFlight = false
+    setTowerStatus("RUNNING", payload)
+end)
+connectRemoteEvent("TowerFloorCleared", function(payload)
+    State.floorsCleared += 1; State.tower.runActive = true
+    setTowerStatus("FLOOR CLEARED", payload)
+end)
+connectRemoteEvent("TowerRivalLanded", function(payload) State.tower.runActive = true; setTowerStatus("RUNNING", payload) end)
+connectRemoteEvent("TowerDefeat", function(payload) State.koCount += 1; setTowerStatus("K.O.", payload) end)
+connectRemoteEvent("TowerRunEnded", function(payload)
+    State.tower.runActive = false
+    State.autoFarmRebirth.surrenderInFlight = false
+    State.autoFarmRebirth.declineInFlight = false
+    setTowerStatus("RUN ENDED", payload)
+    if State.tower.continue then State.tower.continue.open = false end
+end)
+connectRemoteEvent("TowerContinueOffer", function(payload)
+    if type(payload) ~= "table" then return end
+    if payload.open ~= true then
+        if State.tower.continue then State.tower.continue.open = false end
+        State.autoFarmRebirth.declineInFlight = false
+        return
+    end
+    State.tower.continue = {
+        open = true, paid = payload.paid == true,
+        secs = tonumber(payload.secs) or 0, floor = tonumber(payload.floor) or 0,
+        best = tonumber(payload.best) or 0, deadline = os.clock() + (tonumber(payload.secs) or 0),
+    }
+    State.autoFarmRebirth.declineInFlight = false
+end)
+connectRemoteEvent("TowerContinued", function(payload)
+    State.tower.continue = nil
+    State.autoFarmRebirth.declineInFlight = false
+    State.tower.runActive = true
+    setTowerStatus("RUNNING", payload)
+end)
+connectRemoteEvent("LiveEventStarted", function(payload)
+    if type(payload) ~= "table" then return end
+    local name = payload.eventName or payload.id or "unknown"
+    State.liveEvents[name] = { phase = "STARTED", endsAt = payload.endsAt, duration = payload.duration, startedAt = os.clock() }
+    if isHotEggEventName(name) then markHotEggEventStarted() end
+end)
+connectRemoteEvent("LiveEventEnded", function(payload)
+    local name = getEventName(payload)
+    if type(name) == "string" then
+        State.liveEvents[name] = nil
+        if isHotEggEventName(name) then markHotEggEventFinished("LiveEventEnded") end
+    end
+end)
+connectRemoteEvent("HotEggEntrance", function() markHotEggEventStarted() end)
+connectRemoteEvent("HotEggMeteor", function(payload)
+    if HE.endConfirmed or not HE.eventActive then return end
+    if type(payload) ~= "table" or typeof(payload.at) ~= "Vector3" then return end
+    local fall = math.clamp(tonumber(payload.fall) or 1.2, 0.2, 6)
+    local radius = math.clamp(tonumber(payload.radius) or 8, 2, 40)
+    local id = tostring(os.clock()) .. "_" .. math.random(1, 9999)
+    HE.hazards[id] = { id = id, pos = payload.at, radius = radius, impactAt = os.clock() + fall }
+end)
+connectRemoteEvent("HotEggReward", function() HE.rewardConfirmed = true end)
+connectRemoteEvent("HotEggFinale", function(payload)
+    markHotEggEventFinished("HotEggFinale")
+    if type(payload) == "table" and typeof(payload.userId) == "number" and payload.userId == LocalPlayer.UserId then
+        HE.rewardConfirmed = true
+    end
+end)
+
+local function heSetPhase(phase, action)
+    HE.phase = phase
+    if action then HE.action = action end
+end
+local IMMINENT_WINDOW = 1.35 -- seconds; only these meteors force emergency evade
+local EVADE_RESELECT_COOLDOWN = 0.2
+local EVADE_REUSE_RADIUS = 4.5
+
+local function pruneHazards()
+    local now = os.clock()
+    local nearest, count, threatening = nil, 0, 0
+    for id, h in pairs(HE.hazards) do
+        if now > h.impactAt + 0.8 then
+            HE.hazards[id] = nil
+        else
+            count += 1
+            local t = h.impactAt - now
+            if nearest == nil or t < nearest then nearest = t end
+            if t <= IMMINENT_WINDOW then threatening += 1 end
+        end
+    end
+    HE.meteorCount = count
+    HE.nearestImpact = nearest
+    HE.threateningCount = threatening
+end
+
+-- Returns true if pos is free of ALL active hazard radii (used for target validation).
+local function isPositionSafe(pos)
+    pruneHazards()
+    local margin = HE.safetyMargin or 6
+    for _, h in pairs(HE.hazards) do
+        local d = Vector3.new(pos.X - h.pos.X, 0, pos.Z - h.pos.Z).Magnitude
+        if d <= (h.radius + margin) then return false end
+    end
+    return true
+end
+
+-- Returns true only when an IMMINENT meteor threatens this position (time-aware).
+local function isPositionThreatened(pos)
+    pruneHazards()
+    local now = os.clock()
+    local margin = HE.safetyMargin or 6
+    for _, h in pairs(HE.hazards) do
+        local t = h.impactAt - now
+        if t <= IMMINENT_WINDOW and t > -0.15 then
+            local d = Vector3.new(pos.X - h.pos.X, 0, pos.Z - h.pos.Z).Magnitude
+            if d <= (h.radius + margin) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local function flatDist(a, b)
+    return Vector3.new(a.X - b.X, 0, a.Z - b.Z).Magnitude
+end
+
+-- Safe-point selection: pit-constrained, egg-aware before hold, minimal after hold.
+local function findSafePoint(preferPos, eggPos, holding)
+    local hrp = getHRP()
+    if not hrp then return nil end
+    local playerPos = hrp.Position
+    local origin = preferPos or playerPos
+    local y = playerPos.Y
+
+    -- Reuse existing evade target if still valid (anti-thrash)
+    local existing = HE.evadeTarget
+    if typeof(existing) == "Vector3" then
+        if isInsidePit(existing) and isPositionSafe(existing) then
+            return existing
+        end
+    end
+
+    local candidates = {}
+    local function addCandidate(v)
+        if typeof(v) ~= "Vector3" then return end
+        table.insert(candidates, Vector3.new(v.X, y, v.Z))
+    end
+
+    addCandidate(origin)
+    addCandidate(playerPos)
+
+    -- Ring around player
+    for angle = 0, 330, 30 do
+        local rad = math.rad(angle)
+        for _, dist in ipairs({ 5, 10, 16, 22, 28 }) do
+            addCandidate(Vector3.new(playerPos.X + math.cos(rad) * dist, y, playerPos.Z + math.sin(rad) * dist))
+        end
+    end
+
+    -- Candidates around Hot Egg (only when not holding — progress toward egg)
+    if not holding and typeof(eggPos) == "Vector3" then
+        addCandidate(eggPos)
+        for angle = 0, 330, 45 do
+            local rad = math.rad(angle)
+            for _, dist in ipairs({ 4, 9, 14 }) do
+                addCandidate(Vector3.new(eggPos.X + math.cos(rad) * dist, y, eggPos.Z + math.sin(rad) * dist))
+            end
+        end
+    end
+
+    -- Candidates near pit center (helps when player is pushed to edges)
+    local center = pitCenter()
+    if typeof(center) == "Vector3" then
+        addCandidate(center)
+        for angle = 0, 315, 45 do
+            local rad = math.rad(angle)
+            for _, dist in ipairs({ 8, 16 }) do
+                addCandidate(Vector3.new(center.X + math.cos(rad) * dist, y, center.Z + math.sin(rad) * dist))
+            end
+        end
+    end
+
+    local best, bestScore = nil, math.huge
+    for _, c in ipairs(candidates) do
+        if not isInsidePit(c) then continue end
+        if not isPositionSafe(c) then continue end
+        local moveCost = flatDist(c, playerPos)
+        local score
+        if holding then
+            -- After hold: minimize movement only
+            score = moveCost
+        else
+            -- Before hold: safety + progress toward egg
+            local eggCost = 0
+            if typeof(eggPos) == "Vector3" then
+                eggCost = flatDist(c, eggPos) * 1.35
+            end
+            score = moveCost * 0.85 + eggCost
+        end
+        if score < bestScore then
+            bestScore = score
+            best = c
+        end
+    end
+    return best
+end
+local function findExitPoint(extraDist)
+    local hrp = getHRP()
+    if not hrp then return nil end
+    local center = pitCenter()
+    local base = pitRadius() + exitClearance() + 4 + (extraDist or 0)
+    local flat = Vector3.new(hrp.Position.X - center.X, 0, hrp.Position.Z - center.Z)
+    local dir = flat.Magnitude > 1 and flat.Unit or Vector3.new(1, 0, 0)
+    local y = hrp.Position.Y
+    for step = 0, 12 do
+        local dist = base + step * 6
+        local candidate = Vector3.new(center.X + dir.X * dist, y, center.Z + dir.Z * dist)
+        if not isInsidePit(candidate) then return candidate end
+    end
+    return Vector3.new(center.X + dir.X * (base + 80), y, center.Z + dir.Z * (base + 80))
+end
+local function beginHotEggEnd()
+    cancelMovement()
+    if State.movementOwner == "AUTO_HOT_EGG" or State.movementOwner == "METEOR_AVOIDANCE" then
+        State.movementOwner = "NONE"
+    end
+    clearEvadeState()
+    HE.holding = false; HE.hazards = {}; HE.meteorCount = 0
+    local hrp = getHRP()
+    local inside = hrp and isInsidePit(hrp.Position) or false
+    if not HE.exitPitAfter then heSetPhase("COMPLETE", "Done"); State.movementOwner = "NONE"; return end
+    if not inside then heSetPhase("COMPLETE", "Already outside"); State.movementOwner = "NONE"; return end
+    HE.exitAttempts = 0
+    heSetPhase("EVENT_END_CONFIRMED", "Event over")
+end
+local function runPitExit()
+    HE.exitAttempts = (HE.exitAttempts or 0) + 1
+    local exitPos = findExitPoint(math.max(0, (HE.exitAttempts - 1) * 10))
+    if not exitPos then return false end
+    cancelMovement(); State.movementOwner = "NONE"
+    moveTo(exitPos, HE.movementMode, "PIT_EXIT")
+    heSetPhase("VERIFYING_PIT_EXIT", "Verifying exit")
+    local deadline = os.clock() + 6
+    while os.clock() < deadline do
+        local h = getHRP()
+        if h and not isInsidePit(h.Position) then
+            heSetPhase("COMPLETE", "Pit exit confirmed")
+            State.movementOwner = "NONE"
+            return true
+        end
+        task.wait(0.2)
+    end
+    return false
+end
+local function heCancel()
+    HE.generation += 1
+    cancelMovement()
+    if State.movementOwner == "AUTO_HOT_EGG" or State.movementOwner == "METEOR_AVOIDANCE" or State.movementOwner == "PIT_EXIT" then
+        State.movementOwner = "NONE"
+    end
+    if not HE.enabled then heSetPhase("DISABLED", "—") end
+end
+local function heTick(token)
+    local myGen = HE.generation
+        while not token.cancelled and not State.closed and HE.enabled and myGen == HE.generation do
+        if next(HE.coordinatorPauseReasons) ~= nil then
+            heSetPhase("PAUSED_FOR_EVENT", "Coordinator")
+            task.wait(0.35)
+            continue
+        end
+        pruneHazards()
+
+        HE.holding = isLocalHolding()
+        if not HE.endConfirmed then
+            local ev = State.liveEvents["hotEgg"] or State.liveEvents["HotEgg"]
+            if ev then HE.eventActive = true end
+        else
+            HE.eventActive = false
+        end
+        local egg = getHotEggPart()
+        local activePhases = {
+            EVENT_STARTED = true, WAITING_HOT_EGG = true, SEARCHING_HOT_EGG = true,
+            MOVING_TO_HOT_EGG = true, VERIFYING_PICKUP = true, HOLDING_HOT_EGG = true,
+            EVADING_METEOR = true, METEOR_WARNING = true,
+        }
+        if not HE.eventActive and not HE.endConfirmed and activePhases[HE.phase] then
+            markHotEggEventFinished("soft-end")
+        end
+        if HE.phase == "EVENT_END_CONFIRMED" then heSetPhase("EXITING_PIT", "Leaving pit") end
+        if HE.phase == "EXITING_PIT" or HE.phase == "VERIFYING_PIT_EXIT" then
+            if runPitExit() then
+                task.wait(1.2); heSetPhase("WAITING_EVENT", "Idle"); HE.endConfirmed = false
+            else
+                heSetPhase("EXITING_PIT", "Retry exit"); task.wait(0.35)
+            end
+            continue
+        end
+        if HE.phase == "COMPLETE" then
+            task.wait(0.8); heSetPhase("WAITING_EVENT", "Idle"); HE.endConfirmed = false
+            continue
+        end
+        if HE.endConfirmed and (activePhases[HE.phase] or (HE.phase ~= "WAITING_EVENT" and HE.phase ~= "DISABLED")) then
+            beginHotEggEnd(); continue
+        end
+        if not HE.eventActive and not HE.endConfirmed then
+            if HE.phase ~= "WAITING_EVENT" then heSetPhase("WAITING_EVENT", "Idle") end
+            if egg then markHotEggEventStarted(); heSetPhase("EVENT_STARTED", "Egg present")
+            else task.wait(0.4) continue end
+        end
+        -- Holding detection (state only; movement decided below)
+        local holdingNow = isLocalHolding()
+        HE.holding = holdingNow
+        if typeof(egg) == "Instance" and egg:IsA("BasePart") then
+            local hrpNow = getHRP()
+            if hrpNow then HE.distToEgg = flatDist(hrpNow.Position, egg.Position) else HE.distToEgg = nil end
+        else
+            HE.distToEgg = nil
+        end
+
+        -- Meteor avoidance: only react to IMMINENT threats; reuse safe target; anti-thrash cooldown
+        if HE.eventActive and not HE.endConfirmed and HE.meteorAvoidance then
+            local h = getHRP()
+            if h then
+                local threatened = isPositionThreatened(h.Position)
+                if threatened then
+                    local now = os.clock()
+                    local reuse = HE.evadeTarget
+                    local canReuse = typeof(reuse) == "Vector3"
+                        and isInsidePit(reuse)
+                        and isPositionSafe(reuse)
+                        and (now - (HE.lastEvadeDecision or 0)) < 1.25
+                    local needNew = not canReuse
+                    -- Emergency: always allow new target if current target is gone/unsafe
+                    if needNew and (now - (HE.lastEvadeDecision or 0)) < EVADE_RESELECT_COOLDOWN and canReuse then
+                        needNew = false
+                    end
+                    if needNew then
+                        local eggPos = (not holdingNow and egg and egg:IsA("BasePart")) and egg.Position or nil
+                        local safe = findSafePoint(h.Position, eggPos, holdingNow)
+                        if safe then
+                            HE.evadeTarget = safe
+                            HE.evadeTargetTime = now
+                            HE.lastEvadeDecision = now
+                            HE.lastEvadeReason = holdingNow and "imminent (holding)" or "imminent (approach)"
+                            heSetPhase("EVADING_METEOR", HE.lastEvadeReason)
+                            -- Only cancel/restart movement if target moved meaningfully
+                            local owner = State.movementOwner
+                            local shouldRestart = true
+                            if owner == "METEOR_AVOIDANCE" and typeof(reuse) == "Vector3" then
+                                if flatDist(reuse, safe) < EVADE_REUSE_RADIUS then
+                                    shouldRestart = false
+                                end
+                            end
+                            if shouldRestart then
+                                cancelMovement()
+                                moveTo(safe, HE.movementMode, "METEOR_AVOIDANCE")
+                            end
+                        else
+                            HE.lastEvadeReason = "no safe point"
+                        end
+                    else
+                        -- Keep moving toward existing safe target
+                        heSetPhase("EVADING_METEOR", "Hold safe target")
+                        if State.movementOwner ~= "METEOR_AVOIDANCE" and typeof(HE.evadeTarget) == "Vector3" then
+                            moveTo(HE.evadeTarget, HE.movementMode, "METEOR_AVOIDANCE")
+                        end
+                    end
+                    task.wait(0.08)
+                    continue
+                else
+                    -- Threat cleared — drop evade target so approach can resume immediately
+                    if HE.evadeTarget ~= nil then
+                        HE.evadeTarget = nil
+                        HE.lastEvadeReason = "clear"
+                        if State.movementOwner == "METEOR_AVOIDANCE" then
+                            cancelMovement()
+                            State.movementOwner = "NONE"
+                        end
+                    end
+                end
+            end
+        end
+
+        -- Holding mode: stay put when safe (no walk back to egg spawn)
+        if HE.eventActive and not HE.endConfirmed and holdingNow then
+            heSetPhase("HOLDING_HOT_EGG", "Holding")
+            task.wait(0.25)
+            continue
+        end
+
+        HE.holding = false
+        if not HE.eventActive or HE.endConfirmed then task.wait(0.3) continue end
+        if not egg then heSetPhase("WAITING_HOT_EGG", "Egg missing"); task.wait(0.35) continue end
+
+        -- Safe approach toward Hot Egg (only when not threatened)
+        heSetPhase("MOVING_TO_HOT_EGG", "Moving to egg")
+        moveTo(egg.Position, HE.movementMode, "AUTO_HOT_EGG")
+        if HE.endConfirmed or not HE.eventActive then beginHotEggEnd() continue end
+        heSetPhase("VERIFYING_PICKUP", "Verifying pickup")
+        local deadline = os.clock() + 2.5
+        local got = false
+        while os.clock() < deadline and myGen == HE.generation do
+            if HE.endConfirmed or not HE.eventActive then break end
+            -- Abort approach verification if an imminent threat appears
+            local hh = getHRP()
+            if hh and isPositionThreatened(hh.Position) then break end
+            if isLocalHolding() then got = true break end
+            task.wait(0.15)
+        end
+        if HE.endConfirmed or not HE.eventActive then beginHotEggEnd() continue end
+        if got then heSetPhase("HOLDING_HOT_EGG", "Holding")
+        else heSetPhase("SEARCHING_HOT_EGG", "Retry"); task.wait(0.25) end
+    end
+    if not HE.enabled then heSetPhase("DISABLED", "—") end
+end
+local function setAutoHotEgg(on)
+    State.toggles.autoHotEgg = on
+    HE.enabled = on
+    heCancel()
+    if on then
+        HE.generation += 1; HE.endConfirmed = false
+        heSetPhase("WAITING_EVENT", "Idle")
+        maid:Task(heTick)
+    else heSetPhase("DISABLED", "—") end
+end
+
+local AFR = State.autoFarmRebirth
+local function afrSetPhase(phase, extra)
+    AFR.phase = phase
+    if extra then AFR.countdownLabel = extra end
+end
+local function afrCancel()
+    AFR.generation += 1
+    AFR.countdown = 0; AFR.countdownLabel = ""
+    AFR.surrenderInFlight = false; AFR.declineInFlight = false
+    if not AFR.enabled then afrSetPhase("DISABLED") end
+end
+local function waitTowerEnd(myGen, timeout)
+    local deadline = os.clock() + (timeout or 12)
+    while os.clock() < deadline and myGen == AFR.generation and AFR.enabled do
+        if not isTowerActive() and (State.tower.status == "RUN ENDED" or not State.tower.runActive) then return true end
+        task.wait(0.25)
+    end
+    return not isTowerActive()
+end
+local function requestSurrender(myGen)
+    if AFR.surrenderInFlight then return true end
+    AFR.surrenderInFlight = true
+    afrSetPhase("SURRENDERING_TOWER")
+    tryInvoke("TowerSurrender")
+    afrSetPhase("WAITING_TOWER_END")
+    local ended = waitTowerEnd(myGen, 12)
+    AFR.surrenderInFlight = false
+    return ended
+end
+local function requestDecline(myGen)
+    if not isContinueOpen() or AFR.declineInFlight or not State.toggles.autoKoDismiss then return not isContinueOpen() end
+    AFR.declineInFlight = true
+    afrSetPhase("DECLINING_CONTINUE")
+    tryInvoke("TowerContinueDecline")
+    afrSetPhase("WAITING_TOWER_END")
+    local deadline = os.clock() + 10
+    while os.clock() < deadline and myGen == AFR.generation and AFR.enabled do
+        if not isContinueOpen() and (State.tower.status == "RUN ENDED" or not isTowerActive()) then
+            AFR.declineInFlight = false; return true
+        end
+        task.wait(0.25)
+    end
+    AFR.declineInFlight = false
+    return not isContinueOpen()
+end
+local function isLocalPlayerInsidePit()
+    local hrp = getHRP()
+    return hrp ~= nil and isInsidePit(hrp.Position)
+end
+
+local function requestRebirth(myGen)
+    afrSetPhase("REBIRTH_REQUESTED")
+    refreshData()
+    local before = select(1, getRebirthInfo())
+    if not tryInvoke("Rebirth") then afrSetPhase("ERROR") return false end
+    afrSetPhase("WAITING_REBIRTH_CONFIRMATION")
+    local deadline = os.clock() + 8
+    while os.clock() < deadline and myGen == AFR.generation and AFR.enabled do
+        refreshData()
+        if select(1, getRebirthInfo()) > before then State.successfulRebirths += 1; return true end
+        task.wait(0.35)
+    end
+    afrSetPhase("ERROR")
+    return false
+end
+local function afrTick(token)
+    local myGen = AFR.generation
+        while not token.cancelled and not State.closed and AFR.enabled and myGen == AFR.generation do
+        -- These event collectors only need PLAYER movement priority.
+        -- They must not pause pet-side NORMAL_FARM.
+        AFR.coordinatorPauseReasons["COORDINATOR_OWNER:HOT_EGG"] = nil
+        AFR.coordinatorPauseReasons["COORDINATOR_OWNER:EVENT_CAPSULE"] = nil
+        AFR.coordinatorPauseReasons["COORDINATOR_OWNER:KRAKEN_EGG"] = nil
+
+        if next(AFR.coordinatorPauseReasons) ~= nil then
+            afrSetPhase("PAUSED_FOR_EVENT", "Coordinator")
+            task.wait(0.35)
+            continue
+        elseif AFR.phase == "PAUSED_FOR_EVENT" then
+            afrSetPhase("CHECKING_REBIRTH")
+        end
+        -- World events may move the player, but pet-side farm/tower logic
+        -- continues. Only the actual Rebirth action is deferred while in Pit.
+        refreshData()
+        local ready = select(3, getRebirthInfo())
+        if isContinueOpen() then
+            afrSetPhase("CONTINUE_OFFER")
+            if State.toggles.autoKoDismiss then
+                requestDecline(myGen)
+                refreshData()
+                ready = select(3, getRebirthInfo())
+                if not ready then
+                    afrSetPhase("RETRY_WAIT")
+                    for i = AFR.retryDelay, 1, -1 do
+                        if myGen ~= AFR.generation or not AFR.enabled then return end
+                        if isContinueOpen() or select(3, getRebirthInfo()) then break end
+                        AFR.countdown = i; task.wait(1)
+                    end
+                    AFR.countdown = 0
+                    if not isTowerActive() then setTowerStatus("IDLE") end
+                    continue
+                end
+            else task.wait(0.5) continue end
+        end
+        if ready then
+            afrSetPhase("REBIRTH_READY")
+
+            -- Rebirth cannot complete while the player is inside the event Pit.
+            -- Do NOT stop pet farming; just defer the rebirth transaction until
+            -- Hot Egg / Event Capsule returns the player outside.
+            if isLocalPlayerInsidePit() then
+                afrSetPhase("WAITING_EXIT_PIT_FOR_REBIRTH")
+                task.wait(0.35)
+                continue
+            end
+
+            if isTowerActive() then requestSurrender(myGen) end
+            if isContinueOpen() and State.toggles.autoKoDismiss then requestDecline(myGen) end
+            if isTowerActive() then waitTowerEnd(myGen, 8) end
+            if myGen ~= AFR.generation or not AFR.enabled then return end
+            if requestRebirth(myGen) and myGen == AFR.generation and AFR.enabled then
+                afrSetPhase("POST_REBIRTH_COOLDOWN")
+                for i = AFR.postRebirthDelay, 1, -1 do
+                    if myGen ~= AFR.generation or not AFR.enabled then return end
+                    AFR.countdown = i; task.wait(1)
+                end
+                AFR.countdown = 0
+            else task.wait(2) end
+            continue
+        end
+        if isTowerActive() then
+            if State.tower.status == "K.O." then
+                afrSetPhase("K.O.")
+                local waitOffer = os.clock() + 2.5
+                while os.clock() < waitOffer and myGen == AFR.generation do
+                    if isContinueOpen() or getTowerStatus() == "RUN ENDED" then break end
+                    task.wait(0.2)
+                end
+                if isContinueOpen() then continue end
+                if not isTowerActive() then
+                    afrSetPhase("RETRY_WAIT")
+                    for i = AFR.retryDelay, 1, -1 do
+                        if myGen ~= AFR.generation or not AFR.enabled then return end
+                        AFR.countdown = i; task.wait(1)
+                    end
+                    AFR.countdown = 0; setTowerStatus("IDLE")
+                end
+            else afrSetPhase("TOWER_RUNNING"); task.wait(0.5) end
+            continue
+        end
+        if State.tower.status == "IDLE" or State.tower.status == "RUN ENDED" or State.tower.status == "ERROR" then
+            afrSetPhase("STARTING_TOWER")
+
+            local envNow = (getgenv and getgenv()) or _G
+            local manager = envNow.UNO_TOWER_ENTRY_MANAGER
+            if type(manager) == "table" and type(manager.requestEntry) == "function" then
+                local okCall, result = pcall(manager.requestEntry, {
+                    owner = "AUTO_FARM_REBIRTH",
+                    useFrontier = State.toggles.useFrontierSkip == true,
+                    token = token,
+                })
+                if not okCall or type(result) ~= "table" or result.ok ~= true then
+                    afrSetPhase("ERROR")
+                    task.wait(3)
+                end
+            else
+                -- Startup-safe baseline fallback with the original fixed 6s confirmation.
+                if tryInvoke("TowerStart") then
+                    local deadline = os.clock() + 6
+                    while os.clock() < deadline and myGen == AFR.generation do
+                        if State.tower.runActive or getTowerStatus() == "RUNNING" then break end
+                        task.wait(0.25)
+                    end
+                else
+                    afrSetPhase("ERROR")
+                    task.wait(3)
+                end
+            end
+        else task.wait(0.4) end
+    end
+    if not AFR.enabled then afrSetPhase("DISABLED") end
+end
+local function setAutoFarmRebirth(on)
+    on = on == true
+
+    if on then
+        State.toggles.autoTower = false
+        State.autoTower.enabled = false
+        local envNow = (getgenv and getgenv()) or _G
+        local autoTowerApi = envNow.UNO_AUTO_TOWER_STANDALONE
+        if type(autoTowerApi) == "table" and type(autoTowerApi.disable) == "function" then
+            pcall(autoTowerApi.disable)
+        end
+        local runtimeNow = envNow.UNO_HUB_RUNTIME
+        if type(runtimeNow) == "table" and type(runtimeNow.setToggleVisual) == "function" then
+            pcall(runtimeNow.setToggleVisual, "autoTower", false)
+        end
+    end
+
+    State.toggles.autoFarmRebirth = on
+    AFR.enabled = on
+    afrCancel()
+    if on then
+        AFR.generation += 1
+        afrSetPhase("CHECKING_REBIRTH")
+        log("INFO", "Auto Farm Rebirth enabled")
+        maid:Task(afrTick)
+    else
+        afrSetPhase("DISABLED")
+        log("INFO", "Auto Farm Rebirth disabled")
+    end
+end
+
+
+local autoRebirthGeneration = 0
+local function setAutoRebirth(on)
+    State.toggles.autoRebirth = on == true
+    autoRebirthGeneration += 1
+    local myGeneration = autoRebirthGeneration
+    if not State.toggles.autoRebirth then return end
+
+    maid:Task(function(token)
+        while not token.cancelled
+            and not State.closed
+            and State.toggles.autoRebirth
+            and myGeneration == autoRebirthGeneration do
+
+            -- Standalone Auto Rebirth is intentionally simple:
+            -- when Rebirth is READY, invoke Rebirth directly.
+            -- It NEVER starts Tower, NEVER surrenders Tower,
+            -- and NEVER touches the Continue prompt.
+            --
+            -- If Auto Farm Rebirth is enabled, that feature owns
+            -- the complete Tower/Rebirth lifecycle instead.
+            if not AFR.enabled
+                and next(AFR.coordinatorPauseReasons) == nil
+                and State.toggles.autoTower ~= true
+                and not isTowerActive() then
+                refreshData()
+
+                local before, _, ready = getRebirthInfo()
+                if ready then
+                    -- Auto Tower owns its Tower session. Standalone Auto Rebirth
+                    -- must never interrupt it, even if Tower starts between polls.
+                    if State.toggles.autoTower == true or isTowerActive() then
+                        task.wait(0.35)
+                        continue
+                    end
+
+                    if isLocalPlayerInsidePit() then
+                        task.wait(0.35)
+                        continue
+                    end
+
+                    before = tonumber(before) or 0
+                    local ok = tryInvoke("Rebirth")
+                    if ok then
+                        local deadline = os.clock() + 7
+                        while os.clock() < deadline
+                            and not token.cancelled
+                            and State.toggles.autoRebirth
+                            and myGeneration == autoRebirthGeneration do
+
+                            refreshData()
+                            local after = select(1, getRebirthInfo())
+                            after = tonumber(after) or 0
+
+                            if after > before then
+                                State.successfulRebirths += 1
+                                break
+                            end
+
+                            task.wait(0.35)
+                        end
+                    end
+                end
+            end
+
+            task.wait(0.8)
+        end
+    end)
+end
+--------------------------------------------------------------------
+-- UI
+--------------------------------------------------------------------
+local function corner(parent, r)
+    local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, r or 8); c.Parent = parent; return c
+end
+local function stroke(parent, color)
+    local s = Instance.new("UIStroke"); s.Color = color or Theme.Border; s.Thickness = 1; s.Parent = parent; return s
+end
+local function pad(parent, t, r, b, l)
+    local p = Instance.new("UIPadding")
+    p.PaddingTop = UDim.new(0, t or 0); p.PaddingRight = UDim.new(0, r or t or 0)
+    p.PaddingBottom = UDim.new(0, b or t or 0); p.PaddingLeft = UDim.new(0, l or r or t or 0)
+    p.Parent = parent; return p
+end
+local function text(parent, str, size, color, font, xAlign)
+    local l = Instance.new("TextLabel")
+    l.BackgroundTransparency = 1; l.Text = str or ""; l.Font = font or Enum.Font.Gotham
+    l.TextSize = size or 13; l.TextColor3 = color or Theme.TextPrimary
+    l.TextXAlignment = xAlign or Enum.TextXAlignment.Left
+    l.TextYAlignment = Enum.TextYAlignment.Center; l.TextTruncate = Enum.TextTruncate.AtEnd
+    l.Parent = parent
+    return l
+end
+local function makeSwitch(parent, initial, onChange)
+    local track = Instance.new("Frame")
+    track.Size = UDim2.fromOffset(40, 22)
+    track.BackgroundColor3 = initial and Theme.Primary or Color3.fromRGB(45, 48, 58)
+    track.BorderSizePixel = 0; track.Parent = parent; corner(track, 11)
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.fromOffset(16, 16)
+    knob.Position = initial and UDim2.new(1, -19, 0.5, -8) or UDim2.fromOffset(3, 3)
+    knob.BackgroundColor3 = Color3.new(1, 1, 1); knob.BorderSizePixel = 0; knob.Parent = track; corner(knob, 8)
+    local btn = Instance.new("TextButton"); btn.Size = UDim2.fromScale(1, 1); btn.BackgroundTransparency = 1; btn.Text = ""; btn.Parent = track
+    local state = initial
+    local function set(v, animate)
+        state = v
+        local goalPos = v and UDim2.new(1, -19, 0.5, -8) or UDim2.fromOffset(3, 3)
+        local goalCol = v and Theme.Primary or Color3.fromRGB(45, 48, 58)
+        if animate and not State.toggles.reducedMotion then
+            TweenService:Create(knob, TweenInfo.new(0.15), { Position = goalPos }):Play()
+            TweenService:Create(track, TweenInfo.new(0.15), { BackgroundColor3 = goalCol }):Play()
+        else knob.Position = goalPos; track.BackgroundColor3 = goalCol end
+    end
+    btn.MouseButton1Click:Connect(function() set(not state, true); if onChange then onChange(state) end end)
+    return track, set
+end
+
+--------------------------------------------------------------------
+-- Performance Manager + Config Manager (SOURCE B / SOURCE C)
+--------------------------------------------------------------------
+do
+    local function setVisualCover(enabled)
+        if enabled then
+            if visualCoverGui and visualCoverGui.Parent then
+                visualCoverGui.Enabled = true
+                return
+            end
+            local gui = Instance.new("ScreenGui")
+            gui.Name = "UNO_HUB_VisualCover"
+            gui.IgnoreGuiInset = true
+            gui.DisplayOrder = 100
+            gui.ResetOnSpawn = false
+            local frame = Instance.new("Frame")
+            frame.Size = UDim2.fromScale(1, 1)
+            frame.BackgroundColor3 = Color3.fromRGB(8, 8, 10)
+            frame.BorderSizePixel = 0
+            frame.Parent = gui
+            local openBtn = Instance.new("TextButton")
+            openBtn.Size = UDim2.fromOffset(120, 32)
+            openBtn.Position = UDim2.new(1, -132, 0, 12)
+            openBtn.BackgroundColor3 = Theme.Primary
+            openBtn.Text = "UNO HUB"
+            openBtn.Font = Enum.Font.GothamBold
+            openBtn.TextSize = 12
+            openBtn.TextColor3 = Color3.new(1, 1, 1)
+            openBtn.AutoButtonColor = false
+            openBtn.Parent = frame
+            corner(openBtn, 6)
+            openBtn.MouseButton1Click:Connect(function()
+                State.visible = true
+                if Main then Main.Visible = true end
+            end)
+            gui.Parent = PlayerGui
+            visualCoverGui = gui
+        else
+            if visualCoverGui then
+                pcall(function() visualCoverGui:Destroy() end)
+                visualCoverGui = nil
+            end
+        end
+    end
+
+    local function isProtectedInstance(inst)
+        if not inst then return false end
+        local node = inst
+        for _ = 1, 14 do
+            if not node then break end
+            local n = ""
+            pcall(function() n = node.Name end)
+            if n == "UNO_HUB" or n == "UNO_HUB_VisualCover" or n == "PlayerGui" then
+                return true
+            end
+            local par = nil
+            pcall(function() par = node.Parent end)
+            node = par
+        end
+        local name = ""
+        pcall(function() name = inst.Name end)
+        local lower = string.lower(tostring(name))
+        for _, tok in ipairs({"hotegg", "nestegg", "meteor", "hazard", "pitzone", "carrier", "uno_hub"}) do
+            if string.find(lower, tok, 1, true) then return true end
+        end
+        local tagged = false
+        pcall(function()
+            if CollectionService:HasTag(inst, "NestEgg") then tagged = true end
+        end)
+        return tagged
+    end
+
+    local function getCosmeticRoots()
+        local roots = {}
+        if Lighting then table.insert(roots, Lighting) end
+        for _, name in ipairs({"Effects", "VFX", "Visuals", "Fx", "FX", "Particles"}) do
+            local a = Workspace:FindFirstChild(name)
+            if a then table.insert(roots, a) end
+            local b = ReplicatedStorage:FindFirstChild(name)
+            if b then table.insert(roots, b) end
+        end
+        return roots
+    end
+
+    -- Hide Other Chickens: not verified — always false
+    local function isOtherChickenModel()
+        return false
+    end
+
+    PerformanceManager = createPerformanceManager({
+        services = { Players = Players, Lighting = Lighting, Workspace = Workspace },
+        localPlayer = LocalPlayer,
+        getCosmeticRoots = getCosmeticRoots,
+        isProtectedInstance = isProtectedInstance,
+        isOtherChickenModel = isOtherChickenModel,
+        setVisualCover = setVisualCover,
+        log = function(msg, payload)
+            log("PERF", tostring(msg) .. (payload ~= nil and (" " .. tostring(payload)) or ""))
+        end,
+    })
+    State.diagnostics["PerformanceManager"] = PerformanceManager and "READY" or "MISSING"
+
+    ConfigManager = createConfigManager({
+        HttpService = HttpService,
+        log = function(msg, payload)
+            log("CFG", tostring(msg) .. (payload ~= nil and (" " .. tostring(payload)) or ""))
+        end,
+    })
+    State.diagnostics["ConfigManager"] = ConfigManager and (ConfigManager.isPersistenceAvailable() and "READY" or "NO FS") or "MISSING"
+
+    if ConfigManager then
+        ConfigManager.registerSection("automation", function()
+            return {
+                autoFarmRebirth = State.toggles.autoFarmRebirth == true,
+                autoTower = State.toggles.autoTower == true,
+                useFrontierSkip = State.toggles.useFrontierSkip == true,
+                autoFarmStartDelay = tonumber(AFR.postRebirthDelay) or 30,
+                -- Legacy key kept so older UNO configs/tools remain compatible.
+                autoFarmRebirthStartDelay = tonumber(AFR.postRebirthDelay) or 30,
+                autoTowerStartDelay = tonumber(State.autoTower.startDelay) or 30,
+                autoRebirth = State.toggles.autoRebirth == true,
+                autoKoDismiss = State.toggles.autoKoDismiss == true,
+                autoCollectEgg = State.toggles.autoCollectEgg == true,
+                autoHotEgg = State.toggles.autoHotEgg == true,
+                autoHatch = State.toggles.autoHatch == true,
+                autoIncubatorClaim = State.toggles.autoIncubatorClaim == true,
+                autoUpgradeIncubator = State.toggles.autoUpgradeIncubator == true,
+                autoBuyGenerator = State.toggles.autoBuyGenerator == true,
+                autoUpgradeGenerator = State.toggles.autoUpgradeGenerator == true,
+                maxUpgradeGeneratorLevel = State._getMaxUpgradeGeneratorLevel(),
+                autoExpandCoop = State.toggles.autoExpandCoop == true,
+                autoUpgradeRecycler = State.toggles.autoUpgradeRecycler == true,
+                autoEventCapsule = State.toggles.autoEventCapsule == true,
+                autoArena = State.toggles.autoArena == true,
+                autoKraken = State.toggles.autoKraken == true,
+                autoUfoAscension = State.toggles.autoUfoAscension == true,
+                ufoAscensionGoal = State.ufoAscension.goal or "max_genes",
+                ufoTargetRarity = State.ufoAscension.targetRarity or "secret",
+            }
+        end, function(data)
+            if type(data) ~= "table" then return end
+            local function applyToggle(key, setter)
+                if data[key] == nil then return end
+                State.toggles[key] = data[key] == true
+                if setter then pcall(setter, data[key] == true) end
+            end
+            -- Preferences + optional worker start.
+            -- Invalid old config with both Tower automations ON resolves to AFR.
+            if data.autoFarmRebirth == true and data.autoTower == true then
+                data.autoTower = false
+            end
+            local configuredAutoFarmStartDelay = data.autoFarmStartDelay
+            if configuredAutoFarmStartDelay == nil then
+                configuredAutoFarmStartDelay = data.autoFarmRebirthStartDelay
+            end
+            if configuredAutoFarmStartDelay ~= nil then
+                local delayValue = math.clamp(math.floor((tonumber(configuredAutoFarmStartDelay) or 30) + 0.5), 0, 120)
+                AFR.postRebirthDelay = delayValue
+                AFR.retryDelay = delayValue
+            end
+            if data.autoTowerStartDelay ~= nil then
+                State.autoTower.startDelay = math.clamp(math.floor((tonumber(data.autoTowerStartDelay) or 30) + 0.5), 0, 120)
+            end
+
+            applyToggle("autoKoDismiss")
+            applyToggle("useFrontierSkip")
+            applyToggle("autoTower") -- desired state; backend restores after coordinator READY
+            applyToggle("autoFarmRebirth", setAutoFarmRebirth)
+            applyToggle("autoRebirth", setAutoRebirth)
+            if AutoCollectEggFeature then applyToggle("autoCollectEgg", function(v) AutoCollectEggFeature.setAutoCollectEggs(v) end) end
+            applyToggle("autoHotEgg", setAutoHotEgg)
+            if HatchFeature then applyToggle("autoHatch", function(v) HatchFeature.setAutoHatch(v) end) end
+            if IncubatorClaimFeature then applyToggle("autoIncubatorClaim", function(v) IncubatorClaimFeature.setAutoIncubatorClaim(v) end) end
+            if AutoUpgradeIncubatorFeature then applyToggle("autoUpgradeIncubator", function(v) AutoUpgradeIncubatorFeature.setAutoUpgradeIncubator(v) end) end
+            applyToggle("autoBuyGenerator", setAutoBuyGenerator)
+            if data.maxUpgradeGeneratorLevel ~= nil then
+                State._setMaxUpgradeGeneratorLevel(data.maxUpgradeGeneratorLevel)
+            else
+                State._setMaxUpgradeGeneratorLevel(50)
+            end
+            applyToggle("autoUpgradeGenerator", setAutoUpgradeGenerator)
+            applyToggle("autoExpandCoop", setAutoExpandCoop)
+            applyToggle("autoUpgradeRecycler", setAutoUpgradeRecycler)
+
+            -- UFO goal preferences are restored now; the standalone backend is
+            -- constructed later and receives these values during its merge bridge.
+            if data.ufoAscensionGoal == "rarity" then
+                State.ufoAscension.goal = "rarity"
+            else
+                State.ufoAscension.goal = "max_genes"
+            end
+            if type(data.ufoTargetRarity) == "string" and data.ufoTargetRarity ~= "" then
+                State.ufoAscension.targetRarity = string.lower(data.ufoTargetRarity)
+            end
+
+            -- Phase 9 backends are constructed later (Stage 07), so restore their
+            -- desired toggle state now and apply it after bootstrap becomes READY.
+            applyToggle("autoEventCapsule")
+            applyToggle("autoArena")
+            applyToggle("autoKraken")
+            applyToggle("autoUfoAscension")
+        end, { defaults = {
+            autoFarmRebirth = false,
+            autoTower = false,
+            useFrontierSkip = true,
+            autoFarmRebirthStartDelay = 30,
+            autoTowerStartDelay = 30,
+            autoRebirth = false,
+            autoKoDismiss = true,
+            autoCollectEgg = false,
+            autoHotEgg = false,
+            autoHatch = false,
+            autoIncubatorClaim = false,
+            autoUpgradeIncubator = false,
+            autoBuyGenerator = false,
+            autoUpgradeGenerator = false,
+            maxUpgradeGeneratorLevel = 50,
+            autoExpandCoop = false,
+            autoUpgradeRecycler = false,
+            autoEventCapsule = false,
+            autoArena = false,
+            autoKraken = false,
+            autoUfoAscension = false,
+            ufoAscensionGoal = "max_genes",
+            ufoTargetRarity = "secret",
+        } })
+
+        ConfigManager.registerSection("hotEgg", function()
+            return {
+                meteorAvoidance = HE.meteorAvoidance == true,
+                movementMode = HE.movementMode or "Tween",
+                exitPitAfter = HE.exitPitAfter == true,
+            }
+        end, function(data)
+            if type(data) ~= "table" then return end
+            if data.meteorAvoidance ~= nil then HE.meteorAvoidance = data.meteorAvoidance == true end
+            if type(data.movementMode) == "string" then HE.movementMode = data.movementMode end
+            if data.exitPitAfter ~= nil then HE.exitPitAfter = data.exitPitAfter == true end
+        end, { defaults = { meteorAvoidance = true, movementMode = "Tween", exitPitAfter = true } })
+
+        ConfigManager.registerSection("hatch", function()
+            local selected = {}
+            if HatchFeature and type(HatchFeature.getSelectedEggs) == "function" then
+                local ok, list = pcall(HatchFeature.getSelectedEggs)
+                if ok and type(list) == "table" then selected = list end
+            end
+            return { selectedEggs = selected }
+        end, function(data)
+            if type(data) ~= "table" or not HatchFeature then return end
+            if type(HatchFeature.clearEggSelection) == "function" then pcall(HatchFeature.clearEggSelection) end
+            if type(data.selectedEggs) == "table" and type(HatchFeature.setEggSelected) == "function" then
+                for _, id in ipairs(data.selectedEggs) do
+                    pcall(HatchFeature.setEggSelected, id, true)
+                end
+            end
+        end, { defaults = { selectedEggs = {} } })
+
+        ConfigManager.registerSection("sell", function()
+            if not AutoSellFeature then return { enabled = false } end
+            return {
+                enabled = (AutoSellFeature.isEnabled and AutoSellFeature.isEnabled()) or false,
+                rarities = (AutoSellFeature.getSelectedRarities and AutoSellFeature.getSelectedRarities()) or {},
+                protectFavorites = (AutoSellFeature.getProtectFavorites and AutoSellFeature.getProtectFavorites()) ~= false,
+                unprotectedMutations = (AutoSellFeature.getUnprotectedMutations and AutoSellFeature.getUnprotectedMutations()) or {},
+                abilities = (AutoSellFeature.getAbilityWhitelist and AutoSellFeature.getAbilityWhitelist()) or {},
+                maxBatchSize = (AutoSellFeature.getMaxBatchSize and AutoSellFeature.getMaxBatchSize()) or 10,
+            }
+        end, function(data)
+            if type(data) ~= "table" or not AutoSellFeature then return end
+            if type(data.rarities) == "table" then
+                if AutoSellFeature.clearRaritySelection then pcall(AutoSellFeature.clearRaritySelection) end
+                for _, r in ipairs(data.rarities) do
+                    if AutoSellFeature.setRaritySelected then pcall(AutoSellFeature.setRaritySelected, r, true) end
+                end
+            end
+            if data.protectFavorites ~= nil and AutoSellFeature.setProtectFavorites then
+                pcall(AutoSellFeature.setProtectFavorites, data.protectFavorites == true)
+            end
+            if AutoSellFeature.clearMutationProtectionExclusions then
+                pcall(AutoSellFeature.clearMutationProtectionExclusions)
+            end
+            if type(data.unprotectedMutations) == "table" and AutoSellFeature.setMutationUnprotected then
+                for _, mutationId in ipairs(data.unprotectedMutations) do
+                    pcall(AutoSellFeature.setMutationUnprotected, mutationId, true)
+                end
+            end
+            if type(data.abilities) == "table" then
+                if AutoSellFeature.clearAbilityWhitelist then pcall(AutoSellFeature.clearAbilityWhitelist) end
+                if AutoSellFeature.setAbilityWhitelisted then
+                    for abilityId, enabled in pairs(data.abilities) do
+                        if enabled == true then
+                            pcall(AutoSellFeature.setAbilityWhitelisted, abilityId, true)
+                        end
+                    end
+                end
+            end
+            if data.maxBatchSize ~= nil and AutoSellFeature.setMaxBatchSize then
+                pcall(AutoSellFeature.setMaxBatchSize, data.maxBatchSize)
+            end
+            if data.enabled ~= nil and AutoSellFeature.setAutoSell then
+                State.toggles.autoSell = data.enabled == true
+                pcall(AutoSellFeature.setAutoSell, data.enabled == true)
+            end
+        end, { defaults = {
+            enabled = false, rarities = {},
+            protectFavorites = true, unprotectedMutations = {},
+            abilities = {}, maxBatchSize = 10,
+        } })
+
+        ConfigManager.registerSection("favorite", function()
+            local feature = State._autoFavoriteFeature
+            if not feature then return { enabled = false, typeIds = "", rarities = "", mutations = "" } end
+            return {
+                enabled = feature.isEnabled and feature.isEnabled() or false,
+                typeIds = table.concat((feature.getSelectedTypeIds and feature.getSelectedTypeIds()) or {}, "\n"),
+                rarities = table.concat((feature.getSelectedRarities and feature.getSelectedRarities()) or {}, "\n"),
+                mutations = table.concat((feature.getSelectedMutations and feature.getSelectedMutations()) or {}, "\n"),
+            }
+        end, function(data)
+            local feature = State._autoFavoriteFeature
+            if type(data) ~= "table" or not feature then return end
+            if feature.clearTypeSelection then pcall(feature.clearTypeSelection) end
+            if type(data.typeIds) == "string" and feature.setTypeSelected then
+                for id in string.gmatch(data.typeIds, "[^\n]+") do
+                    pcall(feature.setTypeSelected, id, true)
+                end
+            end
+            if feature.clearRaritySelection then pcall(feature.clearRaritySelection) end
+            if type(data.rarities) == "string" and feature.setRaritySelected then
+                for id in string.gmatch(data.rarities, "[^\n]+") do
+                    pcall(feature.setRaritySelected, id, true)
+                end
+            end
+            if feature.clearMutationSelection then pcall(feature.clearMutationSelection) end
+            if type(data.mutations) == "string" and feature.setMutationSelected then
+                for id in string.gmatch(data.mutations, "[^\n]+") do
+                    pcall(feature.setMutationSelected, id, true)
+                end
+            end
+            State.toggles.autoFavorite = data.enabled == true
+            if feature.setAutoFavorite then pcall(feature.setAutoFavorite, data.enabled == true) end
+        end, { defaults = { enabled = false, typeIds = "", rarities = "", mutations = "" } })
+
+
+        ConfigManager.registerSection("fuse", function()
+            if not AutoFuseFeature then return { enabled = false, dryRun = true, keepCopies = 0 } end
+            return {
+                enabled = (AutoFuseFeature.isEnabled and AutoFuseFeature.isEnabled()) or false,
+                dryRun = (AutoFuseFeature.getDryRun and AutoFuseFeature.getDryRun()) ~= false,
+                matchMode = (AutoFuseFeature.getMatchMode and AutoFuseFeature.getMatchMode()) or nil,
+                rarities = (AutoFuseFeature.getSelectedRarities and AutoFuseFeature.getSelectedRarities()) or {},
+                keepCopies = (AutoFuseFeature.getKeepCopies and AutoFuseFeature.getKeepCopies()) or 0,
+                protectFavorites = (AutoFuseFeature.getProtectFavorites and AutoFuseFeature.getProtectFavorites()) ~= false,
+                protectMutated = (AutoFuseFeature.getProtectMutated and AutoFuseFeature.getProtectMutated()) ~= false,
+                abilities = (AutoFuseFeature.getAbilityWhitelist and AutoFuseFeature.getAbilityWhitelist()) or {},
+            }
+        end, function(data)
+            if type(data) ~= "table" or not AutoFuseFeature then return end
+            if AutoFuseFeature.setMatchMode then
+                if data.matchMode == "Same Chicken" or data.matchMode == "Same Rarity" then
+                    pcall(AutoFuseFeature.setMatchMode, data.matchMode)
+                else
+                    pcall(AutoFuseFeature.setMatchMode, nil)
+                end
+            end
+            if data.keepCopies ~= nil and AutoFuseFeature.setKeepCopies then pcall(AutoFuseFeature.setKeepCopies, data.keepCopies) end
+            if type(data.rarities) == "table" then
+                if AutoFuseFeature.clearRaritySelection then pcall(AutoFuseFeature.clearRaritySelection) end
+                for _, r in ipairs(data.rarities) do
+                    if AutoFuseFeature.setRaritySelected then pcall(AutoFuseFeature.setRaritySelected, r, true) end
+                end
+            end
+            if data.protectFavorites ~= nil and AutoFuseFeature.setProtectFavorites then
+                pcall(AutoFuseFeature.setProtectFavorites, data.protectFavorites == true)
+            end
+            if data.protectMutated ~= nil and AutoFuseFeature.setProtectMutated then
+                pcall(AutoFuseFeature.setProtectMutated, data.protectMutated == true)
+            end
+            if type(data.abilities) == "table" then
+                if AutoFuseFeature.clearAbilityWhitelist then pcall(AutoFuseFeature.clearAbilityWhitelist) end
+                if AutoFuseFeature.setAbilityWhitelisted then
+                    for abilityId, enabled in pairs(data.abilities) do
+                        if enabled == true then
+                            pcall(AutoFuseFeature.setAbilityWhitelisted, abilityId, true)
+                        end
+                    end
+                end
+            end
+            if data.dryRun ~= nil and AutoFuseFeature.setDryRun then pcall(AutoFuseFeature.setDryRun, data.dryRun == true) end
+            if data.enabled ~= nil and AutoFuseFeature.setAutoFuse then
+                State.toggles.autoFuse = data.enabled == true
+                pcall(AutoFuseFeature.setAutoFuse, data.enabled == true)
+            end
+        end, { defaults = {
+            enabled = false, dryRun = true, keepCopies = 0, rarities = {},
+            protectFavorites = true, protectMutated = true, abilities = {},
+            matchMode = nil,
+        } })
+
+
+        ConfigManager.registerSection("targetFuse", function()
+            local feature = State._targetFuseFeature
+            if not feature then return { enabled = false, targetId = "", rarities = "", locks = "" } end
+            return {
+                enabled = feature.isEnabled and feature.isEnabled() or false,
+                targetId = tostring((feature.getTargetId and feature.getTargetId()) or ""),
+                rarities = table.concat((feature.getSelectedRarities and feature.getSelectedRarities()) or {}, "\n"),
+                locks = table.concat((feature.getSelectedLocks and feature.getSelectedLocks()) or {}, "\n"),
+            }
+        end, function(data, meta)
+            local feature = State._targetFuseFeature
+            if type(data) ~= "table" or not feature then return end
+            if feature.setEnabled then pcall(feature.setEnabled, false) end
+            State.toggles.autoTargetFuse = false
+            if feature.clearRarities then pcall(feature.clearRarities) end
+            if type(data.rarities) == "string" and feature.setRaritySelected then
+                for id in string.gmatch(data.rarities, "[^\n]+") do pcall(feature.setRaritySelected, id, true) end
+            end
+            if data.targetId ~= nil and feature.setTargetId then
+                local id = tostring(data.targetId)
+                if id ~= "" then pcall(feature.setTargetId, id) end
+            end
+            if feature.clearLocks then pcall(feature.clearLocks) end
+            if type(data.locks) == "string" and feature.setLockSelected then
+                for field in string.gmatch(data.locks, "[^\n]+") do pcall(feature.setLockSelected, field, true) end
+            end
+            local mayRestore = type(meta) == "table" and meta.restoredDestructiveAutomation == true
+            if mayRestore and data.enabled == true and feature.setEnabled then
+                State.toggles.autoTargetFuse = true
+                pcall(feature.setEnabled, true)
+            end
+        end, { defaults = { enabled = false, targetId = "", rarities = "", locks = "" } })
+
+        ConfigManager.registerSection("performance", function()
+            if not PerformanceManager then return {} end
+            return {
+                boostFPS = PerformanceManager.getBoostFPS(),
+                disableVFX = PerformanceManager.getDisableVFX(),
+                disableShadows = PerformanceManager.getDisableShadows(),
+                hideOtherPlayers = PerformanceManager.getHideOtherPlayers(),
+                hideOtherChickens = PerformanceManager.getHideOtherChickens(),
+                whiteScreen = PerformanceManager.getWhiteScreen(),
+                ultraPerformance = PerformanceManager.getUltraPerformance(),
+                potatoMode = PerformanceManager.getPotatoMode and PerformanceManager.getPotatoMode() or false,
+            }
+        end, function(data)
+            if type(data) ~= "table" or not PerformanceManager then return end
+            if data.disableVFX ~= nil then PerformanceManager.setDisableVFX(data.disableVFX == true) end
+            if data.disableShadows ~= nil then PerformanceManager.setDisableShadows(data.disableShadows == true) end
+            if data.hideOtherPlayers ~= nil then PerformanceManager.setHideOtherPlayers(data.hideOtherPlayers == true) end
+            if data.hideOtherChickens ~= nil then PerformanceManager.setHideOtherChickens(data.hideOtherChickens == true) end
+            if data.whiteScreen ~= nil then PerformanceManager.setWhiteScreen(data.whiteScreen == true) end
+            if data.boostFPS ~= nil then PerformanceManager.setBoostFPS(data.boostFPS == true) end
+            if data.ultraPerformance ~= nil then PerformanceManager.setUltraPerformance(data.ultraPerformance == true) end
+            if data.potatoMode ~= nil and PerformanceManager.setPotatoMode then PerformanceManager.setPotatoMode(data.potatoMode == true) end
+        end, { defaults = {
+            boostFPS = false, disableVFX = false, disableShadows = false,
+            hideOtherPlayers = false, hideOtherChickens = false, whiteScreen = false, ultraPerformance = false, potatoMode = false,
+        } })
+
+
+        -- CONFIG DIRTY HOOKS
+        -- Custom controls (rarity filters, ability filters, fuse mode, keep copies,
+        -- dry-run, etc.) do not all go through settingRow(), so wrap their public
+        -- setters once. During ConfigManager.load(), isApplyingConfig suppresses
+        -- dirty marking to avoid immediately re-saving the file.
+        local function wrapConfigDirty(api, methodName)
+            if type(api) ~= "table" or type(api[methodName]) ~= "function" then return end
+            local marker = "__UNO_CFG_WRAPPED_" .. methodName
+            if api[marker] == true then return end
+            local original = api[methodName]
+            api[methodName] = function(...)
+                local results = table.pack(original(...))
+                markConfigDirty()
+                return table.unpack(results, 1, results.n)
+            end
+            api[marker] = true
+        end
+
+        if AutoSellFeature then
+            for _, methodName in ipairs({
+                "setAutoSell", "setMaxBatchSize",
+                "setProtectFavorites",
+                "setRaritySelected", "clearRaritySelection", "selectAllRarities",
+                "setAbilityWhitelisted", "clearAbilityWhitelist",
+                "setMutationProtected", "setMutationUnprotected", "clearMutationProtectionExclusions",
+            }) do
+                wrapConfigDirty(AutoSellFeature, methodName)
+            end
+        end
+
+        if AutoFuseFeature then
+            for _, methodName in ipairs({
+                "setAutoFuse", "setDryRun", "setMatchMode", "setKeepCopies",
+                "setProtectFavorites", "setProtectMutated",
+                "setRaritySelected", "clearRaritySelection", "selectAllRarities",
+                "setAbilityWhitelisted", "clearAbilityWhitelist",
+            }) do
+                wrapConfigDirty(AutoFuseFeature, methodName)
+            end
+        end
+
+        if HatchFeature then
+            for _, methodName in ipairs({
+                "setAutoHatch", "setEggSelected", "clearEggSelection", "selectAllAvailableEggs",
+            }) do
+                wrapConfigDirty(HatchFeature, methodName)
+            end
+        end
+
+        ConfigManager.registerSection("ui", function()
+            return {
+                showFloatingButton = State.toggles.showFloatingButton ~= false,
+                reducedMotion = State.toggles.reducedMotion == true,
+                responsiveUI = RESPONSIVE.enabled ~= false,
+                uiScaleMode = RESPONSIVE.mode or "Auto",
+            }
+        end, function(data)
+            if type(data) ~= "table" then return end
+            if data.showFloatingButton ~= nil then State.toggles.showFloatingButton = data.showFloatingButton == true end
+            if data.reducedMotion ~= nil then State.toggles.reducedMotion = data.reducedMotion == true end
+            if data.responsiveUI ~= nil then RESPONSIVE.enabled = data.responsiveUI == true end
+            if type(data.uiScaleMode) == "string" then RESPONSIVE.mode = data.uiScaleMode end
+            if type(updateResponsiveScale) == "function" then pcall(updateResponsiveScale) end
+        end, { defaults = { showFloatingButton = true, reducedMotion = false, responsiveUI = true, uiScaleMode = "Auto" } })
+    end
+end
+
+
+
+-- Auto-load config once before UI so switches reflect backend state
+if ConfigManager then
+    isApplyingConfig = true
+    pcall(function() ConfigManager.load() end)
+    isApplyingConfig = false
+end
+
+local Gui = Instance.new("ScreenGui")
+Gui.Name = "UNO_HUB"; Gui.ResetOnSpawn = false; Gui.IgnoreGuiInset = true; Gui.DisplayOrder = 50
+Gui:SetAttribute("UNO_HUB_Shutdown", false); Gui.Parent = PlayerGui
+
+local Main = Instance.new("Frame")
+Main.Name = "Main"
+Main.Size = UDim2.fromOffset(920, 620); Main.Position = UDim2.fromScale(0.5, 0.5); Main.AnchorPoint = Vector2.new(0.5, 0.5)
+Main.BackgroundColor3 = Theme.Background; Main.BorderSizePixel = 0; Main.ClipsDescendants = true; Main.Parent = Gui
+corner(Main, 12); stroke(Main)
+
+-- Responsive UIScale (UI only — does not affect VisualCover ScreenGui)
+local MainUIScale = Instance.new("UIScale")
+MainUIScale.Name = "ResponsiveScale"
+MainUIScale.Scale = 1
+MainUIScale.Parent = Main
+
+local RESPONSIVE = {
+    enabled = true,
+    mode = "Auto", -- Auto | 1.0 | 0.9 | 0.8 | 0.7
+    refW = 1920,
+    refH = 1080,
+    baseW = 920,
+    baseH = 620,
+    sidebarNormal = 145,
+    sidebarSmall = 135,
+    sidebarTiny = 125,
+    minScale = 0.40,
+    maxScale = 1.00,
+    maxViewportW = 0.92,
+    maxViewportH = 0.88,
+}
+
+local function getViewportSize()
+    local cam = Workspace.CurrentCamera
+    if cam and typeof(cam.ViewportSize) == "Vector2" then
+        return cam.ViewportSize
+    end
+    return Vector2.new(1280, 720)
+end
+
+local function clampFloatInViewport()
+    if not Float or not Float.Parent then return end
+    local vp = getViewportSize()
+    local size = Float.AbsoluteSize
+    local pos = Float.AbsolutePosition
+    local x = math.clamp(pos.X, 8, math.max(8, vp.X - size.X - 8))
+    local y = math.clamp(pos.Y, 8, math.max(8, vp.Y - size.Y - 8))
+    Float.Position = UDim2.fromOffset(x, y)
+end
+
+local function applySidebarWidth(width)
+    width = math.floor(width)
+    if Sidebar then
+        Sidebar.Size = UDim2.fromOffset(width, RESPONSIVE.baseH)
+    end
+    if ContentRoot then
+        ContentRoot.Position = UDim2.fromOffset(width, 0)
+        ContentRoot.Size = UDim2.new(1, -width, 1, 0)
+    end
+end
+
+local function updateResponsiveScale()
+    if not Main or not MainUIScale then return end
+    if RESPONSIVE.enabled == false then MainUIScale.Scale = 1; applySidebarWidth(RESPONSIVE.sidebarNormal); return end
+    local vp = getViewportSize()
+    local scale
+    if RESPONSIVE.mode ~= "Auto" then
+        scale = tonumber(RESPONSIVE.mode) or 1
+    else
+        local maxW, maxH = RESPONSIVE.maxViewportW, RESPONSIVE.maxViewportH
+        if UserInputService.TouchEnabled and (vp.X < 1100 or vp.Y < 700) then maxW, maxH = 0.97, 0.92 end
+        if State.windowExpanded == true then maxW = UserInputService.TouchEnabled and 0.985 or 0.96; maxH = UserInputService.TouchEnabled and 0.94 or 0.92 end
+        local fitW = (vp.X * maxW) / RESPONSIVE.baseW
+        local fitH = (vp.Y * maxH) / RESPONSIVE.baseH
+        scale = math.max(0.10, math.min(fitW, fitH, RESPONSIVE.maxScale))
+    end
+    MainUIScale.Scale = scale
+    if vp.X < 650 or vp.Y < 450 then applySidebarWidth(RESPONSIVE.sidebarTiny)
+    elseif vp.X < 900 or vp.Y < 600 then applySidebarWidth(RESPONSIVE.sidebarSmall)
+    else applySidebarWidth(RESPONSIVE.sidebarNormal) end
+    pcall(clampFloatInViewport)
+end
+
+do
+    local dragging, start, startPos
+    maid:Connect(Main.InputBegan, function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then dragging = true; start = input.Position; startPos = Main.Position end
+    end)
+    maid:Connect(UserInputService.InputChanged, function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local d = input.Position - start
+            -- Pixel deltas are independent of UIScale on the Main frame
+            Main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+        end
+    end)
+    maid:Connect(UserInputService.InputEnded, function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then dragging = false end
+    end)
+end
+
+local Sidebar = Instance.new("Frame")
+Sidebar.Size = UDim2.fromOffset(145, 620)
+Sidebar.BackgroundColor3 = Theme.Sidebar
+Sidebar.BorderSizePixel = 0
+Sidebar.Parent = Main
+corner(Sidebar, 12)
+
+local brand = Instance.new("Frame")
+brand.Size = UDim2.new(1, 0, 0, 68)
+brand.BackgroundTransparency = 1
+brand.Parent = Sidebar
+
+local brandUno = text(brand, "UnO", 16, Theme.TextPrimary, Enum.Font.GothamBold)
+brandUno.Position = UDim2.fromOffset(16, 10)
+brandUno.Size = UDim2.new(1, -24, 0, 22)
+
+local brandHub = text(brand, "HUB", 10, Theme.TextMuted, Enum.Font.Gotham)
+brandHub.Position = UDim2.fromOffset(16, 32)
+brandHub.Size = UDim2.new(1, -24, 0, 18)
+
+local NavScroll = Instance.new("ScrollingFrame")
+NavScroll.Position = UDim2.fromOffset(0, 70); NavScroll.Size = UDim2.new(1, 0, 1, -130)
+NavScroll.BackgroundTransparency = 1; NavScroll.BorderSizePixel = 0; NavScroll.ScrollBarThickness = 2
+NavScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y; NavScroll.CanvasSize = UDim2.new(); NavScroll.Parent = Sidebar
+Instance.new("UIListLayout", NavScroll).Padding = UDim.new(0, 2)
+pad(NavScroll, 4, 10, 8, 10)
+
+local pages = {
+    { id = "Auto Farm", icon = "", title = "Auto Farm" },
+    { id = "Auto Hatch Egg", icon = "", title = "Auto Hatch Egg" },
+    { id = "Performance", icon = "", title = "Performance" },
+    { id = "Webhook", icon = "", title = "Webhook" },
+    { id = "Configs", icon = "", title = "Configs" },
+}
+local navButtons = {}
+local pageDescs = {
+    Home = "Overview", ["Auto Farm"] = "Farm + Collect", Tower = "Tower",
+    Rebirth = "Rebirth", Eggs = "Hatch filter", Chickens = "Auto Sell",
+    Fuse = "Auto Fuse", Incubator = "Auto claim", Coop = "Generators", Events = "Hot Egg",
+    Utility = "Anti-AFK", Diagnostics = "Integration", Settings = "Actions",
+}
+
+local ContentRoot = Instance.new("Frame")
+ContentRoot.Position = UDim2.fromOffset(145, 0); ContentRoot.Size = UDim2.new(1, -145, 1, 0)
+ContentRoot.BackgroundColor3 = Theme.Background; ContentRoot.BorderSizePixel = 0; ContentRoot.Parent = Main
+local Topbar = Instance.new("Frame")
+Topbar.Size = UDim2.new(1, 0, 0, 52); Topbar.BackgroundColor3 = Theme.Surface; Topbar.BorderSizePixel = 0; Topbar.Parent = ContentRoot; stroke(Topbar)
+local PageTitle = text(Topbar, "Grow A Chicken Fighter | V2", 13, Theme.TextPrimary, Enum.Font.GothamBold)
+PageTitle.Position = UDim2.fromOffset(18, 15); PageTitle.Size = UDim2.new(1, -190, 0, 22)
+local PageDesc = text(Topbar, "", 1, Theme.TextMuted)
+PageDesc.Visible = false
+local connDot = Instance.new("Frame")
+connDot.Size = UDim2.fromOffset(7, 7); connDot.Position = UDim2.new(1, -174, 0.5, -3)
+connDot.BackgroundColor3 = Theme.Success; connDot.BorderSizePixel = 0; connDot.Parent = Topbar; corner(connDot, 4)
+local minBtn = Instance.new("TextButton")
+minBtn.Size = UDim2.fromOffset(30, 30); minBtn.Position = UDim2.new(1, -108, 0.5, -15)
+minBtn.BackgroundColor3 = Theme.SurfaceElevated; minBtn.Text = "—"; minBtn.Font = Enum.Font.GothamBold
+minBtn.TextSize = 15; minBtn.TextColor3 = Theme.TextSecondary; minBtn.AutoButtonColor = false; minBtn.Parent = Topbar; corner(minBtn, 7)
+local resizeBtn = Instance.new("TextButton")
+resizeBtn.Size = UDim2.fromOffset(30, 30); resizeBtn.Position = UDim2.new(1, -74, 0.5, -15)
+resizeBtn.BackgroundColor3 = Theme.SurfaceElevated; resizeBtn.Text = "[ ]"; resizeBtn.Font = Enum.Font.GothamBold
+resizeBtn.TextSize = 10; resizeBtn.TextColor3 = Theme.TextSecondary; resizeBtn.AutoButtonColor = false; resizeBtn.Parent = Topbar; corner(resizeBtn, 7)
+local closeBtn = Instance.new("TextButton")
+closeBtn.Size = UDim2.fromOffset(30, 30); closeBtn.Position = UDim2.new(1, -40, 0.5, -15)
+closeBtn.BackgroundColor3 = Theme.SurfaceElevated; closeBtn.Text = "✕"; closeBtn.Font = Enum.Font.GothamBold
+closeBtn.TextSize = 12; closeBtn.TextColor3 = Theme.TextSecondary; closeBtn.AutoButtonColor = false; closeBtn.Parent = Topbar; corner(closeBtn, 7)
+local PageHost = Instance.new("Frame")
+PageHost.Position = UDim2.fromOffset(0, 52); PageHost.Size = UDim2.new(1, 0, 1, -52)
+PageHost.BackgroundTransparency = 1; PageHost.ClipsDescendants = true; PageHost.Parent = ContentRoot
+local Float = Instance.new("TextButton")
+Float.Size = UDim2.fromOffset(66, 38); Float.Position = UDim2.new(0, 18, 0.5, -19)
+Float.BackgroundColor3 = Theme.SurfaceElevated; Float.Text = "UNO"; Float.Font = Enum.Font.GothamBold
+Float.TextSize = 13; Float.TextColor3 = Theme.TextPrimary; Float.Visible = false; Float.AutoButtonColor = false; Float.Parent = Gui; corner(Float, 10)
+
+-- Bind responsive scale to camera viewport changes
+do
+    local function bindViewport(cam)
+        if not cam then return end
+        maid:Connect(cam:GetPropertyChangedSignal("ViewportSize"), function()
+            updateResponsiveScale()
+        end)
+    end
+    if Workspace.CurrentCamera then
+        bindViewport(Workspace.CurrentCamera)
+    end
+    maid:Connect(Workspace:GetPropertyChangedSignal("CurrentCamera"), function()
+        if Workspace.CurrentCamera then
+            bindViewport(Workspace.CurrentCamera)
+            updateResponsiveScale()
+        end
+    end)
+    task.defer(updateResponsiveScale)
+end
+
+local function setVisible(vis)
+    if State.closed then return end
+    State.visible = vis
+    if vis then Main.Visible = true; Float.Visible = false
+    else Main.Visible = false; if State.toggles.showFloatingButton then Float.Visible = true end end
+end
+local function shutdown()
+    if State.closed then return end
+    Gui:SetAttribute("UNO_HUB_Shutdown", true)
+    local env = (getgenv and getgenv()) or _G
+    local phase9 = env.UNO_HUB_PHASE9
+    if phase9 and type(phase9.destroy) == "function" then
+        pcall(phase9.destroy)
+    end
+    local integration = env.UNO_HUB_PRIORITY_INTEGRATION
+    if integration and type(integration.destroy) == "function" then
+        pcall(integration.destroy)
+    end
+    State.closed = true; State.generation += 1
+
+    -- 1) save config while feature getters still available
+    if ConfigManager then pcall(function() ConfigManager.destroy() end) end
+    -- 2) stop workers
+    if AutoCollectEggFeature then pcall(function() AutoCollectEggFeature.setAutoCollectEggs(false); AutoCollectEggFeature.destroy() end) end
+    if AutoSellFeature then pcall(function() AutoSellFeature.setAutoSell(false); AutoSellFeature.destroy() end) end
+    if State._autoFavoriteFeature then pcall(function() State._autoFavoriteFeature.setAutoFavorite(false); State._autoFavoriteFeature.destroy() end) end
+    if State._autoUnfavoriteFeature then pcall(function() State._autoUnfavoriteFeature.setAutoUnfavorite(false); State._autoUnfavoriteFeature.destroy() end) end
+    if AutoFuseFeature then pcall(function() AutoFuseFeature.setAutoFuse(false); AutoFuseFeature.destroy() end) end
+    HatchFeature.setAutoHatch(false)
+    IncubatorClaimFeature.setAutoIncubatorClaim(false)
+    if AutoUpgradeIncubatorFeature then pcall(function() AutoUpgradeIncubatorFeature.setAutoUpgradeIncubator(false) end) end
+    afrCancel(); heCancel(); antiAfkGen += 1
+    for name in pairs(Economy.generations) do stopEconomy(name) end
+    for k in pairs(State.toggles) do State.toggles[k] = false end
+    -- 3) restore visuals
+    if PerformanceManager then pcall(function() PerformanceManager.destroy() end) end
+    if visualCoverGui then pcall(function() visualCoverGui:Destroy() end); visualCoverGui = nil end
+    -- 4) destroy UI
+    local envNow = (getgenv and getgenv()) or _G
+    local autoTowerApi = envNow.UNO_AUTO_TOWER_STANDALONE
+    if type(autoTowerApi) == "table" and type(autoTowerApi.destroy) == "function" then pcall(autoTowerApi.destroy) end
+    local towerManagerApi = envNow.UNO_TOWER_ENTRY_MANAGER
+    if type(towerManagerApi) == "table" and type(towerManagerApi.destroy) == "function" then pcall(towerManagerApi.destroy) end
+    maid:Cleanup(); Gui:Destroy()
+end
+minBtn.MouseButton1Click:Connect(function() setVisible(false) end)
+resizeBtn.MouseButton1Click:Connect(function()
+    if State.closed then return end
+    State.windowExpanded = not State.windowExpanded
+    if State.windowExpanded then RESPONSIVE.baseW = 1180; RESPONSIVE.baseH = 700; Main.Size = UDim2.fromOffset(1180, 700); resizeBtn.Text = "[−]"
+    else RESPONSIVE.baseW = 920; RESPONSIVE.baseH = 620; Main.Size = UDim2.fromOffset(920, 620); resizeBtn.Text = "[ ]" end
+    Main.Position = UDim2.fromScale(0.5, 0.5)
+    updateResponsiveScale()
+end)
+local env = (getgenv and getgenv()) or _G
+env.UNO_HUB_RUNTIME = {
+    State = State,
+    Integration = Integration,
+    Services = {
+        Players = Players,
+        ReplicatedStorage = ReplicatedStorage,
+        Workspace = Workspace,
+        CollectionService = CollectionService,
+        TweenService = TweenService,
+    },
+    MovementAdapter = MovementAdapter,
+    cancelMovement = cancelMovement,
+    moveTo = moveTo,
+    setHotEggCoordinatorPaused = function(reason, value)
+        reason = tostring(reason or "COORDINATOR")
+        if value == true then HE.coordinatorPauseReasons[reason] = true else HE.coordinatorPauseReasons[reason] = nil end
+    end,
+    setNormalFarmCoordinatorPaused = function(reason, value)
+        reason = tostring(reason or "COORDINATOR")
+        if value == true then AFR.coordinatorPauseReasons[reason] = true else AFR.coordinatorPauseReasons[reason] = nil end
+    end,
+    getHotEggCoordinatorPauseReasons = function() return HE.coordinatorPauseReasons end,
+    getNormalFarmCoordinatorPauseReasons = function() return AFR.coordinatorPauseReasons end,
+    setAutoHotEgg = setAutoHotEgg,
+    setAutoFarmRebirth = setAutoFarmRebirth,
+    towerAutomation = {
+        enableAutoTower = function()
+            local api = env.UNO_AUTO_TOWER_STANDALONE
+            return type(api) == "table" and type(api.enable) == "function" and api.enable() or false
+        end,
+        disableAutoTower = function()
+            local api = env.UNO_AUTO_TOWER_STANDALONE
+            return type(api) == "table" and type(api.disable) == "function" and api.disable() or false
+        end,
+        requestTowerEntry = function(options)
+            local manager = env.UNO_TOWER_ENTRY_MANAGER
+            if type(manager) == "table" and type(manager.requestEntry) == "function" then
+                return manager.requestEntry(options or {})
+            end
+            return { ok = false, reason = "TOWER_AUTOMATION_UNAVAILABLE" }
+        end,
+        setUseFrontierSkip = function(value)
+            State.toggles.useFrontierSkip = value == true
+            local api = env.UNO_AUTO_TOWER_STANDALONE
+            if type(api) == "table" and type(api.setUseFrontierSkip) == "function" then
+                return api.setUseFrontierSkip(value == true)
+            end
+            return true
+        end,
+        setStartDelay = function(value)
+            value = math.clamp(math.floor((tonumber(value) or 30) + 0.5), 0, 120)
+            State.autoTower.startDelay = value
+            local api = env.UNO_AUTO_TOWER_STANDALONE
+            if type(api) == "table" and type(api.setStartDelay) == "function" then
+                return api.setStartDelay(value)
+            end
+            return true
+        end,
+        pause = function(reason)
+            local api = env.UNO_AUTO_TOWER_STANDALONE
+            return type(api) == "table" and type(api.pause) == "function" and api.pause(reason) or false
+        end,
+        resume = function(reason)
+            local api = env.UNO_AUTO_TOWER_STANDALONE
+            return type(api) == "table" and type(api.resume) == "function" and api.resume(reason) or false
+        end,
+        getStatus = function()
+            local api = env.UNO_AUTO_TOWER_STANDALONE
+            if type(api) == "table" and type(api.getStatus) == "function" then
+                return api.getStatus()
+            end
+            return {
+                enabled = false, phase = "UNAVAILABLE", workerRunning = false,
+                useFrontierSkip = State.toggles.useFrontierSkip == true,
+                startDelay = State.autoTower.startDelay, countdown = 0,
+            }
+        end,
+    },
+    setUfoAscension = setUfoAscension,
+    setToggleVisual = setToggleVisual,
+    isTowerActive = isTowerActive,
+    isTowerExited = function() return not isTowerActive() end,
+    requestTowerSurrender = function() return requestSurrender(AFR.generation) end,
+    getHotEggState = function() return HE end,
+    getNormalFarmState = function() return AFR end,
+    shutdown = shutdown,
+}
+closeBtn.MouseButton1Click:Connect(function()
+    if State.closed then return end
+    local overlay = Instance.new("Frame")
+    overlay.Size = UDim2.fromScale(1,1); overlay.BackgroundColor3 = Color3.new(0,0,0); overlay.BackgroundTransparency = 0.35; overlay.BorderSizePixel = 0; overlay.ZIndex = 500; overlay.Parent = Main
+    local box = Instance.new("Frame")
+    box.AnchorPoint = Vector2.new(0.5,0.5); box.Position = UDim2.fromScale(0.5,0.5); box.Size = UDim2.fromOffset(360,180); box.BackgroundColor3 = Theme.SurfaceElevated; box.BorderSizePixel = 0; box.ZIndex = 501; box.Parent = overlay; corner(box,12); stroke(box)
+    local title = text(box, "Unload UNO HUB?", 16, Theme.TextPrimary, Enum.Font.GothamBold, Enum.TextXAlignment.Center); title.Position = UDim2.fromOffset(18,20); title.Size = UDim2.new(1,-36,0,26); title.ZIndex = 502
+    local desc = text(box, "All running UNO HUB features will stop.", 11, Theme.TextSecondary, Enum.Font.Gotham, Enum.TextXAlignment.Center); desc.Position = UDim2.fromOffset(18,52); desc.Size = UDim2.new(1,-36,0,34); desc.ZIndex = 502
+    local cancel = Instance.new("TextButton"); cancel.Size = UDim2.fromOffset(140,36); cancel.Position = UDim2.new(0.5,-148,1,-54); cancel.BackgroundColor3 = Theme.Surface; cancel.Text = "Cancel"; cancel.Font = Enum.Font.GothamBold; cancel.TextSize = 12; cancel.TextColor3 = Theme.TextPrimary; cancel.ZIndex = 502; cancel.Parent = box; corner(cancel,8)
+    local yes = Instance.new("TextButton"); yes.Size = UDim2.fromOffset(140,36); yes.Position = UDim2.new(0.5,8,1,-54); yes.BackgroundColor3 = Theme.Danger; yes.Text = "Unload"; yes.Font = Enum.Font.GothamBold; yes.TextSize = 12; yes.TextColor3 = Color3.new(1,1,1); yes.ZIndex = 502; yes.Parent = box; corner(yes,8)
+    cancel.MouseButton1Click:Connect(function() if overlay.Parent then overlay:Destroy() end end)
+    yes.MouseButton1Click:Connect(function() if overlay.Parent then overlay:Destroy() end; shutdown() end)
+end)
+
+do
+    Float.Active = true
+    local dragging = false
+    local dragStart = nil
+    local startPosition = nil
+    local moved = false
+    local suppressClickUntil = 0
+
+    maid:Connect(Float.InputBegan, function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            moved = false
+            dragStart = input.Position
+            startPosition = Float.Position
+        end
+    end)
+
+    maid:Connect(UserInputService.InputChanged, function(input)
+        if not dragging or not dragStart or not startPosition then return end
+        if input.UserInputType ~= Enum.UserInputType.MouseMovement
+            and input.UserInputType ~= Enum.UserInputType.Touch then
+            return
+        end
+
+        local delta = input.Position - dragStart
+        if math.abs(delta.X) > 4 or math.abs(delta.Y) > 4 then
+            moved = true
+        end
+
+        Float.Position = UDim2.new(
+            startPosition.X.Scale,
+            startPosition.X.Offset + delta.X,
+            startPosition.Y.Scale,
+            startPosition.Y.Offset + delta.Y
+        )
+    end)
+
+    maid:Connect(UserInputService.InputEnded, function(input)
+        if not dragging then return end
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+            if moved then suppressClickUntil = os.clock() + 0.18 end
+        end
+    end)
+
+    Float.MouseButton1Click:Connect(function()
+        if os.clock() < suppressClickUntil then return end
+        setVisible(true)
+    end)
+end
+maid:Connect(UserInputService.InputBegan, function(input, gp)
+    if gp then return end
+    if input.KeyCode == Enum.KeyCode.RightShift then
+        if UserInputService:GetFocusedTextBox() then return end
+        setVisible(not State.visible)
+    end
+end)
+
+local Views = {}
+local function createScrollPage()
+    local sc = Instance.new("ScrollingFrame")
+    sc.Size = UDim2.fromScale(1, 1); sc.BackgroundTransparency = 1; sc.BorderSizePixel = 0
+    sc.ScrollBarThickness = 3; sc.AutomaticCanvasSize = Enum.AutomaticSize.Y; sc.CanvasSize = UDim2.new()
+    sc.Visible = false; sc.Parent = PageHost
+    local lay = Instance.new("UIListLayout"); lay.Padding = UDim.new(0, 10); lay.SortOrder = Enum.SortOrder.LayoutOrder; lay.Parent = sc
+    pad(sc, 16, 18, 20, 18)
+    return sc
+end
+local function card(parent, order, title, desc)
+    local f = Instance.new("Frame")
+    f.LayoutOrder = order or 0; f.Size = UDim2.new(1, 0, 0, 0); f.AutomaticSize = Enum.AutomaticSize.Y
+    f.BackgroundColor3 = Theme.Surface; f.BorderSizePixel = 0; f.Parent = parent; corner(f, 9); stroke(f)
+    local inner = Instance.new("Frame")
+    inner.Size = UDim2.new(1, 0, 0, 0); inner.AutomaticSize = Enum.AutomaticSize.Y; inner.BackgroundTransparency = 1; inner.Parent = f
+    pad(inner, 12, 14, 12, 14)
+    local lay = Instance.new("UIListLayout"); lay.Padding = UDim.new(0, 6); lay.SortOrder = Enum.SortOrder.LayoutOrder; lay.Parent = inner
+    if title then
+        local h = Instance.new("Frame"); h.Size = UDim2.new(1, 0, 0, 18); h.BackgroundTransparency = 1; h.LayoutOrder = 0; h.Parent = inner
+        text(h, title, 12, Theme.TextSecondary, Enum.Font.GothamMedium).Size = UDim2.new(1, 0, 1, 0)
+        if desc then
+            local d = text(inner, desc, 11, Theme.TextMuted); d.Size = UDim2.new(1, 0, 0, 14); d.LayoutOrder = 1
+        end
+    end
+    return f, inner
+end
+local function row(parent, order, left)
+    local r = Instance.new("Frame"); r.LayoutOrder = order or 0; r.Size = UDim2.new(1, 0, 0, 22); r.BackgroundTransparency = 1; r.Parent = parent
+    text(r, left, 12, Theme.TextMuted).Size = UDim2.new(0.5, 0, 1, 0)
+    local v = text(r, "—", 12, Theme.TextPrimary, Enum.Font.GothamMedium, Enum.TextXAlignment.Right)
+    v.Size = UDim2.new(0.5, 0, 1, 0); v.Position = UDim2.fromScale(0.5, 0)
+    return v
+end
+local ToggleVisualSetters = {}
+
+local function setToggleVisual(key, value)
+    local setters = ToggleVisualSetters[key]
+    if type(setters) ~= "table" then return end
+    for _, setter in ipairs(setters) do
+        if type(setter) == "function" then
+            pcall(setter, value == true, false)
+        end
+    end
+end
+
+local function settingRow(parent, order, title, desc, key, onChange)
+    local f = Instance.new("Frame"); f.LayoutOrder = order or 0; f.Size = UDim2.new(1, 0, 0, 0)
+    f.AutomaticSize = Enum.AutomaticSize.Y; f.BackgroundTransparency = 1; f.Parent = parent; pad(f, 4, 0, 4, 0)
+    local top = Instance.new("Frame"); top.Size = UDim2.new(1, 0, 0, 24); top.BackgroundTransparency = 1; top.Parent = f
+    text(top, title, 13, Theme.TextPrimary, Enum.Font.GothamMedium).Size = UDim2.new(1, -50, 1, 0)
+    local sw, swSet
+    sw, swSet = makeSwitch(top, State.toggles[key] == true, function(v)
+        State.toggles[key] = v
+        if onChange then
+            local ok, result = pcall(onChange, v)
+            if not ok or result == false then
+                State.toggles[key] = false
+                if type(swSet) == "function" then pcall(swSet, false, true) end
+            end
+        end
+        markConfigDirty()
+    end)
+    ToggleVisualSetters[key] = ToggleVisualSetters[key] or {}
+    if type(swSet) == "function" then table.insert(ToggleVisualSetters[key], swSet) end
+    sw.Position = UDim2.new(1, -40, 0.5, -11)
+end
+
+local function uiButton(parent, order, label, onClick)
+    local holder = Instance.new("Frame")
+    holder.LayoutOrder = order or 0
+    holder.Size = UDim2.new(1, 0, 0, 36)
+    holder.BackgroundTransparency = 1
+    holder.Parent = parent
+
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.fromScale(1, 1)
+    button.BackgroundColor3 = Theme.SurfaceElevated
+    button.BorderSizePixel = 0
+    button.Text = label
+    button.Font = Enum.Font.GothamMedium
+    button.TextSize = 12
+    button.TextColor3 = Theme.TextPrimary
+    button.AutoButtonColor = false
+    button.Parent = holder
+    corner(button, 7)
+    stroke(button)
+
+    if onClick then
+        button.MouseButton1Click:Connect(onClick)
+    end
+    return button
+end
+
+State._delayStepper = function(parent, order, title, getValue, setValue)
+    local holder = Instance.new("Frame")
+    holder.LayoutOrder = order or 0
+    holder.Size = UDim2.new(1, 0, 0, 32)
+    holder.BackgroundTransparency = 1
+    holder.Parent = parent
+
+    local label = text(holder, title, 12, Theme.TextMuted)
+    label.Size = UDim2.new(1, -148, 1, 0)
+
+    local minus = Instance.new("TextButton")
+    minus.Size = UDim2.fromOffset(30, 26)
+    minus.Position = UDim2.new(1, -142, 0.5, -13)
+    minus.BackgroundColor3 = Theme.SurfaceElevated
+    minus.BorderSizePixel = 0
+    minus.Text = "−"
+    minus.Font = Enum.Font.GothamBold
+    minus.TextSize = 15
+    minus.TextColor3 = Theme.TextPrimary
+    minus.AutoButtonColor = false
+    minus.Parent = holder
+    corner(minus, 7); stroke(minus)
+
+    local valueLabel = text(holder, "30s", 12, Theme.TextPrimary, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
+    valueLabel.Size = UDim2.fromOffset(68, 26)
+    valueLabel.Position = UDim2.new(1, -108, 0.5, -13)
+
+    local plus = Instance.new("TextButton")
+    plus.Size = UDim2.fromOffset(30, 26)
+    plus.Position = UDim2.new(1, -34, 0.5, -13)
+    plus.BackgroundColor3 = Theme.SurfaceElevated
+    plus.BorderSizePixel = 0
+    plus.Text = "+"
+    plus.Font = Enum.Font.GothamBold
+    plus.TextSize = 15
+    plus.TextColor3 = Theme.TextPrimary
+    plus.AutoButtonColor = false
+    plus.Parent = holder
+    corner(plus, 7); stroke(plus)
+
+    local function refresh()
+        local current = math.clamp(math.floor((tonumber(getValue()) or 30) + 0.5), 0, 120)
+        valueLabel.Text = tostring(current) .. "s"
+    end
+    local function change(delta)
+        local current = tonumber(getValue()) or 30
+        setValue(math.clamp(current + delta, 0, 120))
+        refresh(); markConfigDirty()
+    end
+    minus.MouseButton1Click:Connect(function() change(-5) end)
+    plus.MouseButton1Click:Connect(function() change(5) end)
+    refresh()
+    return valueLabel
+end
+
+State._generatorMaxLevelStepper = function(parent, order)
+    local holder = Instance.new("Frame")
+    holder.LayoutOrder = order or 0
+    holder.Size = UDim2.new(1, 0, 0, 32)
+    holder.BackgroundTransparency = 1
+    holder.Parent = parent
+
+    local label = text(holder, "Max Upgrade Level", 12, Theme.TextMuted)
+    label.Size = UDim2.new(1, -148, 1, 0)
+
+    local minus = Instance.new("TextButton")
+    minus.Size = UDim2.fromOffset(30, 26)
+    minus.Position = UDim2.new(1, -142, 0.5, -13)
+    minus.BackgroundColor3 = Theme.SurfaceElevated
+    minus.BorderSizePixel = 0
+    minus.Text = "−"
+    minus.Font = Enum.Font.GothamBold
+    minus.TextSize = 15
+    minus.TextColor3 = Theme.TextPrimary
+    minus.AutoButtonColor = false
+    minus.Parent = holder
+    corner(minus, 7); stroke(minus)
+
+    local valueBox = Instance.new("TextBox")
+    valueBox.Size = UDim2.fromOffset(68, 26)
+    valueBox.Position = UDim2.new(1, -108, 0.5, -13)
+    valueBox.BackgroundColor3 = Theme.SurfaceElevated
+    valueBox.BorderSizePixel = 0
+    valueBox.ClearTextOnFocus = false
+    valueBox.Text = tostring(State._getMaxUpgradeGeneratorLevel())
+    valueBox.Font = Enum.Font.GothamMedium
+    valueBox.TextSize = 12
+    valueBox.TextColor3 = Theme.TextPrimary
+    valueBox.TextXAlignment = Enum.TextXAlignment.Center
+    valueBox.PlaceholderText = "50"
+    valueBox.Parent = holder
+    corner(valueBox, 7); stroke(valueBox)
+
+    local plus = Instance.new("TextButton")
+    plus.Size = UDim2.fromOffset(30, 26)
+    plus.Position = UDim2.new(1, -34, 0.5, -13)
+    plus.BackgroundColor3 = Theme.SurfaceElevated
+    plus.BorderSizePixel = 0
+    plus.Text = "+"
+    plus.Font = Enum.Font.GothamBold
+    plus.TextSize = 15
+    plus.TextColor3 = Theme.TextPrimary
+    plus.AutoButtonColor = false
+    plus.Parent = holder
+    corner(plus, 7); stroke(plus)
+
+    local function refresh(value)
+        if not valueBox or not valueBox.Parent then return end
+        local normalized = tonumber(value) or State._getMaxUpgradeGeneratorLevel()
+        valueBox.Text = tostring(math.floor(normalized + 0.5))
+    end
+
+    table.insert(State._generatorMaxLevelVisualSetters, refresh)
+
+    local function commitText()
+        local typed = tonumber(valueBox.Text)
+        if typed == nil then
+            refresh(State._getMaxUpgradeGeneratorLevel())
+            return
+        end
+        State._setMaxUpgradeGeneratorLevel(typed)
+    end
+
+    minus.MouseButton1Click:Connect(function()
+        State._setMaxUpgradeGeneratorLevel(State._getMaxUpgradeGeneratorLevel() - 1)
+    end)
+    plus.MouseButton1Click:Connect(function()
+        State._setMaxUpgradeGeneratorLevel(State._getMaxUpgradeGeneratorLevel() + 1)
+    end)
+    valueBox.FocusLost:Connect(function()
+        commitText()
+    end)
+
+    refresh(State._getMaxUpgradeGeneratorLevel())
+    return valueBox
+end
+
+local function createTabbedPage(tabNames)
+    local root = Instance.new("Frame")
+    root.Size = UDim2.fromScale(1, 1)
+    root.BackgroundTransparency = 1
+    root.Visible = false
+    root.Parent = PageHost
+
+    local tabsBar = Instance.new("Frame")
+    tabsBar.Position = UDim2.fromOffset(18, 8)
+    tabsBar.Size = UDim2.new(1, -36, 0, 36)
+    tabsBar.BackgroundTransparency = 1
+    tabsBar.Parent = root
+
+    local tabsLayout = Instance.new("UIListLayout")
+    tabsLayout.FillDirection = Enum.FillDirection.Horizontal
+    tabsLayout.Padding = UDim.new(0, 8)
+    tabsLayout.Parent = tabsBar
+
+    local body = Instance.new("Frame")
+    body.Position = UDim2.fromOffset(0, 48)
+    body.Size = UDim2.new(1, 0, 1, -48)
+    body.BackgroundTransparency = 1
+    body.Parent = root
+
+    local bodies = {}
+    local buttons = {}
+    local activeTab = tabNames[1]
+
+    local function selectTab(name)
+        activeTab = name
+        for tabName, frame in pairs(bodies) do
+            frame.Visible = tabName == name
+        end
+        for tabName, button in pairs(buttons) do
+            local selected = tabName == name
+            button.TextColor3 = selected and Theme.TextPrimary or Theme.TextMuted
+            button.BackgroundTransparency = selected and 0 or 1
+        end
+    end
+
+    for index, name in ipairs(tabNames) do
+        local tabButton = Instance.new("TextButton")
+        tabButton.LayoutOrder = index
+        tabButton.Size = UDim2.fromOffset(math.max(68, #name * 7 + 22), 30)
+        tabButton.BackgroundColor3 = Theme.SurfaceElevated
+        tabButton.BackgroundTransparency = 1
+        tabButton.BorderSizePixel = 0
+        tabButton.Text = name
+        tabButton.Font = Enum.Font.GothamMedium
+        tabButton.TextSize = 12
+        tabButton.TextColor3 = Theme.TextMuted
+        tabButton.AutoButtonColor = false
+        tabButton.Parent = tabsBar
+        corner(tabButton, 5)
+        buttons[name] = tabButton
+
+        local scroll = Instance.new("ScrollingFrame")
+        scroll.Size = UDim2.fromScale(1, 1)
+        scroll.BackgroundTransparency = 1
+        scroll.BorderSizePixel = 0
+        scroll.ScrollBarThickness = 3
+        scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+        scroll.CanvasSize = UDim2.new()
+        scroll.Visible = false
+        scroll.Parent = body
+        local layout = Instance.new("UIListLayout")
+        layout.Padding = UDim.new(0, 10)
+        layout.SortOrder = Enum.SortOrder.LayoutOrder
+        layout.Parent = scroll
+        pad(scroll, 12, 18, 18, 18)
+        bodies[name] = scroll
+
+        tabButton.MouseButton1Click:Connect(function()
+            selectTab(name)
+        end)
+    end
+
+    selectTab(tabNames[1])
+    return root, bodies, function() return activeTab end
+end
+
+local function makeCollapsibleFilter(parent, order, label, buildRows)
+    local wrap = Instance.new("Frame")
+    wrap.LayoutOrder = order or 0
+    wrap.Size = UDim2.new(1, 0, 0, 38)
+    wrap.AutomaticSize = Enum.AutomaticSize.Y
+    wrap.BackgroundTransparency = 1
+    wrap.Parent = parent
+
+    local bar = Instance.new("TextButton")
+    bar.Size = UDim2.new(1, 0, 0, 36)
+    bar.BackgroundColor3 = Theme.SurfaceElevated
+    bar.BorderSizePixel = 0
+    bar.Text = label .. "   ▾"
+    bar.TextXAlignment = Enum.TextXAlignment.Left
+    bar.Font = Enum.Font.Gotham
+    bar.TextSize = 12
+    bar.TextColor3 = Theme.TextSecondary
+    bar.AutoButtonColor = false
+    bar.Parent = wrap
+    corner(bar, 7)
+    stroke(bar)
+    pad(bar, 0, 12, 0, 12)
+
+    local list = Instance.new("Frame")
+    list.Position = UDim2.fromOffset(0, 42)
+    list.Size = UDim2.new(1, 0, 0, 0)
+    list.AutomaticSize = Enum.AutomaticSize.Y
+    list.BackgroundTransparency = 1
+    list.Visible = false
+    list.Parent = wrap
+    local layout = Instance.new("UIListLayout")
+    layout.Padding = UDim.new(0, 4)
+    layout.Parent = list
+
+    local built = false
+
+    local function clearRows()
+        for _, child in ipairs(list:GetChildren()) do
+            if not child:IsA("UIListLayout") and not child:IsA("UIPadding") then
+                child:Destroy()
+            end
+        end
+    end
+
+    local function rebuild()
+        clearRows()
+        built = true
+        buildRows(list)
+    end
+
+    bar.MouseButton1Click:Connect(function()
+        list.Visible = not list.Visible
+        bar.Text = label .. (list.Visible and "   ▴" or "   ▾")
+        if list.Visible and not built then rebuild() end
+    end)
+
+    return rebuild
+end
+
+State._makeSummaryFilterSelector = function(parent, order, title, getSummary, buildRows)
+    local wrap = Instance.new("Frame")
+    wrap.LayoutOrder = order or 0
+    wrap.Size = UDim2.new(1, 0, 0, 0)
+    wrap.AutomaticSize = Enum.AutomaticSize.Y
+    wrap.BackgroundTransparency = 1
+    wrap.Parent = parent
+
+    local layout = Instance.new("UIListLayout")
+    layout.Padding = UDim.new(0, 5)
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.Parent = wrap
+
+    local header = Instance.new("TextButton")
+    header.LayoutOrder = 1
+    header.Size = UDim2.new(1, 0, 0, 48)
+    header.BackgroundColor3 = Theme.SurfaceElevated
+    header.BorderSizePixel = 0
+    header.Text = ""
+    header.AutoButtonColor = false
+    header.Parent = wrap
+    corner(header, 7); stroke(header)
+
+    local titleLabel = text(header, title, 12, Theme.TextSecondary, Enum.Font.GothamMedium)
+    titleLabel.Position = UDim2.fromOffset(11, 4)
+    titleLabel.Size = UDim2.new(1, -48, 0, 20)
+
+    local summaryLabel = text(header, "None selected", 10, Theme.TextMuted)
+    summaryLabel.Position = UDim2.fromOffset(11, 24)
+    summaryLabel.Size = UDim2.new(1, -48, 0, 17)
+
+    local arrow = text(header, "›", 20, Theme.TextMuted, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
+    arrow.Position = UDim2.new(1, -36, 0, 8)
+    arrow.Size = UDim2.fromOffset(26, 30)
+
+    local body = Instance.new("Frame")
+    body.LayoutOrder = 2
+    body.Size = UDim2.new(1, 0, 0, 0)
+    body.AutomaticSize = Enum.AutomaticSize.Y
+    body.BackgroundTransparency = 1
+    body.Visible = false
+    body.Parent = wrap
+
+    local bodyLayout = Instance.new("UIListLayout")
+    bodyLayout.Padding = UDim.new(0, 5)
+    bodyLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    bodyLayout.Parent = body
+
+    local built = false
+
+    local function refreshSummary()
+        local ok, value = pcall(getSummary)
+        if ok and type(value) == "string" and value ~= "" then
+            summaryLabel.Text = value
+        else
+            summaryLabel.Text = "None selected"
+        end
+    end
+
+    local function clearRows()
+        for _, child in ipairs(body:GetChildren()) do
+            if not child:IsA("UIListLayout") and not child:IsA("UIPadding") then
+                child:Destroy()
+            end
+        end
+    end
+
+    local function rebuild()
+        clearRows()
+        built = true
+        buildRows(body, refreshSummary)
+        refreshSummary()
+    end
+
+    header.MouseButton1Click:Connect(function()
+        body.Visible = not body.Visible
+        arrow.Text = body.Visible and "⌄" or "›"
+        if body.Visible and not built then rebuild() end
+        refreshSummary()
+    end)
+
+    refreshSummary()
+    return rebuild, refreshSummary, wrap
+end
+
+
+State._makeSingleSearchSelector = function(parent, order, title, getSummary, getItems, getSelectedId, onSelect)
+    local wrap = Instance.new("Frame")
+    wrap.LayoutOrder = order
+    wrap.Size = UDim2.new(1, 0, 0, 0)
+    wrap.AutomaticSize = Enum.AutomaticSize.Y
+    wrap.BackgroundTransparency = 1
+    wrap.Parent = parent
+    local layout = Instance.new("UIListLayout")
+    layout.Padding = UDim.new(0, 5)
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.Parent = wrap
+
+    local header = Instance.new("TextButton")
+    header.LayoutOrder = 1
+    header.Size = UDim2.new(1, 0, 0, 54)
+    header.BackgroundColor3 = Theme.SurfaceElevated
+    header.BorderSizePixel = 0
+    header.Text = ""
+    header.AutoButtonColor = false
+    header.Parent = wrap
+    corner(header, 6)
+    local titleLabel = text(header, title, 12, Theme.TextPrimary, Enum.Font.GothamMedium)
+    titleLabel.Position = UDim2.fromOffset(12, 4)
+    titleLabel.Size = UDim2.new(1, -54, 0, 22)
+    local summaryLabel = text(header, "No chicken selected", 10, Theme.TextMuted, Enum.Font.Gotham)
+    summaryLabel.Position = UDim2.fromOffset(12, 27)
+    summaryLabel.Size = UDim2.new(1, -54, 0, 20)
+    local arrow = text(header, "›", 18, Theme.TextSecondary, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
+    arrow.Position = UDim2.new(1, -36, 0, 8)
+    arrow.Size = UDim2.fromOffset(26, 38)
+
+    local body = Instance.new("Frame")
+    body.LayoutOrder = 2
+    body.Size = UDim2.new(1, 0, 0, 0)
+    body.AutomaticSize = Enum.AutomaticSize.Y
+    body.BackgroundTransparency = 1
+    body.Visible = false
+    body.Parent = wrap
+    local bodyLayout = Instance.new("UIListLayout")
+    bodyLayout.Padding = UDim.new(0, 5)
+    bodyLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    bodyLayout.Parent = body
+
+    local search = Instance.new("TextBox")
+    search.LayoutOrder = 1
+    search.Size = UDim2.new(1, 0, 0, 32)
+    search.BackgroundColor3 = Theme.SurfaceElevated
+    search.BorderSizePixel = 0
+    search.ClearTextOnFocus = false
+    search.PlaceholderText = "Search Chicken..."
+    search.Text = ""
+    search.Font = Enum.Font.Gotham
+    search.TextSize = 11
+    search.TextColor3 = Theme.TextPrimary
+    search.PlaceholderColor3 = Theme.TextMuted
+    search.Parent = body
+    corner(search, 6)
+
+    local list = Instance.new("ScrollingFrame")
+    list.LayoutOrder = 2
+    list.Size = UDim2.new(1, 0, 0, 220)
+    list.BackgroundTransparency = 1
+    list.BorderSizePixel = 0
+    list.ScrollBarThickness = 3
+    list.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    list.CanvasSize = UDim2.new()
+    list.Parent = body
+    local listLayout = Instance.new("UIListLayout")
+    listLayout.Padding = UDim.new(0, 4)
+    listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    listLayout.Parent = list
+
+    local function refreshSummary()
+        local ok, value = pcall(getSummary)
+        summaryLabel.Text = ok and type(value) == "string" and value ~= "" and value or "No chicken selected"
+    end
+    local function rebuild()
+        for _, child in ipairs(list:GetChildren()) do if not child:IsA("UIListLayout") then child:Destroy() end end
+        local ok, items = pcall(getItems, search.Text)
+        items = ok and type(items) == "table" and items or {}
+        local selectedId = tostring((getSelectedId and getSelectedId()) or "")
+        for i, item in ipairs(items) do
+            local rowFrame = Instance.new("TextButton")
+            rowFrame.LayoutOrder = i
+            rowFrame.Size = UDim2.new(1, -4, 0, 52)
+            rowFrame.BackgroundColor3 = Theme.SurfaceElevated
+            rowFrame.BorderSizePixel = 0
+            rowFrame.Text = ""
+            rowFrame.AutoButtonColor = false
+            rowFrame.Parent = list
+            corner(rowFrame, 6)
+            local selected = tostring(item.id) == selectedId
+            local radio = text(rowFrame, selected and "●" or "○", 14, selected and Theme.Success or Theme.TextMuted, Enum.Font.GothamBold, Enum.TextXAlignment.Center)
+            radio.Position = UDim2.fromOffset(7, 0)
+            radio.Size = UDim2.fromOffset(24, 52)
+            local main = text(rowFrame, tostring(item.displayName or item.speciesName or item.id), 12, Theme.TextPrimary, Enum.Font.GothamMedium)
+            main.Position = UDim2.fromOffset(36, 4)
+            main.Size = UDim2.new(1, -46, 0, 22)
+            local details = "Lv." .. tostring(item.level or 1) .. " • " .. resolveRarityDisplayName(item.rarity or "unknown")
+            if item.nickname and item.nickname ~= "" and item.speciesName and item.speciesName ~= item.nickname then
+                details = tostring(item.speciesName) .. " • " .. details
+            end
+            if item.favorite then details ..= " • Favorite" end
+            if item.mutation ~= nil and item.mutation ~= "" then details ..= " • Mutated" end
+            if item.active then details ..= " • Active" end
+            local sub = text(rowFrame, details, 10, Theme.TextMuted, Enum.Font.Gotham)
+            sub.Position = UDim2.fromOffset(36, 26)
+            sub.Size = UDim2.new(1, -46, 0, 20)
+            rowFrame.MouseButton1Click:Connect(function()
+                pcall(onSelect, item.id)
+                refreshSummary()
+                rebuild()
+                markConfigDirty()
+            end)
+        end
+        refreshSummary()
+    end
+    search:GetPropertyChangedSignal("Text"):Connect(function() if body.Visible then rebuild() end end)
+    header.MouseButton1Click:Connect(function()
+        body.Visible = not body.Visible
+        arrow.Text = body.Visible and "⌄" or "›"
+        if body.Visible then rebuild() end
+        refreshSummary()
+    end)
+    refreshSummary()
+    return rebuild, refreshSummary
+end
+
+local function safeBuild(name, fn)
+    local ok, err = pcall(fn)
+    if not ok then
+        log("ERROR", "Build " .. name .. ": " .. tostring(err))
+        local sc = createScrollPage()
+        local _, inner = card(sc, 1, "PAGE ERROR")
+        setText(row(inner, 1, "Error"), tostring(err))
+        Views[name] = { root = sc, update = function() end }
+    end
+end
+
+local function makeFilterRow(parent, order, displayName, quantityText, checked, onToggle)
+    local f = Instance.new("Frame")
+    f.LayoutOrder = order
+    f.Size = UDim2.new(1, 0, 0, 26)
+    f.BackgroundTransparency = 1
+    f.Parent = parent
+    local check = Instance.new("TextButton")
+    check.Size = UDim2.fromOffset(22, 22)
+    check.Position = UDim2.fromOffset(0, 2)
+    check.BackgroundColor3 = Theme.SurfaceElevated
+    check.Text = checked and "✓" or ""
+    check.Font = Enum.Font.GothamBold
+    check.TextSize = 14
+    check.TextColor3 = Theme.Success
+    check.AutoButtonColor = false
+    check.Parent = f
+    corner(check, 4)
+    local nameL = text(f, displayName, 12, Theme.TextPrimary)
+    nameL.Position = UDim2.fromOffset(30, 0)
+    nameL.Size = UDim2.new(1, -110, 1, 0)
+    local qtyL = nil
+    if quantityText then
+        qtyL = text(f, quantityText, 12, Theme.TextMuted, nil, Enum.TextXAlignment.Right)
+        qtyL.Position = UDim2.new(1, -70, 0, 0)
+        qtyL.Size = UDim2.fromOffset(66, 26)
+    end
+    check.MouseButton1Click:Connect(function() onToggle(check) end)
+    return f, check, nameL, qtyL
+end
+
+safeBuild("Home", function()
+    local sc = createScrollPage()
+    local _, afr = card(sc, 1, "AUTO FARM REBIRTH")
+    local phase = row(afr, 1, "Phase")
+    local _, sell = card(sc, 2, "AUTO SELL")
+    local sSt = row(sell, 1, "Status")
+    local _, he = card(sc, 3, "HOT EGG")
+    local hePhase = row(he, 1, "Phase")
+    Views.Home = { root = sc, update = function()
+        setText(phase, AFR.phase)
+        setText(sSt, AutoSellFeature and AutoSellFeature.getStatus() or State.diagnostics["AutoSell.Feature"] or "—")
+        setText(hePhase, HE.phase)
+    end }
+end)
+
+local function getPhase9API()
+    local env = (getgenv and getgenv()) or _G
+    local api = env.UNO_HUB_PHASE9
+    return type(api) == "table" and api or nil
+end
+
+local function setPhase9Toggle(toggleKey, setterName, value)
+    local api = getPhase9API()
+    if not api or type(api[setterName]) ~= "function" then
+        State.toggles[toggleKey] = false
+        log("ERROR", setterName .. " unavailable; Phase 9 bootstrap not READY")
+        return false
+    end
+    local ok, result = pcall(api[setterName], value == true)
+    if not ok or result == false then
+        State.toggles[toggleKey] = false
+        log("ERROR", setterName .. " failed: " .. tostring(result))
+        return false
+    end
+    State.toggles[toggleKey] = value == true
+    return true
+end
+
+local function setAutoArenaPhase9(v)
+    return setPhase9Toggle("autoArena", "setAutoArenaEnabled", v)
+end
+local function setEventCapsulePhase9(v)
+    return setPhase9Toggle("autoEventCapsule", "setEventCapsuleEnabled", v)
+end
+local function setKrakenPhase9(v)
+    return setPhase9Toggle("autoKraken", "setKrakenEnabled", v)
+end
+
+local function setUfoAscension(v)
+    local wantEnabled = v == true
+    local env = (getgenv and getgenv()) or _G
+    local backend = env.UNO_UFO_ASCENSION
+
+    if wantEnabled then
+        if type(backend) ~= "table" or type(backend.setEnabled) ~= "function" then
+            State.toggles.autoUfoAscension = false
+            setToggleVisual("autoUfoAscension", false)
+            State.ufoAscension.enabled = false
+            State.ufoAscension.status = "Unavailable"
+            markConfigDirty()
+            return false
+        end
+        if type(backend.setGoal) == "function" then
+            pcall(backend.setGoal, State.ufoAscension.goal or "max_genes")
+        end
+        if type(backend.setTargetRarity) == "function" then
+            pcall(backend.setTargetRarity, State.ufoAscension.targetRarity or "secret")
+        end
+        if type(backend.isGoalReached) == "function" then
+            local okGoal, reached, reason = pcall(backend.isGoalReached)
+            if okGoal and reached == true then
+                State.toggles.autoUfoAscension = false
+                State.ufoAscension.enabled = false
+                State.ufoAscension.goalReached = true
+                State.ufoAscension.phase = "GOAL_REACHED"
+                State.ufoAscension.status = tostring(reason or "Goal Reached")
+                setToggleVisual("autoUfoAscension", false)
+                markConfigDirty()
+                return false
+            end
+        elseif State.ufoAscension.goal ~= "rarity" and type(backend.isEquippedGenesMax) == "function" then
+            local okMax, isMax = pcall(backend.isEquippedGenesMax)
+            if okMax and isMax == true then
+                State.toggles.autoUfoAscension = false
+                State.ufoAscension.enabled = false
+                State.ufoAscension.phase = "GENES_MAX"
+                State.ufoAscension.status = "Genes Max"
+                setToggleVisual("autoUfoAscension", false)
+                markConfigDirty()
+                return false
+            end
+        end
+    end
+
+    State.toggles.autoUfoAscension = wantEnabled
+    State.ufoAscension.enabled = wantEnabled
+    local ok, result = false, false
+    if type(backend) == "table" and type(backend.setEnabled) == "function" then
+        ok, result = pcall(backend.setEnabled, wantEnabled)
+    end
+    if not ok or result == false then
+        State.toggles.autoUfoAscension = false
+        State.ufoAscension.enabled = false
+        setToggleVisual("autoUfoAscension", false)
+        markConfigDirty()
+        return false
+    end
+    markConfigDirty()
+    return true
+end
+
+State._setAutoTowerHost = function(on)
+    on = on == true
+    local envNow = (getgenv and getgenv()) or _G
+    local runtimeNow = envNow.UNO_HUB_RUNTIME
+    local towerApi = runtimeNow and runtimeNow.towerAutomation
+    if type(towerApi) ~= "table" then return false end
+
+    if on then
+        setAutoFarmRebirth(false)
+        setToggleVisual("autoFarmRebirth", false)
+        towerApi.setUseFrontierSkip(State.toggles.useFrontierSkip == true)
+        towerApi.setStartDelay(State.autoTower.startDelay)
+        local ok = towerApi.enableAutoTower()
+        if ok ~= true then
+            State.toggles.autoTower = false
+            State.autoTower.enabled = false
+            return false
+        end
+        State.autoTower.enabled = true
+        State.toggles.autoTower = true
+        return true
+    end
+
+    towerApi.disableAutoTower()
+    State.autoTower.enabled = false
+    State.toggles.autoTower = false
+    return true
+end
+
+safeBuild("Auto Farm", function()
+    local root, tabs, getActiveTab = createTabbedPage({
+        "Farm", "Events", "Incubator", "Coop", "Chicken", "Fuse"
+    })
+
+    -- FARM
+    local farm = tabs.Farm
+    local _, farmCard = card(farm, 1, "Farm")
+    settingRow(farmCard, 1, "Auto Farm Rebirth", nil, "autoFarmRebirth", setAutoFarmRebirth)
+    State._delayStepper(farmCard, 2, "Start Delay", function()
+        return AFR.postRebirthDelay
+    end, function(value)
+        -- One Auto Farm delay controls both post-rebirth cooldown and RETRY_WAIT.
+        AFR.postRebirthDelay = value
+        AFR.retryDelay = value
+    end)
+
+    settingRow(farmCard, 3, "Auto Tower", nil, "autoTower", State._setAutoTowerHost)
+    State._delayStepper(farmCard, 4, "Auto Tower Start Delay", function()
+        return State.autoTower.startDelay
+    end, function(value)
+        State.autoTower.startDelay = value
+        local envNow = (getgenv and getgenv()) or _G
+        local runtimeNow = envNow.UNO_HUB_RUNTIME
+        if runtimeNow and runtimeNow.towerAutomation then
+            runtimeNow.towerAutomation.setStartDelay(value)
+        end
+    end)
+
+    settingRow(farmCard, 5, "Use Frontier Skip", nil, "useFrontierSkip", function(value)
+        local envNow = (getgenv and getgenv()) or _G
+        local runtimeNow = envNow.UNO_HUB_RUNTIME
+        if runtimeNow and runtimeNow.towerAutomation then
+            runtimeNow.towerAutomation.setUseFrontierSkip(value == true)
+        end
+        return true
+    end)
+    settingRow(farmCard, 6, "Auto Rebirth", nil, "autoRebirth", setAutoRebirth)
+    settingRow(farmCard, 7, "Auto K.O. Dismiss", nil, "autoKoDismiss")
+    if AutoCollectEggFeature then
+        settingRow(farmCard, 8, "Collect Laid Eggs", nil, "autoCollectEgg", function(v)
+            AutoCollectEggFeature.setAutoCollectEggs(v)
+        end)
+    end
+    local farmPhaseLabel = row(farmCard, 9, "Farm Status")
+    local autoTowerStatusLabel = row(farmCard, 10, "Auto Tower Status")
+
+    -- EVENTS
+    local events = tabs.Events
+    local _, eventCard = card(events, 1, "Events")
+    settingRow(eventCard, 1, "Auto Hot Egg", nil, "autoHotEgg", setAutoHotEgg)
+    settingRow(eventCard, 2, "Event Capsule", nil, "autoEventCapsule", setEventCapsulePhase9)
+    settingRow(eventCard, 3, "Auto Kraken Eggs", nil, "autoKraken", setKrakenPhase9)
+    settingRow(eventCard, 4, "Auto Arena", nil, "autoArena", setAutoArenaPhase9)
+
+    local _, ufoCard = card(events, 2, "UFO Ascension")
+    settingRow(ufoCard, 1, "Auto UFO Ascension", nil, "autoUfoAscension", setUfoAscension)
+
+    local ufoGoalRebuild, ufoGoalRefresh, ufoTargetRarityRebuild, ufoTargetRarityRefresh, ufoTargetRarityWrap
+    local function applyUfoGoal(goal)
+        State.ufoAscension.goal = goal == "rarity" and "rarity" or "max_genes"
+        local envNow = (getgenv and getgenv()) or _G
+        local backendNow = envNow.UNO_UFO_ASCENSION
+        if type(backendNow) == "table" and type(backendNow.setGoal) == "function" then
+            pcall(backendNow.setGoal, State.ufoAscension.goal)
+        end
+        if ufoTargetRarityWrap then
+            ufoTargetRarityWrap.Visible = State.ufoAscension.goal == "rarity"
+        end
+        if ufoGoalRebuild then ufoGoalRebuild() elseif ufoGoalRefresh then ufoGoalRefresh() end
+        if ufoTargetRarityRefresh then ufoTargetRarityRefresh() end
+        markConfigDirty()
+    end
+
+    local goalRebuild, goalSummaryRefresh = State._makeSummaryFilterSelector(ufoCard, 2, "Ascension Goal", function()
+        return State.ufoAscension.goal == "rarity" and "Until Rarity" or "Until Max Genes"
+    end, function(host, refreshSummary)
+        makeFilterRow(host, 1, "Until Max Genes", nil, State.ufoAscension.goal ~= "rarity", function()
+            applyUfoGoal("max_genes")
+            refreshSummary()
+        end)
+        makeFilterRow(host, 2, "Until Rarity", nil, State.ufoAscension.goal == "rarity", function()
+            applyUfoGoal("rarity")
+            refreshSummary()
+        end)
+    end)
+    ufoGoalRebuild = goalRebuild
+    ufoGoalRefresh = goalSummaryRefresh
+
+    local rarityRebuild, raritySummaryRefresh, rarityWrap = State._makeSummaryFilterSelector(ufoCard, 3, "Target Rarity", function()
+        return resolveRarityDisplayName(State.ufoAscension.targetRarity or "secret")
+    end, function(host, refreshSummary)
+        local envNow = (getgenv and getgenv()) or _G
+        local backendNow = envNow.UNO_UFO_ASCENSION
+        local rarities = { "common", "uncommon", "rare", "epic", "legendary", "mythic", "divine", "celestial", "cosmic", "secret" }
+        if type(backendNow) == "table" and type(backendNow.getAvailableRarities) == "function" then
+            local okR, values = pcall(backendNow.getAvailableRarities)
+            if okR and type(values) == "table" and #values > 0 then rarities = values end
+        end
+        for i, rarityId in ipairs(rarities) do
+            local rid = string.lower(tostring(rarityId))
+            makeFilterRow(host, i, resolveRarityDisplayName(rid), nil, State.ufoAscension.targetRarity == rid, function()
+                State.ufoAscension.targetRarity = rid
+                if type(backendNow) == "table" and type(backendNow.setTargetRarity) == "function" then
+                    pcall(backendNow.setTargetRarity, rid)
+                end
+                if ufoTargetRarityRebuild then ufoTargetRarityRebuild() else refreshSummary() end
+                markConfigDirty()
+            end)
+        end
+    end)
+    ufoTargetRarityRebuild = rarityRebuild
+    ufoTargetRarityRefresh = raritySummaryRefresh
+    ufoTargetRarityWrap = rarityWrap
+    ufoTargetRarityWrap.Visible = State.ufoAscension.goal == "rarity"
+
+    local ufoChickenLabel = row(ufoCard, 4, "Chicken")
+    local ufoTargetLabel = row(ufoCard, 5, "Target")
+    local ufoCurrentRarityLabel = row(ufoCard, 6, "Current Rarity")
+    local ufoStatusLabel = row(ufoCard, 7, "Status")
+    local ufoGenesLabel = row(ufoCard, 8, "Genes")
+
+    -- INCUBATOR
+    local incubator = tabs.Incubator
+    local _, incubatorCard = card(incubator, 1, "Incubator")
+    settingRow(incubatorCard, 1, "Auto Claim Eggs", nil, "autoIncubatorClaim", function(v)
+        IncubatorClaimFeature.setAutoIncubatorClaim(v)
+    end)
+    if AutoUpgradeIncubatorFeature then
+        settingRow(incubatorCard, 2, "Auto Upgrade Incubator", nil, "autoUpgradeIncubator", function(v)
+            AutoUpgradeIncubatorFeature.setAutoUpgradeIncubator(v)
+        end)
+    end
+
+    -- COOP
+    local coop = tabs.Coop
+    local _, coopCard = card(coop, 1, "Coop")
+    settingRow(coopCard, 1, "Auto Buy Generator", nil, "autoBuyGenerator", setAutoBuyGenerator)
+    settingRow(coopCard, 2, "Auto Upgrade Generator", nil, "autoUpgradeGenerator", setAutoUpgradeGenerator)
+    State._generatorMaxLevelStepper(coopCard, 3)
+    settingRow(coopCard, 4, "Auto Expand Coop", nil, "autoExpandCoop", setAutoExpandCoop)
+    settingRow(coopCard, 5, "Auto Upgrade Recycler", nil, "autoUpgradeRecycler", setAutoUpgradeRecycler)
+
+    -- CHICKEN
+    local chicken = tabs.Chicken
+    local _, chickenCard = card(chicken, 1, "Chicken")
+    if AutoSellFeature then
+        settingRow(chickenCard, 1, "Auto Sell Chickens", nil, "autoSell", function(v)
+            AutoSellFeature.setAutoSell(v)
+        end)
+
+        local _, chickenFilters = card(chicken, 2, "Auto Sell Filters")
+        State._makeSummaryFilterSelector(chickenFilters, 1, "Rarity", function()
+            local selected = AutoSellFeature.getSelectedRarities and AutoSellFeature.getSelectedRarities() or {}
+            local labels = {}
+            for _, rarityId in ipairs(selected) do
+                table.insert(labels, resolveRarityDisplayName(rarityId))
+            end
+            if #labels == 0 then return "None selected" end
+            if #labels <= 3 then return table.concat(labels, ", ") end
+            return tostring(#labels) .. " selected"
+        end, function(host, refreshSummary)
+            local rarities = AutoSellFeature.getAvailableRarities()
+            if #rarities == 0 then
+                rarities = { "common", "uncommon", "rare", "epic", "legendary", "mythic", "divine", "celestial", "cosmic", "secret" }
+            end
+            for i, rarityId in ipairs(rarities) do
+                makeFilterRow(
+                    host,
+                    i,
+                    resolveRarityDisplayName(rarityId),
+                    nil,
+                    AutoSellFeature.isRaritySelected(rarityId),
+                    function(checkBtn)
+                        local now = not AutoSellFeature.isRaritySelected(rarityId)
+                        AutoSellFeature.setRaritySelected(rarityId, now)
+                        checkBtn.Text = now and "✓" or ""
+                        refreshSummary()
+                    end
+                )
+            end
+        end)
+
+        State._makeSummaryFilterSelector(chickenFilters, 2, "Protected Mutations", function()
+            local selected = AutoSellFeature.getProtectedMutations and AutoSellFeature.getProtectedMutations() or {}
+            local labels = {}
+            for _, mutationId in ipairs(selected) do
+                table.insert(labels, titleCaseId(mutationId))
+            end
+            if #labels == 0 then return "None selected" end
+            if #labels <= 3 then return table.concat(labels, ", ") end
+            return tostring(#labels) .. " selected"
+        end, function(host, refreshSummary)
+            local mutations = AutoSellFeature.getAvailableMutations and AutoSellFeature.getAvailableMutations() or {}
+            if #mutations == 0 then
+                local emptyLabel = text(host, "No mutation detected in roster", 11, Theme.TextMuted)
+                emptyLabel.LayoutOrder = 1
+                emptyLabel.Size = UDim2.new(1, 0, 0, 32)
+                return
+            end
+
+            for i, mutationId in ipairs(mutations) do
+                makeFilterRow(
+                    host,
+                    i,
+                    titleCaseId(mutationId),
+                    mutationId,
+                    AutoSellFeature.isMutationProtected(mutationId),
+                    function(checkBtn)
+                        local now = not AutoSellFeature.isMutationProtected(mutationId)
+                        AutoSellFeature.setMutationProtected(mutationId, now)
+                        checkBtn.Text = now and "✓" or ""
+                        refreshSummary()
+                    end
+                )
+            end
+        end)
+
+        State._makeSummaryFilterSelector(chickenFilters, 3, "Protected Abilities", function()
+            local selected = {}
+            local whitelist = AutoSellFeature.getAbilityWhitelist and AutoSellFeature.getAbilityWhitelist() or {}
+            local abilities = AutoSellFeature.getAvailableAbilities and AutoSellFeature.getAvailableAbilities() or {}
+            local nameById = {}
+            for _, ability in ipairs(abilities) do
+                if type(ability) == "table" and ability.id ~= nil then
+                    nameById[ability.id] = resolveAbilityDisplayName(ability)
+                end
+            end
+            for id, enabled in pairs(whitelist) do
+                if enabled == true then
+                    table.insert(selected, nameById[id] or resolveAbilityDisplayName(id))
+                end
+            end
+            table.sort(selected)
+            if #selected == 0 then return "None selected" end
+            if #selected <= 3 then return table.concat(selected, ", ") end
+            return tostring(#selected) .. " selected"
+        end, function(host, refreshSummary)
+            local abilities = AutoSellFeature.getAvailableAbilities()
+            table.sort(abilities, function(a, b)
+                return resolveAbilityDisplayName(a) < resolveAbilityDisplayName(b)
+            end)
+            for i, ability in ipairs(abilities) do
+                local abilityId = ability.id
+                makeFilterRow(
+                    host,
+                    i,
+                    resolveAbilityDisplayName(ability),
+                    nil,
+                    AutoSellFeature.isAbilityWhitelisted(abilityId),
+                    function(checkBtn)
+                        local now = not AutoSellFeature.isAbilityWhitelisted(abilityId)
+                        AutoSellFeature.setAbilityWhitelisted(abilityId, now)
+                        checkBtn.Text = now and "✓" or ""
+                        refreshSummary()
+                    end
+                )
+            end
+        end)
+    else
+        setText(row(chickenCard, 1, "Status"), "Unavailable")
+    end
+
+    -- Shared Favorite / Unfavorite UI builder.
+    -- Stored on State instead of a new outer local to avoid the stage local/register limit.
+    State._buildFavoriteActionCard = function(parent, order, title, toggleKey, feature, setterName)
+        local _, actionCard = card(parent, order, title)
+        -- IMPORTANT: use the feature instance passed into this shared builder.
+        -- Do not overwrite it with State._autoFavoriteFeature, otherwise the
+        -- Auto Unfavorite card would call setAutoUnfavorite on Auto Favorite.
+        if feature then
+            settingRow(actionCard, 1, title, nil, toggleKey, function(v)
+                local setter = feature and feature[setterName]
+                if type(setter) ~= "function" then return false end
+                return setter(v)
+            end)
+
+            local filterTitle = Instance.new("Frame")
+            filterTitle.LayoutOrder = 2
+            filterTitle.Size = UDim2.new(1, 0, 0, 18)
+            filterTitle.BackgroundTransparency = 1
+            filterTitle.Parent = actionCard
+            text(filterTitle, "Filters", 11, Theme.TextMuted, Enum.Font.GothamMedium).Size = UDim2.new(1, 0, 1, 0)
+
+            local function makeFavoriteActionSelector(order, title, kind)
+                local wrap = Instance.new("Frame")
+                wrap.LayoutOrder = order
+                wrap.Size = UDim2.new(1, 0, 0, 0)
+                wrap.AutomaticSize = Enum.AutomaticSize.Y
+                wrap.BackgroundTransparency = 1
+                wrap.Parent = actionCard
+
+                local layout = Instance.new("UIListLayout")
+                layout.Padding = UDim.new(0, 5)
+                layout.SortOrder = Enum.SortOrder.LayoutOrder
+                layout.Parent = wrap
+
+                local header = Instance.new("TextButton")
+                header.LayoutOrder = 1
+                header.Size = UDim2.new(1, 0, 0, 48)
+                header.BackgroundColor3 = Theme.SurfaceElevated
+                header.BorderSizePixel = 0
+                header.Text = ""
+                header.AutoButtonColor = false
+                header.Parent = wrap
+                corner(header, 7); stroke(header)
+
+                local titleLabel = text(header, title, 12, Theme.TextSecondary, Enum.Font.GothamMedium)
+                titleLabel.Position = UDim2.fromOffset(11, 4)
+                titleLabel.Size = UDim2.new(1, -48, 0, 20)
+
+                local summaryLabel = text(header, "None selected", 10, Theme.TextMuted)
+                summaryLabel.Position = UDim2.fromOffset(11, 24)
+                summaryLabel.Size = UDim2.new(1, -48, 0, 17)
+
+                local arrow = text(header, "›", 20, Theme.TextMuted, Enum.Font.GothamMedium, Enum.TextXAlignment.Center)
+                arrow.Position = UDim2.new(1, -36, 0, 8)
+                arrow.Size = UDim2.fromOffset(26, 30)
+
+                local body = Instance.new("Frame")
+                body.LayoutOrder = 2
+                body.Size = UDim2.new(1, 0, 0, 0)
+                body.AutomaticSize = Enum.AutomaticSize.Y
+                body.BackgroundTransparency = 1
+                body.Visible = false
+                body.Parent = wrap
+
+                local bodyLayout = Instance.new("UIListLayout")
+                bodyLayout.Padding = UDim.new(0, 5)
+                bodyLayout.SortOrder = Enum.SortOrder.LayoutOrder
+                bodyLayout.Parent = body
+
+                local selectedRows = {}
+
+                local function refreshSummary()
+                    if kind == "names" then
+                        local entries = feature.getAvailableChickenTypes()
+                        local count = 0
+                        for _, entry in ipairs(entries) do
+                            if feature.isTypeSelected(entry.id) then count += 1 end
+                        end
+                        summaryLabel.Text = count == 0 and "None selected" or (tostring(count) .. " selected")
+                    elseif kind == "mutations" then
+                        local chosen = {}
+                        for _, mutationId in ipairs(feature.getAvailableMutations()) do
+                            if feature.isMutationSelected(mutationId) then
+                                table.insert(chosen, titleCaseId(mutationId))
+                            end
+                        end
+                        if #chosen == 0 then
+                            summaryLabel.Text = "None selected"
+                        elseif #chosen <= 3 then
+                            summaryLabel.Text = table.concat(chosen, ", ")
+                        else
+                            summaryLabel.Text = tostring(#chosen) .. " selected"
+                        end
+                    else
+                        local chosen = {}
+                        for _, rarityId in ipairs(feature.getAvailableRarities()) do
+                            if feature.isRaritySelected(rarityId) then
+                                table.insert(chosen, resolveRarityDisplayName(rarityId))
+                            end
+                        end
+                        if #chosen == 0 then
+                            summaryLabel.Text = "None selected"
+                        elseif #chosen <= 3 then
+                            summaryLabel.Text = table.concat(chosen, ", ")
+                        else
+                            summaryLabel.Text = tostring(#chosen) .. " selected"
+                        end
+                    end
+                end
+
+                if kind == "names" then
+                    local search = Instance.new("TextBox")
+                    search.LayoutOrder = 1
+                    search.Size = UDim2.new(1, 0, 0, 34)
+                    search.BackgroundColor3 = Theme.SurfaceElevated
+                    search.BorderSizePixel = 0
+                    search.ClearTextOnFocus = false
+                    search.PlaceholderText = "🔍  Search Chicken..."
+                    search.Text = ""
+                    search.Font = Enum.Font.Gotham
+                    search.TextSize = 12
+                    search.TextColor3 = Theme.TextPrimary
+                    search.PlaceholderColor3 = Theme.TextMuted
+                    search.TextXAlignment = Enum.TextXAlignment.Left
+                    search.Parent = body
+                    corner(search, 7); stroke(search); pad(search, 0, 10, 0, 10)
+
+                    local list = Instance.new("ScrollingFrame")
+                    list.LayoutOrder = 2
+                    list.Size = UDim2.new(1, 0, 0, 220)
+                    list.BackgroundColor3 = Theme.Surface
+                    list.BorderSizePixel = 0
+                    list.ScrollBarThickness = 3
+                    list.AutomaticCanvasSize = Enum.AutomaticSize.Y
+                    list.CanvasSize = UDim2.new()
+                    list.Parent = body
+                    corner(list, 7); stroke(list); pad(list, 8, 8, 8, 8)
+
+                    local listLayout = Instance.new("UIListLayout")
+                    listLayout.Padding = UDim.new(0, 4)
+                    listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+                    listLayout.Parent = list
+
+                    for i, entry in ipairs(feature.getAvailableChickenTypes()) do
+                        local rowFrame, checkBtn = makeFilterRow(
+                            list,
+                            i,
+                            entry.name,
+                            nil,
+                            feature.isTypeSelected(entry.id),
+                            function(button)
+                                local now = not feature.isTypeSelected(entry.id)
+                                feature.setTypeSelected(entry.id, now)
+                                button.Text = now and "✓" or ""
+                                refreshSummary()
+                                markConfigDirty()
+                            end
+                        )
+                        selectedRows[#selectedRows + 1] = {
+                            frame = rowFrame,
+                            id = entry.id,
+                            name = entry.name,
+                            check = checkBtn,
+                        }
+                    end
+
+                    local function applySearch()
+                        local query = string.lower(search.Text or "")
+                        for _, item in ipairs(selectedRows) do
+                            local haystack = string.lower(tostring(item.name) .. " " .. tostring(item.id))
+                            item.frame.Visible = query == "" or string.find(haystack, query, 1, true) ~= nil
+                        end
+                    end
+                    search:GetPropertyChangedSignal("Text"):Connect(applySearch)
+                else
+                    local list = Instance.new("ScrollingFrame")
+                    list.LayoutOrder = 1
+                    list.Size = UDim2.new(1, 0, 0, 220)
+                    list.BackgroundColor3 = Theme.Surface
+                    list.BorderSizePixel = 0
+                    list.ScrollBarThickness = 3
+                    list.AutomaticCanvasSize = Enum.AutomaticSize.Y
+                    list.CanvasSize = UDim2.new()
+                    list.Parent = body
+                    corner(list, 7); stroke(list); pad(list, 8, 8, 8, 8)
+
+                    local listLayout = Instance.new("UIListLayout")
+                    listLayout.Padding = UDim.new(0, 4)
+                    listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+                    listLayout.Parent = list
+
+                    if kind == "mutations" then
+                        local mutations = feature.getAvailableMutations()
+                        if #mutations == 0 then
+                            local emptyLabel = text(list, "No mutation detected in roster", 11, Theme.TextMuted)
+                            emptyLabel.LayoutOrder = 1
+                            emptyLabel.Size = UDim2.new(1, 0, 0, 32)
+                        else
+                            for i, mutationId in ipairs(mutations) do
+                                makeFilterRow(
+                                    list,
+                                    i,
+                                    titleCaseId(mutationId),
+                                    mutationId,
+                                    feature.isMutationSelected(mutationId),
+                                    function(button)
+                                        local now = not feature.isMutationSelected(mutationId)
+                                        feature.setMutationSelected(mutationId, now)
+                                        button.Text = now and "✓" or ""
+                                        refreshSummary()
+                                        markConfigDirty()
+                                    end
+                                )
+                            end
+                        end
+                    else
+                        for i, rarityId in ipairs(feature.getAvailableRarities()) do
+                            makeFilterRow(
+                                list,
+                                i,
+                                resolveRarityDisplayName(rarityId),
+                                nil,
+                                feature.isRaritySelected(rarityId),
+                                function(button)
+                                    local now = not feature.isRaritySelected(rarityId)
+                                    feature.setRaritySelected(rarityId, now)
+                                    button.Text = now and "✓" or ""
+                                    refreshSummary()
+                                    markConfigDirty()
+                                end
+                            )
+                        end
+                    end
+                end
+
+                header.MouseButton1Click:Connect(function()
+                    body.Visible = not body.Visible
+                    arrow.Text = body.Visible and "⌄" or "›"
+                end)
+
+                refreshSummary()
+            end
+
+            makeFavoriteActionSelector(3, "Chicken Names", "names")
+            makeFavoriteActionSelector(4, "Rarities", "rarities")
+            makeFavoriteActionSelector(5, "Mutations", "mutations")
+        else
+            setText(row(actionCard, 1, "Status"), "Unavailable")
+        end
+    end
+
+    State._buildFavoriteActionCard(
+        chicken,
+        3,
+        "Auto Favorite",
+        "autoFavorite",
+        State._autoFavoriteFeature,
+        "setAutoFavorite"
+    )
+
+    State._buildFavoriteActionCard(
+        chicken,
+        4,
+        "Auto Unfavorite",
+        "autoUnfavorite",
+        State._autoUnfavoriteFeature,
+        "setAutoUnfavorite"
+    )
+
+    -- FUSE
+    local fuse = tabs.Fuse
+    local _, fuseCard = card(fuse, 1, "Fuse")
+    if AutoFuseFeature then
+        pcall(AutoFuseFeature.setAutoFuse, false)
+        pcall(AutoFuseFeature.setMatchMode, nil)
+        pcall(AutoFuseFeature.setKeepCopies, 0)
+        State.toggles.autoFuse = false
+
+        -- V2 rule:
+        -- Auto Fuse may only be enabled after exactly one match mode is selected.
+        -- Same Chicken and Same Rarity behave like an exclusive radio pair.
+        local selectedFuseMode = nil
+        local setAutoFuseVisual = nil
+        local setSameChickenVisual = nil
+        local setSameRarityVisual = nil
+        local setTargetFuseVisual = nil
+
+        -- Do not inherit an old enabled state without an explicit V2 mode choice.
+        if AutoFuseFeature.isEnabled and AutoFuseFeature.isEnabled() then
+            pcall(AutoFuseFeature.setAutoFuse, false)
+        end
+        State.toggles.autoFuse = false
+
+        local autoFuseRow = Instance.new("Frame")
+        autoFuseRow.LayoutOrder = 1
+        autoFuseRow.Size = UDim2.new(1, 0, 0, 34)
+        autoFuseRow.BackgroundTransparency = 1
+        autoFuseRow.Parent = fuseCard
+
+        local autoFuseLabel = text(autoFuseRow, "Auto Fuse Chickens", 13, Theme.TextPrimary, Enum.Font.GothamMedium)
+        autoFuseLabel.Size = UDim2.new(1, -350, 1, 0)
+
+        local fuseRequirement = text(
+            autoFuseRow,
+            "",
+            10,
+            Theme.Danger,
+            Enum.Font.Gotham,
+            Enum.TextXAlignment.Right
+        )
+        fuseRequirement.Position = UDim2.new(1, -326, 0, 0)
+        fuseRequirement.Size = UDim2.fromOffset(270, 34)
+
+        local autoFuseTrack
+        autoFuseTrack, setAutoFuseVisual = makeSwitch(autoFuseRow, false, function(v)
+            if v and selectedFuseMode == nil then
+                State.toggles.autoFuse = false
+                setAutoFuseVisual(false, true)
+                fuseRequirement.Text = "Select Same Chicken or Same Rarity first"
+                return
+            end
+
+            fuseRequirement.Text = ""
+            if v and State._targetFuseFeature and State._targetFuseFeature.isEnabled and State._targetFuseFeature.isEnabled() then
+                pcall(State._targetFuseFeature.setEnabled, false)
+                State.toggles.autoTargetFuse = false
+                if setTargetFuseVisual then setTargetFuseVisual(false, true) end
+            end
+            State.toggles.autoFuse = v == true
+            AutoFuseFeature.setAutoFuse(v == true)
+            markConfigDirty()
+        end)
+        autoFuseTrack.Position = UDim2.new(1, -40, 0.5, -11)
+
+        local function disableAutoFuseBecauseNoMode()
+            if State.toggles.autoFuse then
+                State.toggles.autoFuse = false
+                pcall(AutoFuseFeature.setAutoFuse, false)
+                if setAutoFuseVisual then
+                    setAutoFuseVisual(false, true)
+                end
+            end
+        end
+
+        local function selectFuseMode(mode, enabled)
+            if enabled then
+                selectedFuseMode = mode
+                fuseRequirement.Text = ""
+                pcall(AutoFuseFeature.setMatchMode, mode)
+
+                if mode == "Same Chicken" then
+                    if setSameChickenVisual then setSameChickenVisual(true, true) end
+                    if setSameRarityVisual then setSameRarityVisual(false, true) end
+                else
+                    if setSameChickenVisual then setSameChickenVisual(false, true) end
+                    if setSameRarityVisual then setSameRarityVisual(true, true) end
+                end
+            elseif selectedFuseMode == mode then
+                selectedFuseMode = nil
+                pcall(AutoFuseFeature.setMatchMode, nil)
+                if mode == "Same Chicken" then
+                    if setSameChickenVisual then setSameChickenVisual(false, true) end
+                else
+                    if setSameRarityVisual then setSameRarityVisual(false, true) end
+                end
+                disableAutoFuseBecauseNoMode()
+            end
+            markConfigDirty()
+        end
+
+        local sameChickenRow = Instance.new("Frame")
+        sameChickenRow.LayoutOrder = 2
+        sameChickenRow.Size = UDim2.new(1, 0, 0, 30)
+        sameChickenRow.BackgroundTransparency = 1
+        sameChickenRow.Parent = fuseCard
+
+        local sameChickenLabel = text(
+            sameChickenRow,
+            "Same Chicken",
+            12,
+            Theme.TextPrimary,
+            Enum.Font.GothamMedium
+        )
+        sameChickenLabel.Size = UDim2.new(1, -50, 1, 0)
+
+        local sameChickenTrack
+        sameChickenTrack, setSameChickenVisual = makeSwitch(sameChickenRow, false, function(v)
+            selectFuseMode("Same Chicken", v)
+        end)
+        sameChickenTrack.Position = UDim2.new(1, -40, 0.5, -11)
+
+        local sameRarityRow = Instance.new("Frame")
+        sameRarityRow.LayoutOrder = 3
+        sameRarityRow.Size = UDim2.new(1, 0, 0, 30)
+        sameRarityRow.BackgroundTransparency = 1
+        sameRarityRow.Parent = fuseCard
+
+        local sameRarityLabel = text(
+            sameRarityRow,
+            "Same Rarity",
+            12,
+            Theme.TextPrimary,
+            Enum.Font.GothamMedium
+        )
+        sameRarityLabel.Size = UDim2.new(1, -50, 1, 0)
+
+        local sameRarityTrack
+        sameRarityTrack, setSameRarityVisual = makeSwitch(sameRarityRow, false, function(v)
+            selectFuseMode("Same Rarity", v)
+        end)
+        sameRarityTrack.Position = UDim2.new(1, -40, 0.5, -11)
+
+        local _, fuseFilters = card(fuse, 2, "Fuse Filters")
+        State._makeSummaryFilterSelector(fuseFilters, 1, "Rarity", function()
+            local selected = AutoFuseFeature.getSelectedRarities and AutoFuseFeature.getSelectedRarities() or {}
+            local labels = {}
+            for _, rarityId in ipairs(selected) do
+                table.insert(labels, resolveRarityDisplayName(rarityId))
+            end
+            if #labels == 0 then return "None selected" end
+            if #labels <= 3 then return table.concat(labels, ", ") end
+            return tostring(#labels) .. " selected"
+        end, function(host, refreshSummary)
+            local rarities = AutoFuseFeature.getAvailableRarities()
+            for i, rarityId in ipairs(rarities) do
+                makeFilterRow(
+                    host,
+                    i,
+                    resolveRarityDisplayName(rarityId),
+                    nil,
+                    AutoFuseFeature.isRaritySelected(rarityId),
+                    function(checkBtn)
+                        local now = not AutoFuseFeature.isRaritySelected(rarityId)
+                        AutoFuseFeature.setRaritySelected(rarityId, now)
+                        checkBtn.Text = now and "✓" or ""
+                        refreshSummary()
+                    end
+                )
+            end
+        end)
+
+        -- TARGET FUSE — separate from legacy Auto Fuse; exact single target only.
+        local targetFeature = State._targetFuseFeature
+        local _, targetCard = card(fuse, 3, "Target Fuse")
+        if targetFeature then
+            local targetRow = Instance.new("Frame")
+            targetRow.LayoutOrder = 1
+            targetRow.Size = UDim2.new(1, 0, 0, 34)
+            targetRow.BackgroundTransparency = 1
+            targetRow.Parent = targetCard
+            local targetLabel = text(targetRow, "Auto Target Fuse", 13, Theme.TextPrimary, Enum.Font.GothamMedium)
+            targetLabel.Size = UDim2.new(1, -50, 1, 0)
+            local targetTrack
+            targetTrack, setTargetFuseVisual = makeSwitch(targetRow, false, function(v)
+                if v then
+                    State.toggles.autoFuse = false
+                    pcall(AutoFuseFeature.setAutoFuse, false)
+                    if setAutoFuseVisual then setAutoFuseVisual(false, true) end
+                end
+                State.toggles.autoTargetFuse = v == true
+                pcall(targetFeature.setEnabled, v == true)
+                markConfigDirty()
+            end)
+            targetTrack.Position = UDim2.new(1, -40, 0.5, -11)
+
+            local lockRebuild, lockSummaryRefresh
+            local targetRebuild, targetSummaryRefresh = State._makeSingleSearchSelector(
+                targetCard, 2, "Target Chicken",
+                function()
+                    local t = targetFeature.getTarget()
+                    if not t then return "No chicken selected" end
+                    local primary = tostring(t.displayName or t.speciesName or t.id)
+                    local details = "Lv." .. tostring(t.level or 1) .. " • " .. resolveRarityDisplayName(t.rarity or "unknown")
+                    if t.nickname and t.nickname ~= "" and t.speciesName and t.speciesName ~= t.nickname then
+                        return primary .. " — " .. tostring(t.speciesName) .. " • " .. details
+                    end
+                    return primary .. " — " .. details
+                end,
+                function(search) return targetFeature.getInventory(search) end,
+                function() return targetFeature.getTargetId() end,
+                function(id)
+                    targetFeature.setTargetId(id)
+                    if lockRebuild then lockRebuild() end
+                    if lockSummaryRefresh then lockSummaryRefresh() end
+                end
+            )
+
+            State._makeSummaryFilterSelector(targetCard, 3, "Material Rarities", function()
+                local selected = targetFeature.getSelectedRarities()
+                local labels = {}
+                for _, rarityId in ipairs(selected) do table.insert(labels, resolveRarityDisplayName(rarityId)) end
+                if #labels == 0 then return "None selected" end
+                if #labels <= 3 then return table.concat(labels, ", ") end
+                return tostring(#labels) .. " selected"
+            end, function(host, refreshSummary)
+                for i, rarityId in ipairs(targetFeature.getAvailableRarities()) do
+                    makeFilterRow(host, i, resolveRarityDisplayName(rarityId), nil, targetFeature.isRaritySelected(rarityId), function(button)
+                        local now = not targetFeature.isRaritySelected(rarityId)
+                        targetFeature.setRaritySelected(rarityId, now)
+                        button.Text = now and "✓" or ""
+                        refreshSummary()
+                        markConfigDirty()
+                    end)
+                end
+            end)
+
+            lockRebuild, lockSummaryRefresh = State._makeSummaryFilterSelector(targetCard, 4, "Fusion Locks", function()
+                local selected = targetFeature.getSelectedLocks()
+                local labels = {}
+                for _, field in ipairs(selected) do table.insert(labels, targetFeature.getLockLabel(field)) end
+                local allowed = targetFeature.getLockCapacity()
+                if #labels == 0 then return "None selected • 0/" .. tostring(allowed) end
+                local prefix = #labels <= 2 and table.concat(labels, ", ") or tostring(#labels) .. " selected"
+                return prefix .. " • " .. tostring(#labels) .. "/" .. tostring(allowed)
+            end, function(host, refreshSummary)
+                local items = targetFeature.getAvailableLocks()
+                for i, item in ipairs(items) do
+                    local suffix = nil
+                    if item.available ~= true then
+                        suffix = "Unavailable on target"
+                    end
+                    makeFilterRow(host, i, item.label, suffix, targetFeature.isLockSelected(item.field), function(button)
+                        if not item.available and not targetFeature.isLockSelected(item.field) then return end
+                        local now = not targetFeature.isLockSelected(item.field)
+                        local ok = targetFeature.setLockSelected(item.field, now)
+                        if ok then
+                            button.Text = now and "✓" or ""
+                            refreshSummary()
+                            markConfigDirty()
+                        end
+                    end)
+                end
+            end)
+
+            local capacityLabel = row(targetCard, 5, "Lock Capacity")
+            local statusLabel = row(targetCard, 6, "Status")
+            setText(row(targetCard, 7, "Safety"), "Target / Favorite / Mutated materials protected")
+
+            local refreshButton = Instance.new("TextButton")
+            refreshButton.LayoutOrder = 8
+            refreshButton.Size = UDim2.new(1, 0, 0, 30)
+            refreshButton.BackgroundColor3 = Theme.SurfaceElevated
+            refreshButton.BorderSizePixel = 0
+            refreshButton.Text = "Refresh Inventory"
+            refreshButton.Font = Enum.Font.GothamMedium
+            refreshButton.TextSize = 11
+            refreshButton.TextColor3 = Theme.TextPrimary
+            refreshButton.AutoButtonColor = false
+            refreshButton.Parent = targetCard
+            corner(refreshButton, 6)
+            refreshButton.MouseButton1Click:Connect(function()
+                targetFeature.refreshInventory()
+                targetRebuild()
+                targetSummaryRefresh()
+                lockRebuild()
+                lockSummaryRefresh()
+            end)
+
+            task.spawn(function()
+                while not State.closed and targetCard.Parent do
+                    local allowed = targetFeature.getLockCapacity()
+                    local selected = #targetFeature.getSelectedLocks()
+                    setText(capacityLabel, tostring(selected) .. " / " .. tostring(allowed))
+                    setText(statusLabel, targetFeature.getStatus())
+                    if targetSummaryRefresh then pcall(targetSummaryRefresh) end
+                    if lockSummaryRefresh then pcall(lockSummaryRefresh) end
+                    if setTargetFuseVisual and targetFeature.isEnabled then
+                        setTargetFuseVisual(targetFeature.isEnabled(), true)
+                    end
+                    task.wait(0.5)
+                end
+            end)
+        else
+            setText(row(targetCard, 1, "Status"), State.diagnostics["TargetFuse.Feature"] or "Unavailable")
+        end
+    else
+        setText(row(fuseCard, 1, "Status"), "Unavailable")
+    end
+
+    Views["Auto Farm"] = {
+        root = root,
+        update = function()
+            local _ = getActiveTab()
+            local phase = tostring(AFR.phase or "IDLE")
+            if AFR.countdown and AFR.countdown > 0 then
+                phase = phase .. " (" .. tostring(AFR.countdown) .. "s)"
+            end
+            setText(farmPhaseLabel, phase)
+
+            local env = (getgenv and getgenv()) or _G
+            local towerApi = env.UNO_AUTO_TOWER_STANDALONE
+            if type(towerApi) == "table" and type(towerApi.getStatus) == "function" then
+                local okTower, ts = pcall(towerApi.getStatus)
+                if okTower and type(ts) == "table" then
+                    State.autoTower.enabled = ts.enabled == true
+                    State.autoTower.phase = tostring(ts.phase or "IDLE")
+                    State.autoTower.countdown = tonumber(ts.countdown) or 0
+                    State.autoTower.runCount = tonumber(ts.runCount) or 0
+                    State.autoTower.lastError = ts.lastError
+                    local towerPhase = State.autoTower.phase
+                    if State.autoTower.countdown > 0 then
+                        towerPhase = towerPhase .. " (" .. tostring(State.autoTower.countdown) .. "s)"
+                    end
+                    setText(autoTowerStatusLabel, towerPhase)
+                else
+                    setText(autoTowerStatusLabel, "Unavailable")
+                end
+            else
+                setText(autoTowerStatusLabel, "Waiting for backend")
+            end
+
+            local ufo = env.UNO_UFO_ASCENSION
+            if type(ufo) == "table" and type(ufo.getStatus) == "function" then
+                local okUfo, us = pcall(ufo.getStatus)
+                if okUfo and type(us) == "table" then
+                    State.ufoAscension.enabled = us.enabled == true
+                    State.ufoAscension.phase = tostring(us.state or "IDLE")
+                    State.ufoAscension.status = tostring(us.state or "IDLE")
+                    State.ufoAscension.targetId = us.equippedId
+                    State.ufoAscension.targetName = us.equippedName or "Equipped Chicken"
+                    State.ufoAscension.rarity = us.rarity
+                    State.ufoAscension.geneCap = us.geneCap
+                    State.ufoAscension.genome = us.genome
+                    State.ufoAscension.genesMax = us.genesMax == true
+                    State.ufoAscension.ufoActive = us.ufoActive == true
+                    State.ufoAscension.cycleCount = tonumber(us.cycleCountThisEvent) or 0
+                    State.ufoAscension.recoveryInProgress = us.recoveryInProgress == true
+                    State.ufoAscension.lastError = us.lastError
+                    State.ufoAscension.goal = us.goal or State.ufoAscension.goal or "max_genes"
+                    State.ufoAscension.targetRarity = us.targetRarity or State.ufoAscension.targetRarity or "secret"
+                    State.ufoAscension.goalReached = us.goalReached == true
+                    if ufoTargetRarityWrap then
+                        ufoTargetRarityWrap.Visible = State.ufoAscension.goal == "rarity"
+                    end
+                    if ufoGoalRefresh then ufoGoalRefresh() end
+                    if ufoTargetRarityRefresh then ufoTargetRarityRefresh() end
+
+                    -- The backend's cycle state intentionally stays mostly empty while
+                    -- WAITING_FOR_UFO. Read the equipped chicken directly for the UI so
+                    -- Current Rarity and Genes are visible even before an event starts.
+                    local liveEquipped = nil
+                    if type(ufo.getEquippedSnapshot) == "function" then
+                        local okLive, snapshot = pcall(ufo.getEquippedSnapshot)
+                        if okLive and type(snapshot) == "table" then
+                            liveEquipped = snapshot
+                        end
+                    end
+
+                    local shownName = (liveEquipped and (liveEquipped.equippedName or liveEquipped.equippedId))
+                        or us.equippedName or us.equippedId or "Equipped Chicken"
+                    local shownRarity = (liveEquipped and liveEquipped.rarity) or us.rarity
+                    local shownGenome = (liveEquipped and liveEquipped.genome) or us.genome
+                    local shownCap = (liveEquipped and liveEquipped.geneCap) or us.geneCap
+                    local shownGenesMax = liveEquipped and liveEquipped.genesMax
+                    if shownGenesMax == nil then shownGenesMax = us.genesMax == true end
+
+                    State.ufoAscension.rarity = shownRarity
+                    State.ufoAscension.genome = shownGenome
+                    State.ufoAscension.geneCap = shownCap
+                    State.ufoAscension.genesMax = shownGenesMax == true
+
+                    setText(ufoChickenLabel, shownName)
+                    if State.ufoAscension.goal == "rarity" then
+                        setText(ufoTargetLabel, "Until " .. resolveRarityDisplayName(State.ufoAscension.targetRarity))
+                    else
+                        setText(ufoTargetLabel, shownGenesMax and "Max Genes" or "Until Max Genes")
+                    end
+                    setText(ufoCurrentRarityLabel, resolveRarityDisplayName(shownRarity or "unknown"))
+                    setText(ufoStatusLabel, us.state or "IDLE")
+                    local g = shownGenome
+                    local cap = shownCap
+                    if type(g) == "table" and cap then
+                        setText(ufoGenesLabel, string.format(
+                            "HP %s/%s · ATK %s/%s · SPD %s/%s · PWR %s/%s · EGG %s/%s",
+                            tostring(g.vigor or "?"), tostring(cap),
+                            tostring(g.furia or "?"), tostring(cap),
+                            tostring(g.velocidad or "?"), tostring(cap),
+                            tostring(g.impetu or "?"), tostring(cap),
+                            tostring(g.fertility or "?"), tostring(cap)
+                        ))
+                    else
+                        setText(ufoGenesLabel, "—")
+                    end
+                end
+            else
+                setText(ufoStatusLabel, "Waiting for backend")
+            end
+        end,
+    }
+end)
+
+safeBuild("Tower", function()
+    local sc = createScrollPage()
+    local _, ov = card(sc, 1, "TOWER")
+    local floor = row(ov, 1, "Floor"); local status = row(ov, 2, "Status")
+    settingRow(ov, 3, "Auto K.O. Dismiss", nil, "autoKoDismiss")
+    Views.Tower = { root = sc, update = function()
+        setText(floor, State.tower.floor); setText(status, State.tower.status)
+    end }
+end)
+safeBuild("Rebirth", function()
+    local sc = createScrollPage()
+    local _, top = card(sc, 1, "REBIRTH")
+    local ready = row(top, 1, "Status")
+    settingRow(top, 2, "Auto Farm Rebirth", nil, "autoFarmRebirth", setAutoFarmRebirth)
+    Views.Rebirth = { root = sc, update = function()
+        setText(ready, select(3, getRebirthInfo()) and "READY" or "NOT READY")
+    end }
+end)
+
+safeBuild("Auto Hatch Egg", function()
+    local sc = createScrollPage()
+
+    local _, hatchCard = card(sc, 1, "Auto Hatch Egg")
+    settingRow(hatchCard, 1, "Auto Hatch Eggs", nil, "autoHatch", function(v)
+        HatchFeature.setAutoHatch(v)
+    end)
+
+    local _, filterCard = card(sc, 2, "Egg Filter")
+    local rebuildEggFilter = nil
+
+    local function buildEggRows(host)
+        local controls = Instance.new("Frame")
+        controls.LayoutOrder = 0
+        controls.Size = UDim2.new(1, 0, 0, 32)
+        controls.BackgroundTransparency = 1
+        controls.Parent = host
+
+        local selectAll = Instance.new("TextButton")
+        selectAll.Size = UDim2.new(0.5, -4, 0, 28)
+        selectAll.BackgroundColor3 = Theme.SurfaceElevated
+        selectAll.BorderSizePixel = 0
+        selectAll.Text = "Select All"
+        selectAll.Font = Enum.Font.Gotham
+        selectAll.TextSize = 11
+        selectAll.TextColor3 = Theme.TextPrimary
+        selectAll.AutoButtonColor = false
+        selectAll.Parent = controls
+        corner(selectAll, 6)
+        selectAll.MouseButton1Click:Connect(function()
+            HatchFeature.selectAllAvailableEggs()
+            HatchFeature.userCustomized = true
+            markConfigDirty()
+            if type(rebuildEggFilter) == "function" then
+                task.defer(rebuildEggFilter)
+            end
+        end)
+
+        local clear = selectAll:Clone()
+        clear.Position = UDim2.new(0.5, 4, 0, 0)
+        clear.Text = "Clear"
+        clear.Parent = controls
+        clear.MouseButton1Click:Connect(function()
+            HatchFeature.clearEggSelection()
+            markConfigDirty()
+            if type(rebuildEggFilter) == "function" then
+                task.defer(rebuildEggFilter)
+            end
+        end)
+
+        refreshData()
+        local available = HatchFeature.getAvailableEggTypes()
+
+        if #available == 0 then
+            local empty = text(host, "No eggs detected.", 11, Theme.TextMuted)
+            empty.LayoutOrder = 10
+            empty.Size = UDim2.new(1, 0, 0, 26)
+            return
+        end
+
+        for i, egg in ipairs(available) do
+            local friendly = egg.displayName
+            if type(friendly) ~= "string" or friendly == "" then
+                friendly = resolveEggDisplayName(egg.id)
+            end
+            makeFilterRow(
+                host,
+                10 + i,
+                friendly,
+                "x" .. tostring(egg.quantity or 0),
+                HatchFeature.isEggSelected(egg.id),
+                function(checkBtn)
+                    local now = not HatchFeature.isEggSelected(egg.id)
+                    HatchFeature.setEggSelected(egg.id, now)
+                    checkBtn.Text = now and "✓" or ""
+                end
+            )
+        end
+    end
+
+    rebuildEggFilter = makeCollapsibleFilter(filterCard, 1, "Select Eggs", buildEggRows)
+
+    uiButton(filterCard, 2, "Refresh", function()
+        refreshData()
+        rebuildEggFilter()
+    end)
+
+    Views["Auto Hatch Egg"] = { root = sc, update = function() end }
+end)
+
+-- CHICKENS PAGE (Auto Sell restored)
+safeBuild("Chickens", function()
+    local sc = createScrollPage()
+    local _, sellCard = card(sc, 1, "AUTO SELL CHICKENS")
+
+    if not AutoSellFeature then
+        local err = State.diagnostics["AutoSell.Feature"] or "unknown error"
+        setText(row(sellCard, 1, "Status"), tostring(err))
+        setText(row(sellCard, 2, "Remotes"), State.diagnostics["AutoSell.Remotes"] or "—")
+        setText(row(sellCard, 3, "DataController"), State.diagnostics["AutoSell.DataController"] or "—")
+        setText(row(sellCard, 4, "Catalog"), State.diagnostics["AutoSell.Catalog"] or "—")
+        setText(row(sellCard, 5, "SellChickens"), State.diagnostics["AutoSell.SellChickens"] or "—")
+        Views.Chickens = { root = sc, update = function() end }
+        return
+    end
+
+    settingRow(sellCard, 1, "Auto Sell Chickens", nil, "autoSell", function(v)
+        AutoSellFeature.setAutoSell(v)
+    end)
+    do
+        local f = Instance.new("Frame"); f.LayoutOrder = 2; f.Size = UDim2.new(1, 0, 0, 28)
+        f.BackgroundTransparency = 1; f.Parent = sellCard
+        text(f, "Protect Favorites", 13, Theme.TextPrimary, Enum.Font.GothamMedium).Size = UDim2.new(1, -50, 1, 0)
+        local sw = select(1, makeSwitch(f, AutoSellFeature.getProtectFavorites() == true, function(v)
+            AutoSellFeature.setProtectFavorites(v)
+        end))
+        sw.Position = UDim2.new(1, -40, 0.5, -11)
+    end
+
+    local _, rarityCard = card(sc, 2, "RARITY FILTER")
+    local rarityHost = Instance.new("Frame")
+    rarityHost.LayoutOrder = 5
+    rarityHost.Size = UDim2.new(1, 0, 0, 0)
+    rarityHost.AutomaticSize = Enum.AutomaticSize.Y
+    rarityHost.BackgroundTransparency = 1
+    rarityHost.Parent = rarityCard
+    Instance.new("UIListLayout", rarityHost).Padding = UDim.new(0, 4)
+
+    local rarities = AutoSellFeature.getAvailableRarities()
+    if #rarities == 0 then
+        rarities = { "common", "uncommon", "rare", "epic", "legendary", "mythic", "divine", "celestial", "cosmic", "secret" }
+    end
+    for i, rarityId in ipairs(rarities) do
+        local friendly = resolveRarityDisplayName(rarityId)
+        diagNameOnce("RARITY", rarityId, friendly)
+        makeFilterRow(rarityHost, i, friendly, nil, AutoSellFeature.isRaritySelected(rarityId), function(checkBtn)
+            local now = not AutoSellFeature.isRaritySelected(rarityId)
+            AutoSellFeature.setRaritySelected(rarityId, now)
+            checkBtn.Text = now and "✓" or ""
+        end)
+    end
+
+    local _, mutationCard = card(sc, 3, "PROTECTED MUTATIONS")
+    local mutationHost = Instance.new("Frame")
+    mutationHost.LayoutOrder = 5
+    mutationHost.Size = UDim2.new(1, 0, 0, 0)
+    mutationHost.AutomaticSize = Enum.AutomaticSize.Y
+    mutationHost.BackgroundTransparency = 1
+    mutationHost.Parent = mutationCard
+    Instance.new("UIListLayout", mutationHost).Padding = UDim.new(0, 4)
+
+    local mutations = AutoSellFeature.getAvailableMutations and AutoSellFeature.getAvailableMutations() or {}
+    if #mutations == 0 then
+        local emptyLabel = text(mutationHost, "No mutation detected in roster", 11, Theme.TextMuted)
+        emptyLabel.LayoutOrder = 1
+        emptyLabel.Size = UDim2.new(1, 0, 0, 32)
+    else
+        for i, mutationId in ipairs(mutations) do
+            makeFilterRow(
+                mutationHost,
+                i,
+                titleCaseId(mutationId),
+                mutationId,
+                AutoSellFeature.isMutationProtected(mutationId),
+                function(checkBtn)
+                    local now = not AutoSellFeature.isMutationProtected(mutationId)
+                    AutoSellFeature.setMutationProtected(mutationId, now)
+                    checkBtn.Text = now and "✓" or ""
+                end
+            )
+        end
+    end
+
+    local _, abilityCard = card(sc, 4, "ABILITY WHITELIST")
+    local abilityHost = Instance.new("Frame")
+    abilityHost.LayoutOrder = 5
+    abilityHost.Size = UDim2.new(1, 0, 0, 0)
+    abilityHost.AutomaticSize = Enum.AutomaticSize.Y
+    abilityHost.BackgroundTransparency = 1
+    abilityHost.Parent = abilityCard
+    Instance.new("UIListLayout", abilityHost).Padding = UDim.new(0, 4)
+
+    local abilities = AutoSellFeature.getAvailableAbilities()
+    if #abilities == 0 then
+        abilities = {
+            { id = "voodoo", name = "Voodoo" },
+            { id = "cycleofash", name = "Cycle of Ash" },
+        }
+    end
+    table.sort(abilities, function(a, b)
+        return resolveAbilityDisplayName(a) < resolveAbilityDisplayName(b)
+    end)
+    for i, ab in ipairs(abilities) do
+        local aid = ab.id
+        local friendly = resolveAbilityDisplayName(ab)
+        diagNameOnce("ABILITY", aid, friendly)
+        makeFilterRow(abilityHost, i, friendly, nil, AutoSellFeature.isAbilityWhitelisted(aid), function(checkBtn)
+            local now = not AutoSellFeature.isAbilityWhitelisted(aid)
+            AutoSellFeature.setAbilityWhitelisted(aid, now)
+            checkBtn.Text = now and "✓" or ""
+        end)
+    end
+
+    local _, statsCard = card(sc, 5, "SELL STATUS / DIAGNOSTICS")
+    local sStatus = row(statsCard, 1, "Status")
+    local sSel = row(statsCard, 2, "Selected Rarities")
+    local sEval = row(statsCard, 3, "Evaluated")
+    local sSold = row(statsCard, 4, "Confirmed Sold")
+    local sAct = row(statsCard, 5, "Protected Active")
+    local sFav = row(statsCard, 6, "Protected Favorite")
+    local sMut = row(statsCard, 7, "Protected by Mutation")
+    local sAb = row(statsCard, 8, "Protected Ability")
+    local sInc = row(statsCard, 9, "Protected Incubator")
+    local sFail = row(statsCard, 10, "Failed / Not Confirmed")
+    local sBatch = row(statsCard, 11, "Last Batch")
+    local sErr = row(statsCard, 12, "Last Error")
+
+    Views.Chickens = { root = sc, update = function()
+        setText(sStatus, AutoSellFeature.getStatus())
+        local st = AutoSellFeature.getStats()
+        local sel = st.selectedRarities or {}
+        setText(sSel, #sel > 0 and table.concat(sel, ", ") or "(none)")
+        setText(sEval, st.totalEvaluated)
+        setText(sSold, st.totalSoldConfirmed)
+        setText(sAct, st.totalProtectedActive)
+        setText(sFav, st.totalProtectedFavorite)
+        setText(sMut, st.totalProtectedMutated)
+        setText(sAb, st.totalProtectedAbility)
+        setText(sInc, st.totalProtectedIncubator)
+        setText(sFail, st.totalFailedNotConfirmed)
+        setText(sBatch, st.lastBatchSize)
+        setText(sErr, st.lastError)
+    end }
+end)
+
+
+-- FUSE PAGE
+safeBuild("Fuse", function()
+    local sc = createScrollPage()
+    local _, fuseCard = card(sc, 1, "AUTO FUSE CHICKENS")
+
+    if not AutoFuseFeature then
+        local err = State.diagnostics["AutoFuse.Feature"] or "unknown error"
+        setText(row(fuseCard, 1, "Status"), tostring(err))
+        setText(row(fuseCard, 2, "Remotes"), State.diagnostics["AutoFuse.Remotes"] or "—")
+        setText(row(fuseCard, 3, "FusionRules"), State.diagnostics["AutoFuse.FusionRules"] or "—")
+        setText(row(fuseCard, 4, "FuseChickens"), State.diagnostics["AutoFuse.FuseChickens"] or "—")
+        Views.Fuse = { root = sc, update = function() end }
+        return
+    end
+
+    settingRow(fuseCard, 1, "Auto Fuse Chickens", nil, "autoFuse", function(v)
+        AutoFuseFeature.setAutoFuse(v)
+    end)
+    do
+        local f = Instance.new("Frame"); f.LayoutOrder = 2; f.Size = UDim2.new(1, 0, 0, 28)
+        f.BackgroundTransparency = 1; f.Parent = fuseCard
+        text(f, "Dry Run", 13, Theme.TextPrimary, Enum.Font.GothamMedium).Size = UDim2.new(1, -50, 1, 0)
+        local sw = select(1, makeSwitch(f, AutoFuseFeature.getDryRun() == true, function(v)
+            AutoFuseFeature.setDryRun(v)
+        end))
+        sw.Position = UDim2.new(1, -40, 0.5, -11)
+    end
+    setText(row(fuseCard, 3, "Active Chicken"), "ALWAYS PROTECTED")
+    do
+        local f = Instance.new("Frame"); f.LayoutOrder = 4; f.Size = UDim2.new(1, 0, 0, 28)
+        f.BackgroundTransparency = 1; f.Parent = fuseCard
+        text(f, "Protect Favorites", 13, Theme.TextPrimary, Enum.Font.GothamMedium).Size = UDim2.new(1, -50, 1, 0)
+        local sw = select(1, makeSwitch(f, AutoFuseFeature.getProtectFavorites() == true, function(v)
+            AutoFuseFeature.setProtectFavorites(v)
+        end))
+        sw.Position = UDim2.new(1, -40, 0.5, -11)
+    end
+    do
+        local f = Instance.new("Frame"); f.LayoutOrder = 5; f.Size = UDim2.new(1, 0, 0, 28)
+        f.BackgroundTransparency = 1; f.Parent = fuseCard
+        text(f, "Protect Mutated", 13, Theme.TextPrimary, Enum.Font.GothamMedium).Size = UDim2.new(1, -50, 1, 0)
+        local sw = select(1, makeSwitch(f, AutoFuseFeature.getProtectMutated() == true, function(v)
+            AutoFuseFeature.setProtectMutated(v)
+        end))
+        sw.Position = UDim2.new(1, -40, 0.5, -11)
+    end
+
+    -- Match Mode
+    local _, matchCard = card(sc, 2, "MATCH MODE")
+    local matchLabel = row(matchCard, 1, "Mode")
+    local function matchBtn(parent, order, label, mode)
+        local f = Instance.new("Frame"); f.LayoutOrder = order; f.Size = UDim2.new(1, 0, 0, 28)
+        f.BackgroundTransparency = 1; f.Parent = parent
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(1, 0, 1, 0)
+        b.BackgroundColor3 = Theme.SurfaceElevated
+        b.Text = label
+        b.Font = Enum.Font.Gotham
+        b.TextSize = 12
+        b.TextColor3 = Theme.TextPrimary
+        b.AutoButtonColor = false
+        b.Parent = f
+        corner(b, 6)
+        b.MouseButton1Click:Connect(function()
+            AutoFuseFeature.setMatchMode(mode)
+        end)
+    end
+    matchBtn(matchCard, 2, "Same Chicken", "Same Chicken")
+    matchBtn(matchCard, 3, "Same Rarity", "Same Rarity")
+
+    -- Keep Copies
+    local _, keepCard = card(sc, 3, "KEEP COPIES PER CHICKEN")
+    local keepVal = row(keepCard, 1, "Keep Copies")
+    do
+        local f = Instance.new("Frame"); f.LayoutOrder = 2; f.Size = UDim2.new(1, 0, 0, 30)
+        f.BackgroundTransparency = 1; f.Parent = keepCard
+        local function nbtn(x, label, delta)
+            local b = Instance.new("TextButton")
+            b.Size = UDim2.fromOffset(36, 26)
+            b.Position = UDim2.fromOffset(x, 2)
+            b.BackgroundColor3 = Theme.SurfaceElevated
+            b.Text = label
+            b.Font = Enum.Font.GothamBold
+            b.TextSize = 14
+            b.TextColor3 = Theme.TextPrimary
+            b.AutoButtonColor = false
+            b.Parent = f
+            corner(b, 6)
+            b.MouseButton1Click:Connect(function()
+                local cur = AutoFuseFeature.getKeepCopies() or 1
+                AutoFuseFeature.setKeepCopies(math.max(0, cur + delta))
+            end)
+        end
+        nbtn(0, "−", -1)
+        nbtn(44, "+", 1)
+    end
+
+    -- Rarity Filter
+    local _, rarityCard = card(sc, 4, "RARITY FILTER")
+    local rarityHost = Instance.new("Frame")
+    rarityHost.LayoutOrder = 5
+    rarityHost.Size = UDim2.new(1, 0, 0, 0)
+    rarityHost.AutomaticSize = Enum.AutomaticSize.Y
+    rarityHost.BackgroundTransparency = 1
+    rarityHost.Parent = rarityCard
+    Instance.new("UIListLayout", rarityHost).Padding = UDim.new(0, 4)
+    do
+        local btnRow = Instance.new("Frame")
+        btnRow.LayoutOrder = 0
+        btnRow.Size = UDim2.new(1, 0, 0, 28)
+        btnRow.BackgroundTransparency = 1
+        btnRow.Parent = rarityHost
+        local function smallBtn(parent, label, x, fn)
+            local b = Instance.new("TextButton")
+            b.Size = UDim2.fromOffset(90, 24)
+            b.Position = UDim2.fromOffset(x, 2)
+            b.BackgroundColor3 = Theme.SurfaceElevated
+            b.Text = label
+            b.Font = Enum.Font.Gotham
+            b.TextSize = 11
+            b.TextColor3 = Theme.TextPrimary
+            b.AutoButtonColor = false
+            b.Parent = parent
+            corner(b, 5)
+            b.MouseButton1Click:Connect(fn)
+        end
+        smallBtn(btnRow, "Select All", 0, function() AutoFuseFeature.selectAllRarities() end)
+        smallBtn(btnRow, "Clear", 96, function() AutoFuseFeature.clearRaritySelection() end)
+    end
+    local rarities = AutoFuseFeature.getAvailableRarities()
+    for i, rarityId in ipairs(rarities) do
+        local friendly = resolveRarityDisplayName(rarityId)
+        diagNameOnce("FUSE_RARITY", rarityId, friendly)
+        makeFilterRow(rarityHost, 10 + i, friendly, nil, AutoFuseFeature.isRaritySelected(rarityId), function(checkBtn)
+            local now = not AutoFuseFeature.isRaritySelected(rarityId)
+            AutoFuseFeature.setRaritySelected(rarityId, now)
+            checkBtn.Text = now and "✓" or ""
+        end)
+    end
+
+    -- Ability whitelist
+    local _, abilityCard = card(sc, 5, "PROTECTED ABILITIES")
+    local abilityHost = Instance.new("Frame")
+    abilityHost.LayoutOrder = 5
+    abilityHost.Size = UDim2.new(1, 0, 0, 0)
+    abilityHost.AutomaticSize = Enum.AutomaticSize.Y
+    abilityHost.BackgroundTransparency = 1
+    abilityHost.Parent = abilityCard
+    Instance.new("UIListLayout", abilityHost).Padding = UDim.new(0, 4)
+    local abilitiesMap = AutoFuseFeature.getAvailableAbilities()
+    local abilities = {}
+    if type(abilitiesMap) == "table" then
+        for id, def in pairs(abilitiesMap) do
+            table.insert(abilities, type(def) == "table" and def or { id = id, name = id })
+        end
+    end
+    if #abilities == 0 then
+        abilities = {
+            { id = "voodoo", name = "Voodoo" },
+            { id = "cycleofash", name = "Cycle of Ash" },
+        }
+    end
+    table.sort(abilities, function(a, b)
+        return resolveAbilityDisplayName(a) < resolveAbilityDisplayName(b)
+    end)
+    for i, ab in ipairs(abilities) do
+        local aid = ab.id
+        local friendly = resolveAbilityDisplayName(ab)
+        diagNameOnce("FUSE_ABILITY", aid, friendly)
+        makeFilterRow(abilityHost, i, friendly, nil, AutoFuseFeature.isAbilityWhitelisted(aid), function(checkBtn)
+            local now = not AutoFuseFeature.isAbilityWhitelisted(aid)
+            AutoFuseFeature.setAbilityWhitelisted(aid, now)
+            checkBtn.Text = now and "✓" or ""
+        end)
+    end
+
+    -- Status / stats
+    local _, statsCard = card(sc, 6, "FUSE STATUS / DIAGNOSTICS")
+    local sStatus = row(statsCard, 1, "Status")
+    local sDry = row(statsCard, 2, "Dry Run")
+    local sMatch = row(statsCard, 3, "Match Mode")
+    local sKeep = row(statsCard, 4, "Keep Copies")
+    local sElig = row(statsCard, 5, "Eligible")
+    local sPairs = row(statsCard, 6, "Pairs Available")
+    local sRes = row(statsCard, 7, "Reserved Keep")
+    local sConf = row(statsCard, 8, "Confirmed Fusions")
+    local sPA = row(statsCard, 9, "Last Parent A")
+    local sPB = row(statsCard, 10, "Last Parent B")
+    local sResId = row(statsCard, 11, "Last Result")
+    local sRar = row(statsCard, 12, "Last Result Rarity")
+    local sAsc = row(statsCard, 13, "Ascended")
+    local sCost = row(statsCard, 14, "Last Cost")
+    local sErr = row(statsCard, 15, "Last Error")
+
+    Views.Fuse = { root = sc, update = function()
+        setText(sStatus, AutoFuseFeature.getStatus())
+        setText(sDry, AutoFuseFeature.getDryRun() and "ON" or "OFF")
+        setText(sMatch, AutoFuseFeature.getMatchMode())
+        setText(sKeep, AutoFuseFeature.getKeepCopies())
+        setText(keepVal, AutoFuseFeature.getKeepCopies())
+        setText(matchLabel, AutoFuseFeature.getMatchMode())
+        local st = AutoFuseFeature.getStats()
+        setText(sElig, st.eligibleChickens)
+        setText(sPairs, st.pairsBuilt)
+        setText(sRes, st.reservedKeepCopies)
+        setText(sConf, st.confirmedFusions)
+        setText(sPA, st.lastParentA)
+        setText(sPB, st.lastParentB)
+        setText(sResId, st.lastResultId)
+        setText(sRar, st.lastResultRarity)
+        setText(sAsc, st.lastAscended)
+        setText(sCost, st.lastCost)
+        setText(sErr, st.lastError)
+    end }
+end)
+
+safeBuild("Incubator", function()
+    local sc = createScrollPage()
+    local _, info = card(sc, 1, "INCUBATOR")
+    local level = row(info, 1, "Level"); local eggs = row(info, 2, "Stored")
+    local _, claim = card(sc, 2, "AUTO CLAIM")
+    settingRow(claim, 1, "Auto Claim Eggs", nil, "autoIncubatorClaim", function(v) IncubatorClaimFeature.setAutoIncubatorClaim(v) end)
+    local cStatus = row(claim, 2, "Status")
+    Views.Incubator = { root = sc, update = function()
+        local is = IncubatorClaimFeature.getStatus()
+        setText(level, is.level); setText(eggs, is.eggCount); setText(cStatus, is.status)
+    end }
+end)
+safeBuild("Coop", function()
+    local sc = createScrollPage()
+    local _, status = card(sc, 1, "COOP")
+    local slots = row(status, 1, "Generators")
+    local _, auto = card(sc, 2, "AUTOMATION")
+    settingRow(auto, 1, "Auto Buy Generator", nil, "autoBuyGenerator", setAutoBuyGenerator)
+    settingRow(auto, 2, "Auto Upgrade Generator", nil, "autoUpgradeGenerator", setAutoUpgradeGenerator)
+    State._generatorMaxLevelStepper(auto, 3)
+    settingRow(auto, 4, "Auto Expand Coop", nil, "autoExpandCoop", setAutoExpandCoop)
+    settingRow(auto, 5, "Auto Upgrade Recycler", nil, "autoUpgradeRecycler", setAutoUpgradeRecycler)
+
+    local _, incCard = card(sc, 3, "INCUBATOR")
+    settingRow(incCard, 1, "Auto Upgrade Incubator", nil, "autoUpgradeIncubator", function(v)
+        if AutoUpgradeIncubatorFeature then
+            AutoUpgradeIncubatorFeature.setAutoUpgradeIncubator(v)
+        end
+    end)
+    local iLevel = row(incCard, 2, "Level")
+    local iCost = row(incCard, 3, "Next Upgrade Cost")
+    local iReb = row(incCard, 4, "Required Rebirth")
+    local iStatus = row(incCard, 5, "Status")
+
+    Views.Coop = { root = sc, update = function()
+        refreshEconomyStatus()
+        setText(slots, string.format("%d / %d", State.economy.generatorsOwned, State.economy.generatorsSlots))
+        if AutoUpgradeIncubatorFeature then
+            local st = AutoUpgradeIncubatorFeature.getStatus()
+            setText(iLevel, st.level)
+            setText(iCost, st.nextCost)
+            setText(iReb, st.requiredRebirth)
+            setText(iStatus, st.status)
+        else
+            setText(iStatus, State.diagnostics["AutoUpgradeIncubator.Feature"] or "—")
+        end
+    end }
+end)
+
+
+
+safeBuild("Events", function()
+    local sc = createScrollPage()
+
+    local _, phase9Card = card(sc, 1, "PHASE 9 EVENTS")
+    settingRow(phase9Card, 1, "Event Capsule", nil, "autoEventCapsule", setEventCapsulePhase9)
+    settingRow(phase9Card, 2, "Auto Arena", nil, "autoArena", setAutoArenaPhase9)
+    settingRow(phase9Card, 3, "Auto Kraken Eggs", nil, "autoKraken", setKrakenPhase9)
+    local p9Status = row(phase9Card, 4, "Phase 9 Status")
+    local p9Owner = row(phase9Card, 5, "Priority Owner")
+    local p9Error = row(phase9Card, 6, "Last Error")
+
+    local _, heCard = card(sc, 2, "HOT EGG")
+    settingRow(heCard, 1, "Auto Hot Egg", nil, "autoHotEgg", setAutoHotEgg)
+    local phase = row(heCard, 2, "Phase")
+    local ended = row(heCard, 3, "End Confirmed")
+    local holding = row(heCard, 4, "Holding Egg")
+    local hazards = row(heCard, 5, "Active Hazards")
+    local threat = row(heCard, 6, "Threatening")
+    local dist = row(heCard, 7, "Dist To Egg")
+    local evade = row(heCard, 8, "Last Evade Reason")
+    local action = row(heCard, 9, "Action")
+
+    Views.Events = { root = sc, update = function()
+        local api = getPhase9API()
+        if api then
+            local okStatus, statusValue = pcall(api.getStatus)
+            setText(p9Status, okStatus and statusValue or "ERROR")
+            local owner = "NONE"
+            if type(api.getCoordinatorState) == "function" then
+                local okState, state = pcall(api.getCoordinatorState)
+                if okState and type(state) == "table" then
+                    owner = state.currentOwner or state.owner or "NONE"
+                end
+            end
+            setText(p9Owner, owner)
+            if type(api.getLastError) == "function" then
+                local okErr, err = pcall(api.getLastError)
+                setText(p9Error, okErr and err or "—")
+            else
+                setText(p9Error, "—")
+            end
+        else
+            setText(p9Status, "BOOTSTRAPPING")
+            setText(p9Owner, "NONE")
+            setText(p9Error, "—")
+        end
+
+        setText(phase, HE.phase)
+        setText(ended, HE.endConfirmed and "YES" or "NO")
+        setText(holding, HE.holding and "YES" or "NO")
+        setText(hazards, HE.meteorCount)
+        setText(threat, HE.threateningCount)
+        setText(dist, HE.distToEgg and string.format("%.1f", HE.distToEgg) or "—")
+        setText(evade, HE.lastEvadeReason)
+        setText(action, HE.action)
+    end }
+end)
+safeBuild("Utility", function()
+    local sc = createScrollPage()
+    local _, afk = card(sc, 1, "ANTI-AFK")
+    settingRow(afk, 1, "Anti-AFK", nil, "antiAfk", setAntiAfk)
+    Views.Utility = { root = sc, update = function() end }
+end)
+safeBuild("Diagnostics", function()
+    local sc = createScrollPage()
+    local _, integ = card(sc, 1, "INTEGRATION")
+    local rows = {}
+    Views.Diagnostics = { root = sc, update = function()
+        for _, r in pairs(rows) do r:Destroy() end
+        table.clear(rows)
+        local order = 5
+        local keys = {}
+        for k in pairs(State.diagnostics) do table.insert(keys, k) end
+        table.sort(keys)
+        for _, k in ipairs(keys) do
+            local r = Instance.new("Frame"); r.LayoutOrder = order; r.Size = UDim2.new(1, 0, 0, 20)
+            r.BackgroundTransparency = 1; r.Parent = integ
+            text(r, k, 11, Theme.TextMuted).Size = UDim2.new(0.55, 0, 1, 0)
+            local vl = text(r, tostring(State.diagnostics[k]), 11, Theme.TextPrimary, nil, Enum.TextXAlignment.Right)
+            vl.Size = UDim2.new(0.45, 0, 1, 0); vl.Position = UDim2.fromScale(0.55, 0)
+            table.insert(rows, r); order += 1
+        end
+    end }
+end)
+safeBuild("Performance", function()
+    local sc = createScrollPage()
+    local _, perfCard = card(sc, 1, "Performance")
+
+    if PerformanceManager then
+        local function perfToggle(order, title, getter, setter)
+            local f = Instance.new("Frame")
+            f.LayoutOrder = order
+            f.Size = UDim2.new(1, 0, 0, 34)
+            f.BackgroundTransparency = 1
+            f.Parent = perfCard
+
+            local label = text(f, title, 12, Theme.TextPrimary, Enum.Font.GothamMedium)
+            label.Size = UDim2.new(1, -52, 1, 0)
+
+            local sw = select(1, makeSwitch(f, getter() == true, function(v)
+                setter(v)
+                markConfigDirty()
+            end))
+            sw.Position = UDim2.new(1, -40, 0.5, -11)
+        end
+
+        perfToggle(1, "Boost FPS", PerformanceManager.getBoostFPS, PerformanceManager.setBoostFPS)
+        perfToggle(2, "Disable VFX", PerformanceManager.getDisableVFX, PerformanceManager.setDisableVFX)
+        perfToggle(3, "Disable Shadows", PerformanceManager.getDisableShadows, PerformanceManager.setDisableShadows)
+        perfToggle(4, "Hide Other Players", PerformanceManager.getHideOtherPlayers, PerformanceManager.setHideOtherPlayers)
+        perfToggle(5, "White Screen / AFK Saver", PerformanceManager.getWhiteScreen, PerformanceManager.setWhiteScreen)
+        perfToggle(6, "Ultra Performance", PerformanceManager.getUltraPerformance, PerformanceManager.setUltraPerformance)
+        if PerformanceManager.getPotatoMode and PerformanceManager.setPotatoMode then
+            perfToggle(7, "Potato Mode", PerformanceManager.getPotatoMode, PerformanceManager.setPotatoMode)
+        end
+        local restoreButton = Instance.new("TextButton")
+        restoreButton.LayoutOrder = 8
+        restoreButton.Size = UDim2.new(1, 0, 0, 30)
+        restoreButton.BackgroundColor3 = Theme.SurfaceElevated
+        restoreButton.BorderSizePixel = 0
+        restoreButton.Text = "Restore Visuals"
+        restoreButton.Font = Enum.Font.GothamMedium
+        restoreButton.TextSize = 11
+        restoreButton.TextColor3 = Theme.TextPrimary
+        restoreButton.AutoButtonColor = false
+        restoreButton.Parent = perfCard
+        corner(restoreButton, 7)
+        maid:Connect(restoreButton.MouseButton1Click, function()
+            if PerformanceManager.restoreVisuals then PerformanceManager.restoreVisuals(); markConfigDirty() end
+        end)
+    else
+        setText(row(perfCard, 1, "Status"), "Unavailable")
+    end
+
+    Views.Performance = { root = sc, update = function() end }
+end)
+
+
+-- ============================================================
+-- UNO WEBHOOK ALL-IN-ONE V1 — ISOLATED RUNTIME BOOTSTRAP
+-- This keeps the runtime-passed backend out of UNO HUB lexical scope.
+-- ============================================================
+do
+    local __unoWebhookSource = [=[
+-- UNO_WEBHOOK_ALL_IN_ONE_V1.lua
+
+-- Mechanical merge of validated Snapshot V2 + Sender V1 Fix3 + Scheduler V1.
+
+-- Scheduler remains disabled on load; configure webhook and call scheduler.enable() explicitly.
+
+
+
+
+
+-- ===== SNAPSHOT V2 =====
+
+-- UNO_WEBHOOK_SNAPSHOT_COLLECTOR_V2.lua
+
+-- Final read-only snapshot collector for future webhook integration.
+
+-- No HTTP requests, Discord sends, gameplay remotes, matchmaking, automation,
+
+-- or UNO HUB state changes are performed here.
+
+local Players = game:GetService("Players")
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local LocalPlayer = Players.LocalPlayer
+
+local function safeRequire(instance)
+
+    if not instance then return nil end
+
+    local ok, value = pcall(require, instance)
+
+    return ok and value or nil
+
+end
+
+local function findPath(root, path)
+
+    local current = root
+
+    for _, name in ipairs(path) do
+
+        if not current then return nil end
+
+        current = current:FindFirstChild(name)
+
+    end
+
+    return current
+
+end
+
+local function readAtom(atom)
+
+    if type(atom) ~= "function" then return nil end
+
+    local ok, value = pcall(atom)
+
+    return ok and value or nil
+
+end
+
+local DataController = safeRequire(findPath(LocalPlayer, { "PlayerScripts", "Core", "Data", "DataController" }))
+
+local Catalog = safeRequire(findPath(ReplicatedStorage, { "Content", "Catalog" }))
+
+local ArenaView = safeRequire(findPath(ReplicatedStorage, { "Features", "Arena", "ArenaView" }))
+
+local ArenaState = safeRequire(findPath(ReplicatedStorage, { "Features", "Arena", "ArenaState" }))
+
+local RankData = safeRequire(findPath(ReplicatedStorage, { "Features", "Ranked", "RankData" }))
+
+local RankedIds = safeRequire(findPath(ReplicatedStorage, { "Features", "ArenaBridge", "RankedIds" }))
+
+local ArenaFormat = safeRequire(findPath(LocalPlayer, { "PlayerScripts", "UI", "2d", "Arena", "ArenaFormat" }))
+
+local SUFFIXES = {
+
+    "", "K", "M", "B", "T", "Qa", "Qi", "Sx", "Sp", "Oc", "No", "Dc",
+
+    "Ud", "Dd", "Td", "Qad", "Qid", "Sxd", "Spd", "Ocd", "Nod", "Vg",
+
+}
+
+local function compactNumber(value)
+
+    local number = tonumber(value)
+
+    if not number then return nil end
+
+    if number == 0 then return "0" end
+
+    local negative = number < 0
+
+    number = math.abs(number)
+
+    local index = 1
+
+    while number >= 1000 and index < #SUFFIXES do
+
+        number /= 1000
+
+        index += 1
+
+    end
+
+    local text
+
+    if index == 1 then
+
+        text = string.format("%.0f", number)
+
+    elseif number >= 100 then
+
+        text = string.format("%.0f", number)
+
+    elseif number >= 10 then
+
+        text = string.format("%.1f", number)
+
+    else
+
+        text = string.format("%.1f", number)
+
+    end
+
+    text = text:gsub("%.0$", "")
+
+    return (negative and "-" or "") .. text .. SUFFIXES[index]
+
+end
+
+local function numericValue(value)
+
+    if type(value) == "number" then return value end
+
+    if type(value) == "table" and type(value.toNumber) == "function" then
+
+        local ok, number = pcall(value.toNumber, value)
+
+        if ok and type(number) == "number" then return number end
+
+    end
+
+    return tonumber(value)
+
+end
+
+local function getActiveSeasonKey()
+
+    if not RankData or type(RankData.GetSeasonKey) ~= "function" then
+
+        return nil, "RankData.GetSeasonKey unavailable"
+
+    end
+
+    local ok, key = pcall(RankData.GetSeasonKey)
+
+    if not ok or type(key) ~= "string" or key == "" then
+
+        return nil, tostring(key)
+
+    end
+
+    return key, nil
+
+end
+
+local function getAvailableSeasonKeys(ranked)
+
+    local keys = {}
+
+    if type(ranked) ~= "table" or type(ranked.seasons) ~= "table" then return keys end
+
+    for key in pairs(ranked.seasons) do keys[#keys + 1] = tostring(key) end
+
+    table.sort(keys)
+
+    return keys
+
+end
+
+local function getSeasonRecord(ranked, seasonKey)
+
+    if not seasonKey or type(ranked) ~= "table" or type(ranked.seasons) ~= "table" then return nil end
+
+    local record = ranked.seasons[seasonKey]
+
+    return type(record) == "table" and record or nil
+
+end
+
+local function resolveRankObject(currentRankName, trophies, topPercent)
+
+    if type(currentRankName) == "string" and currentRankName ~= "" and RankedIds and ArenaView then
+
+        local okId, rankId = pcall(RankedIds.fromName, currentRankName)
+
+        if okId and rankId and type(ArenaView.rankById) == "function" then
+
+            local okRank, rank = pcall(ArenaView.rankById, rankId)
+
+            if okRank and type(rank) == "table" then return rank end
+
+        end
+
+    end
+
+    if ArenaView and type(ArenaView.rankFor) == "function" and type(trophies) == "number" then
+
+        local okRank, rank = pcall(ArenaView.rankFor, trophies, topPercent)
+
+        if okRank and type(rank) == "table" then return rank end
+
+    end
+
+    return nil
+
+end
+
+local function resolveNextRank(currentRank, trophies, topPercent)
+
+    if currentRank and ArenaView and type(ArenaView.nextRank) == "function" then
+
+        local okNext, nextRank = pcall(ArenaView.nextRank, currentRank)
+
+        if okNext and type(nextRank) == "table" then return nextRank end
+
+    end
+
+    local rank = resolveRankObject(nil, trophies, topPercent)
+
+    if rank and ArenaView and type(ArenaView.nextRank) == "function" then
+
+        local okNext, nextRank = pcall(ArenaView.nextRank, rank)
+
+        if okNext and type(nextRank) == "table" then return nextRank end
+
+    end
+
+    return nil
+
+end
+
+local function progressText(trophies, threshold)
+
+    if type(trophies) ~= "number" then return nil end
+
+    if type(threshold) ~= "number" then return tostring(math.floor(trophies)) end
+
+    if ArenaFormat and type(ArenaFormat.progress) == "function" then
+
+        local ok, text = pcall(ArenaFormat.progress, trophies, threshold)
+
+        if ok and type(text) == "string" then return text end
+
+    end
+
+    return string.format("%d / %d", trophies, threshold)
+
+end
+
+local function getChicken(roster)
+
+    local primary = readAtom(DataController and DataController.chicken)
+
+    if type(primary) == "table" then return primary, "DataController.chicken()" end
+
+    if type(roster) == "table" and type(roster.chickens) == "table" then
+
+        for _, chicken in ipairs(roster.chickens) do
+
+            if type(chicken) == "table" and chicken.id == roster.activeId then
+
+                return chicken, "DataController.roster().activeId + .chickens"
+
+            end
+
+        end
+
+    end
+
+    return nil, nil
+
+end
+
+local function chickenName(chicken)
+
+    if type(chicken) ~= "table" or type(Catalog) ~= "table" or type(Catalog.chickenTypes) ~= "table" then return nil end
+
+    local entry = Catalog.chickenTypes[chicken.typeId]
+
+    return type(entry) == "table" and entry.name or nil
+
+end
+
+local function readEggs(roster)
+
+    local result = {}
+
+    local eggs = type(roster) == "table" and roster.eggs or nil
+
+    local eggCatalog = type(Catalog) == "table" and Catalog.eggs or nil
+
+    if type(eggs) ~= "table" then return result end
+
+    for id, rawCount in pairs(eggs) do
+
+        local count = tonumber(rawCount)
+
+        if count and count > 0 then
+
+            local entry = type(eggCatalog) == "table" and eggCatalog[id] or nil
+
+            result[#result + 1] = {
+
+                id = tostring(id),
+
+                name = type(entry) == "table" and entry.name or nil,
+
+                count = count,
+
+            }
+
+        end
+
+    end
+
+    table.sort(result, function(a, b)
+
+        local left = tostring(a.name or a.id):lower()
+
+        local right = tostring(b.name or b.id):lower()
+
+        if left == right then return a.id < b.id end
+
+        return left < right
+
+    end)
+
+    return result
+
+end
+
+local function readAvatar()
+
+    if not LocalPlayer then return nil end
+
+    local ok, imageUrl, isReady = pcall(
+
+        Players.GetUserThumbnailAsync,
+
+        Players,
+
+        LocalPlayer.UserId,
+
+        Enum.ThumbnailType.AvatarThumbnail,
+
+        Enum.ThumbnailSize.Size420x420
+
+    )
+
+    if not ok or type(imageUrl) ~= "string" or imageUrl == "" then return nil end
+
+    return {
+
+        imageUrl = imageUrl,
+
+        isReady = isReady == true,
+
+        thumbnailType = "AvatarThumbnail",
+
+    }
+
+end
+
+local function collectSnapshot()
+
+    -- Mutable atoms are intentionally read here, not captured at module load.
+    local moneyObject = readAtom(DataController and DataController.money)
+
+    local rebirthObject = readAtom(DataController and DataController.rebirth)
+
+    local roster = readAtom(DataController and DataController.roster)
+
+    local ranked = readAtom(DataController and DataController.ranked)
+
+    local arenaView = readAtom(ArenaState and ArenaState.view)
+
+    local chicken, chickenSource = getChicken(roster)
+
+    local activeSeasonKey, seasonError = getActiveSeasonKey()
+
+    local season = getSeasonRecord(ranked, activeSeasonKey)
+
+    local trophies = season and numericValue(season.trophies) or nil
+
+    local topPercent = type(arenaView) == "table" and numericValue(arenaView.topPercent) or nil
+
+    local currentRankName = season and season.currentRank or nil
+
+    local currentRank = resolveRankObject(currentRankName, trophies, topPercent)
+
+    local nextRank = resolveNextRank(currentRank, trophies, topPercent)
+
+    local nextThreshold = nextRank and numericValue(nextRank.trophies) or nil
+
+    local moneyRaw = numericValue(moneyObject)
+
+    local rebirth = type(rebirthObject) == "table" and numericValue(rebirthObject.count) or nil
+
+    local avatar = readAvatar()
+
+    local arenaStatus = "ACTIVE_SEASON_SELECTOR_UNRESOLVED"
+
+    if activeSeasonKey then
+
+        arenaStatus = season and "SOURCE_BACKED_NOT_RUNTIME_VALIDATED" or "ARENA_DATA_NOT_INITIALIZED"
+
+    end
+
+    local snapshot = {
+
+        account = {
+
+            username = LocalPlayer and LocalPlayer.Name or nil,
+
+            userId = LocalPlayer and LocalPlayer.UserId or nil,
+
+            cashRaw = moneyRaw,
+
+            cashFormatted = compactNumber(moneyRaw),
+
+            rebirth = rebirth,
+
+            rebirthFormatted = compactNumber(rebirth),
+
+        },
+
+        chicken = {
+
+            id = chicken and chicken.id or nil,
+
+            typeId = chicken and chicken.typeId or nil,
+
+            name = chickenName(chicken),
+
+            level = chicken and numericValue(chicken.level) or nil,
+
+        },
+
+        eggs = readEggs(roster),
+
+        arena = {
+
+            seasonId = activeSeasonKey,
+
+            trophies = trophies,
+
+            currentRank = type(currentRankName) == "string" and currentRankName or (currentRank and currentRank.name or nil),
+
+            bestRank = season and season.bestRank or nil,
+
+            seasonWins = season and numericValue(season.numWins or season.wins) or nil,
+
+            nextRank = nextRank and nextRank.name or nil,
+
+            nextThreshold = nextThreshold,
+
+            progressText = progressText(trophies, nextThreshold),
+
+        },
+
+        avatar = avatar,
+
+        meta = {
+
+            collectedAt = os.time(),
+
+            readOnly = true,
+
+            webhookSent = false,
+
+            gameplayRemotesCalled = false,
+
+        },
+
+    }
+
+    local sources = {
+
+        account = "SOURCE_BACKED_RUNTIME_VALIDATED_BY_PRIOR_DIAGNOSTICS",
+
+        chicken = chickenSource and "SOURCE_BACKED_RUNTIME_VALIDATED_BY_PRIOR_DIAGNOSTICS" or "UNRESOLVED",
+
+        eggs = type(roster) == "table" and "SOURCE_BACKED_RUNTIME_VALIDATED_BY_PRIOR_DIAGNOSTICS" or "UNRESOLVED",
+
+        avatar = avatar and "SOURCE_BACKED_RUNTIME_VALIDATED_BY_PRIOR_DIAGNOSTICS" or "UNRESOLVED",
+
+        arena = arenaStatus,
+
+        arenaSeasonSelector = activeSeasonKey and "SOURCE_BACKED" or "ACTIVE_SEASON_SELECTOR_UNRESOLVED",
+
+    }
+
+    return snapshot, {
+
+        sources = sources,
+
+        activeSeasonError = seasonError,
+
+        availableSeasonKeys = getAvailableSeasonKeys(ranked),
+
+        ranked = ranked,
+
+        arenaView = arenaView,
+
+        currentRankObject = currentRank,
+
+        nextRankObject = nextRank,
+
+        readOnly = true,
+
+        webhookSent = false,
+
+        gameplayRemotesCalled = false,
+
+        httpRequestsMade = false,
+
+    }
+
+end
+
+local function getSnapshot()
+
+    local snapshot = collectSnapshot()
+
+    return snapshot
+
+end
+
+local function printEggs(eggs)
+
+    if #eggs == 0 then
+
+        print("(none)")
+
+        return
+
+    end
+
+    for _, egg in ipairs(eggs) do
+
+        print(tostring(egg.name or egg.id) .. " x" .. tostring(egg.count))
+
+    end
+
+end
+
+local function printSnapshot()
+
+    local snapshot, diagnostics = collectSnapshot()
+
+    print("========== UNO WEBHOOK SNAPSHOT V2 ==========")
+
+    print("ACCOUNT")
+
+    print("Username: " .. tostring(snapshot.account.username))
+
+    print("UserId: " .. tostring(snapshot.account.userId))
+
+    print("Cash Raw: " .. tostring(snapshot.account.cashRaw))
+
+    print("Cash Display: " .. tostring(snapshot.account.cashFormatted))
+
+    print("Rebirth: " .. tostring(snapshot.account.rebirth))
+
+    print("CHICKEN")
+
+    print("Name: " .. tostring(snapshot.chicken.name))
+
+    print("ID: " .. tostring(snapshot.chicken.id))
+
+    print("TypeId: " .. tostring(snapshot.chicken.typeId))
+
+    print("Level: " .. tostring(snapshot.chicken.level))
+
+    print("EGG INVENTORY")
+
+    printEggs(snapshot.eggs)
+
+    print("ARENA")
+
+    print("Season: " .. tostring(snapshot.arena.seasonId))
+
+    print("Current Rank: " .. tostring(snapshot.arena.currentRank))
+
+    print("Trophies: " .. tostring(snapshot.arena.trophies))
+
+    print("Progress: " .. tostring(snapshot.arena.progressText))
+
+    print("Next Rank: " .. tostring(snapshot.arena.nextRank))
+
+    print("Next Threshold: " .. tostring(snapshot.arena.nextThreshold))
+
+    print("Season Wins: " .. tostring(snapshot.arena.seasonWins))
+
+    print("Best Rank: " .. tostring(snapshot.arena.bestRank))
+
+    print("AVATAR")
+
+    print("Ready: " .. tostring(snapshot.avatar and snapshot.avatar.isReady or false))
+
+    print("URL: " .. tostring(snapshot.avatar and snapshot.avatar.imageUrl or nil))
+
+    print("VALIDATION")
+
+    print("Account: " .. tostring(diagnostics.sources.account))
+
+    print("Chicken: " .. tostring(diagnostics.sources.chicken))
+
+    print("Eggs: " .. tostring(diagnostics.sources.eggs))
+
+    print("Arena: " .. tostring(diagnostics.sources.arena))
+
+    print("Arena season selector: " .. tostring(diagnostics.sources.arenaSeasonSelector))
+
+    print("Available season keys: " .. table.concat(diagnostics.availableSeasonKeys, ", "))
+
+    if diagnostics.activeSeasonError then print("Season selector error: " .. tostring(diagnostics.activeSeasonError)) end
+
+    print("Read only: " .. tostring(snapshot.meta.readOnly))
+
+    print("Webhook sent: " .. tostring(snapshot.meta.webhookSent))
+
+    print("Gameplay remotes called: " .. tostring(snapshot.meta.gameplayRemotesCalled))
+
+    print("=============================================")
+
+    return snapshot
+
+end
+
+local function debugSources()
+
+    local _, diagnostics = collectSnapshot()
+
+    return diagnostics
+
+end
+
+local API = {
+
+    getSnapshot = getSnapshot,
+
+    printSnapshot = printSnapshot,
+
+    debugSources = debugSources,
+
+    compactNumber = compactNumber,
+
+}
+
+getgenv().UNO_WEBHOOK_SNAPSHOT_V2 = API
+
+print("[UNO_WEBHOOK_SNAPSHOT_V2] READY — read-only; no HTTP, webhook, gameplay remote, or automation calls")
+
+-- return API removed by All-In-One merge; continue loading next module
+
+-- ===== SENDER V1 FIX3 =====
+
+-- UNO_WEBHOOK_SENDER_STANDALONE_V1.lua
+
+-- Manual-only Discord webhook transport and embed presentation.
+
+-- Requires the validated read-only Snapshot Collector V2:
+
+-- getgenv().UNO_WEBHOOK_SNAPSHOT_V2.getSnapshot()
+
+-- This module never starts automatically and never performs gameplay actions.
+
+local HttpService = game:GetService("HttpService")
+
+local Players = game:GetService("Players")
+
+local LocalPlayer = Players.LocalPlayer
+
+local env = (getgenv and getgenv()) or _G
+
+local state = {
+
+    webhookUrl = nil,
+
+    include = {
+
+        accountInfo = true,
+
+        chickenInfo = true,
+
+        eggInventory = true,
+
+        arenaStats = true,
+
+        avatar = true,
+
+    },
+
+    inFlight = false,
+
+    destroyed = false,
+
+    lastResult = nil,
+
+    lastPreview = nil,
+
+}
+
+local MAX_EMBEDS = 10
+
+local MAX_FIELDS_PER_EMBED = 25
+
+local MAX_TITLE = 256
+
+local MAX_DESCRIPTION = 4096
+
+local MAX_FIELD_NAME = 256
+
+local MAX_FIELD_VALUE = 1024
+
+local MAX_FOOTER = 2048
+
+local MAX_AUTHOR = 256
+
+local MAX_TOTAL_CHARS = 6000
+
+local function safeToString(value, fallback)
+
+    if value == nil then return fallback or "—" end
+
+    local text = tostring(value)
+
+    return text ~= "" and text or (fallback or "—")
+
+end
+
+local function trim(text)
+
+    return tostring(text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+
+end
+
+local function compact(value)
+
+    local number = tonumber(value)
+
+    if not number then return safeToString(value) end
+
+    if number == 0 then return "0" end
+
+    local negative = number < 0
+
+    number = math.abs(number)
+
+    local suffixes = { "", "K", "M", "B", "T", "Qa", "Qi", "Sx", "Sp", "Oc", "No", "Dc", "Ud", "Dd", "Td" }
+
+    local index = 1
+
+    while number >= 1000 and index < #suffixes do
+
+        number /= 1000
+
+        index += 1
+
+    end
+
+    local text
+
+    if index == 1 or number >= 100 then
+
+        text = string.format("%.0f", number)
+
+    else
+
+        text = string.format("%.1f", number)
+
+    end
+
+    text = text:gsub("%.0$", "")
+
+    return (negative and "-" or "") .. text .. suffixes[index]
+
+end
+
+local function redactUrl(url)
+
+    if type(url) ~= "string" then return nil end
+
+    local scheme, host, id = url:match("^(https?)://([^/]+)/api/webhooks/([^/]+)")
+
+    if not scheme then return "<invalid-or-unset>" end
+
+    return scheme .. "://" .. host .. "/api/webhooks/" .. id .. "/[REDACTED]"
+
+end
+
+local function validateWebhookUrl(url)
+
+    if type(url) ~= "string" then return false, "WEBHOOK_URL_REQUIRED" end
+
+    url = trim(url)
+
+    if #url > 2048 then return false, "WEBHOOK_URL_TOO_LONG" end
+
+    local scheme, host, id, token = url:match("^(https?)://([^/]+)/api/webhooks/([^/]+)/([^/?#]+)")
+
+    if scheme ~= "https" then return false, "WEBHOOK_URL_MUST_USE_HTTPS" end
+
+    host = host and host:lower() or ""
+
+    if host ~= "discord.com" and host ~= "discordapp.com" and host ~= "canary.discord.com" and host ~= "ptb.discord.com" then
+
+        return false, "NOT_A_DISCORD_WEBHOOK_HOST"
+
+    end
+
+    if not id or not id:match("^%d+$") then return false, "WEBHOOK_ID_INVALID" end
+
+    if not token or #token < 8 then return false, "WEBHOOK_TOKEN_INVALID" end
+
+    return true, nil
+
+end
+
+local function resolveTransport()
+
+    local candidates = {
+
+        { name = "request", fn = env.request },
+
+        { name = "http_request", fn = env.http_request },
+
+        { name = "syn.request", fn = type(env.syn) == "table" and env.syn.request or nil },
+
+        { name = "fluxus.request", fn = type(env.fluxus) == "table" and env.fluxus.request or nil },
+
+        { name = "krnl.request", fn = type(env.krnl) == "table" and env.krnl.request or nil },
+
+    }
+
+    for _, candidate in ipairs(candidates) do
+
+        if type(candidate.fn) == "function" then
+
+            return candidate
+
+        end
+
+    end
+
+    return nil
+
+end
+
+local function safeSnapshot()
+
+    local snapshotApi = env.UNO_WEBHOOK_SNAPSHOT_V2
+
+    if type(snapshotApi) ~= "table" or type(snapshotApi.getSnapshot) ~= "function" then
+
+        return nil, "SNAPSHOT_V2_UNAVAILABLE"
+
+    end
+
+    local ok, snapshot = pcall(snapshotApi.getSnapshot)
+
+    if not ok or type(snapshot) ~= "table" then
+
+        return nil, "SNAPSHOT_ACQUISITION_FAILED"
+
+    end
+
+    return snapshot, nil
+
+end
+
+local function truncate(text, limit)
+
+    text = safeToString(text, "")
+
+    if #text <= limit then return text end
+
+    if limit <= 3 then return text:sub(1, limit) end
+
+    return text:sub(1, limit - 3) .. "..."
+
+end
+
+local function field(name, value, inline)
+
+    return {
+
+        name = truncate(name, MAX_FIELD_NAME),
+
+        value = truncate(value, MAX_FIELD_VALUE),
+
+        inline = inline == true,
+
+    }
+
+end
+
+local function countEmbedChars(embed)
+
+    local total = #(embed.title or "") + #(embed.description or "")
+
+    if embed.footer then total += #(embed.footer.text or "") end
+
+    if embed.author then total += #(embed.author.name or "") end
+
+    for _, item in ipairs(embed.fields or {}) do
+
+        total += #(item.name or "") + #(item.value or "")
+
+    end
+
+    return total
+
+end
+
+local function splitLines(lines, fieldName)
+
+    local chunks = {}
+
+    local current = {}
+
+    local currentLength = #fieldName
+
+    for _, line in ipairs(lines) do
+
+        local addition = #line + (#current > 0 and 1 or 0)
+
+        if #current > 0 and currentLength + addition > MAX_FIELD_VALUE then
+
+            chunks[#chunks + 1] = current
+
+            current = {}
+
+            currentLength = #fieldName
+
+        end
+
+        current[#current + 1] = line
+
+        currentLength += addition
+
+    end
+
+    if #current > 0 or #chunks == 0 then chunks[#chunks + 1] = current end
+
+    return chunks
+
+end
+
+local function eggLines(snapshot)
+
+    local lines = {}
+
+    for _, egg in ipairs(snapshot.eggs or {}) do
+
+        local name = safeToString(egg.name, safeToString(egg.id, "Unknown Egg"))
+
+        lines[#lines + 1] = name .. ": " .. compact(egg.count) .. "x"
+
+    end
+
+    return lines
+
+end
+
+local function resolvePublicAvatar(snapshot, transport)
+
+    local avatar = snapshot.avatar
+
+    if type(avatar) ~= "table" or avatar.isReady ~= true then
+
+        return nil, "AVATAR_NOT_READY"
+
+    end
+
+    local imageUrl = avatar.imageUrl
+
+    if type(imageUrl) == "string" and imageUrl:match("^https://") then
+
+        return imageUrl, nil
+
+    end
+
+    if type(imageUrl) ~= "string" or not imageUrl:match("^rbxthumb://") then
+
+        return nil, "AVATAR_URL_NOT_HTTPS"
+
+    end
+
+    if not transport then return nil, "HTTP_TRANSPORT_UNAVAILABLE_FOR_AVATAR" end
+
+    local userId = snapshot.account and snapshot.account.userId
+
+    if not userId then return nil, "AVATAR_USER_ID_UNAVAILABLE" end
+
+    local endpoint = "https://thumbnails.roblox.com/v1/users/avatar?userIds=" .. tostring(userId) .. "&size=420x420&format=Png&isCircular=false"
+
+    local okRequest, response = pcall(transport.fn, {
+
+        Url = endpoint,
+
+        Method = "GET",
+
+        Headers = { ["Accept"] = "application/json" },
+
+    })
+
+    if not okRequest or type(response) ~= "table" then return nil, "AVATAR_RESOLUTION_REQUEST_FAILED" end
+
+    local body = response.Body or response.body
+
+    if type(body) ~= "string" then return nil, "AVATAR_RESOLUTION_EMPTY" end
+
+    local okDecode, decoded = pcall(HttpService.JSONDecode, HttpService, body)
+
+    if not okDecode or type(decoded) ~= "table" or type(decoded.data) ~= "table" then return nil, "AVATAR_RESOLUTION_BAD_JSON" end
+
+    local first = decoded.data[1]
+
+    local resolved = type(first) == "table" and first.imageUrl or nil
+
+    if type(resolved) ~= "string" or not resolved:match("^https://") then return nil, "AVATAR_RESOLUTION_NO_HTTPS_URL" end
+
+    return resolved, nil
+
+end
+
+local function buildPayload(snapshot, allowAvatarResolution)
+
+    local embeds = {}
+
+    local fields = {}
+
+    local sections = {
+
+        account = state.include.accountInfo,
+
+        chicken = state.include.chickenInfo,
+
+        arena = state.include.arenaStats,
+
+        eggs = state.include.eggInventory,
+
+        avatar = state.include.avatar,
+
+    }
+
+    if sections.account then
+
+        local account = snapshot.account or {}
+
+        fields[#fields + 1] = field("👤 ACCOUNT", "User: " .. safeToString(account.username) .. "\nCash: " .. safeToString(account.cashFormatted) .. "\nRebirth: " .. safeToString(account.rebirth), true)
+
+    end
+
+    if sections.chicken then
+
+        local chicken = snapshot.chicken or {}
+
+        fields[#fields + 1] = field("🐔 CHICKEN", "Equipped: " .. safeToString(chicken.name) .. "\nLevel: " .. safeToString(chicken.level), true)
+
+    end
+
+    if sections.arena then
+
+        local arena = snapshot.arena or {}
+
+        local trophyText = arena.trophies ~= nil and safeToString(arena.trophies) or "—"
+
+        if arena.nextThreshold ~= nil then trophyText = trophyText .. " / " .. safeToString(arena.nextThreshold) end
+
+        fields[#fields + 1] = field("🏆 ARENA", "Rank: " .. safeToString(arena.currentRank) .. "\nTrophies: " .. trophyText .. "\nSeason Wins: " .. safeToString(arena.seasonWins), true)
+
+    end
+
+    local base = {
+
+        title = "Grow A Chicken Fighter",
+
+        fields = fields,
+
+        color = 16763904,
+
+    }
+
+    local avatarResolution = nil
+
+    if sections.avatar then
+
+        if allowAvatarResolution then
+
+            local transport = resolveTransport()
+
+            local url, reason = resolvePublicAvatar(snapshot, transport)
+
+            if url then base.thumbnail = { url = url } end
+
+            avatarResolution = { included = url ~= nil, reason = reason, transport = transport and transport.name or nil }
+
+        else
+
+            local imageUrl = snapshot.avatar and snapshot.avatar.imageUrl
+
+            if type(imageUrl) == "string" and imageUrl:match("^https://") and snapshot.avatar.isReady == true then
+
+                base.thumbnail = { url = imageUrl }
+
+                avatarResolution = { included = true, reason = nil, pendingResolution = false }
+
+            else
+
+                avatarResolution = { included = false, reason = "AVATAR_PUBLIC_HTTPS_RESOLUTION_DEFERRED", pendingResolution = true }
+
+            end
+
+        end
+
+    end
+
+    local eggChunks = {}
+
+    if sections.eggs then eggChunks = splitLines(eggLines(snapshot), "🥚 EGG INVENTORY") end
+
+    local firstFields = {}
+
+    for _, item in ipairs(fields) do firstFields[#firstFields + 1] = item end
+
+    for index, lines in ipairs(eggChunks) do
+
+        local name = index == 1 and "🥚 EGG INVENTORY" or "🥚 EGG INVENTORY (" .. tostring(index) .. ")"
+
+        firstFields[#firstFields + 1] = field(name, #lines > 0 and table.concat(lines, "\n") or "(none)", false)
+
+    end
+
+    local function makeEmbed(embedFields)
+
+        local copy = {
+
+            title = base.title,
+
+            fields = embedFields,
+
+            color = base.color,
+
+        }
+
+        if base.thumbnail then copy.thumbnail = base.thumbnail end
+
+        return copy
+
+    end
+
+    local current = {}
+
+    local currentHasTitle = false
+
+    local function flush()
+
+        if #current > 0 or not currentHasTitle then
+
+            embeds[#embeds + 1] = makeEmbed(current)
+
+            current = {}
+
+            currentHasTitle = true
+
+        end
+
+    end
+
+    for _, item in ipairs(firstFields) do
+
+        if #current >= MAX_FIELDS_PER_EMBED then flush() end
+
+        current[#current + 1] = item
+
+    end
+
+    flush()
+
+    local totalChars = 0
+
+    for _, embed in ipairs(embeds) do totalChars += countEmbedChars(embed) end
+
+    local limitSafe = #embeds <= MAX_EMBEDS and totalChars <= MAX_TOTAL_CHARS
+
+    local payload = { username = "UnO Hub - Grow A Chicken Fighter", embeds = embeds, allowed_mentions = { parse = {} } }
+
+    return payload, {
+
+        sections = sections,
+
+        topRowOrder = (function()
+
+            local order = {}
+
+            if sections.account then order[#order + 1] = "ACCOUNT" end
+
+            if sections.chicken then order[#order + 1] = "CHICKEN" end
+
+            if sections.arena then order[#order + 1] = "ARENA" end
+
+            return order
+
+        end)(),
+
+        eggEntryCount = #eggLines(snapshot),
+
+        eggFieldCount = #eggChunks,
+
+        fieldCount = #fields + #eggChunks,
+
+        embedCount = #embeds,
+
+        totalChars = totalChars,
+
+        limitSafe = limitSafe,
+
+        overflow = not limitSafe,
+
+        avatar = avatarResolution,
+
+        snapshotCollectedAt = snapshot.meta and snapshot.meta.collectedAt or nil,
+
+    }
+
+end
+
+local function statusResult(ok, reason, extra)
+
+    local result = extra or {}
+
+    result.ok = ok
+
+    result.reason = reason
+
+    result.webhookUrl = nil
+
+    return result
+
+end
+
+local function preview()
+
+    if state.destroyed then return statusResult(false, "DESTROYED") end
+
+    local snapshot, snapshotError = safeSnapshot()
+
+    if not snapshot then return statusResult(false, snapshotError) end
+
+    local payload, details = buildPayload(snapshot, false)
+
+    local jsonOk, encoded = pcall(HttpService.JSONEncode, HttpService, payload)
+
+    if not jsonOk then return statusResult(false, "JSON_ENCODE_FAILED", { details = details }) end
+
+    local result = {
+
+        ok = details.limitSafe,
+
+        reason = details.limitSafe and nil or "PAYLOAD_TOO_LARGE",
+
+        payload = payload,
+
+        json = encoded,
+
+        details = details,
+
+        enabledSections = details.sections,
+
+        topRowOrder = details.topRowOrder,
+
+        eggEntryCount = details.eggEntryCount,
+
+        embedCount = details.embedCount,
+
+        fieldCount = details.fieldCount,
+
+        totalChars = details.totalChars,
+
+        splittingNecessary = details.eggFieldCount > 1,
+
+        avatarThumbnailIncluded = details.avatar and details.avatar.included or false,
+
+        avatarResolution = details.avatar,
+
+        httpPerformed = false,
+
+    }
+
+    state.lastPreview = result
+
+    print("[UNO_WEBHOOK_SENDER_V1] preview ok=" .. tostring(result.ok) .. " embeds=" .. tostring(result.embedCount) .. " fields=" .. tostring(result.fieldCount) .. " chars=" .. tostring(result.totalChars) .. " top=" .. table.concat(result.topRowOrder, ",") .. " avatar=" .. tostring(result.avatarThumbnailIncluded))
+
+    return result
+
+end
+
+local function testWebhook()
+
+    if state.destroyed then return statusResult(false, "DESTROYED") end
+
+    if state.inFlight then return statusResult(false, "TEST_SEND_IN_FLIGHT") end
+
+    local valid, urlReason = validateWebhookUrl(state.webhookUrl)
+
+    if not valid then return statusResult(false, urlReason) end
+
+    local transport = resolveTransport()
+
+    if not transport then return statusResult(false, "HTTP_TRANSPORT_UNAVAILABLE", { sentAt = os.time() }) end
+
+    state.inFlight = true
+
+    local snapshot, snapshotError = safeSnapshot()
+
+    if not snapshot then
+
+        state.inFlight = false
+
+        return statusResult(false, snapshotError)
+
+    end
+
+    local payload, details = buildPayload(snapshot, true)
+
+    if not details.limitSafe then
+
+        state.inFlight = false
+
+        return statusResult(false, "PAYLOAD_TOO_LARGE", { sentAt = os.time(), sections = details.sections, details = details })
+
+    end
+
+    local jsonOk, body = pcall(HttpService.JSONEncode, HttpService, payload)
+
+    if not jsonOk then
+
+        state.inFlight = false
+
+        return statusResult(false, "JSON_ENCODE_FAILED", { sentAt = os.time(), sections = details.sections })
+
+    end
+
+    local okRequest, response = pcall(transport.fn, {
+
+        Url = state.webhookUrl .. "?wait=true",
+
+        Method = "POST",
+
+        Headers = { ["Content-Type"] = "application/json" },
+
+        Body = body,
+
+    })
+
+    state.inFlight = false
+
+    local sentAt = os.time()
+
+    local rawHttpStatus = type(response) == "table" and (response.StatusCode or response.status_code or response.Status) or nil
+
+    local httpStatus = tonumber(rawHttpStatus)
+
+    local ok = okRequest and httpStatus ~= nil and httpStatus >= 200 and httpStatus <= 299
+
+    local reason = nil
+
+    if not ok then
+
+        if not okRequest then
+
+            reason = "HTTP_REQUEST_FAILED"
+
+        elseif httpStatus == 429 then
+
+            reason = "DISCORD_RATE_LIMITED"
+
+        elseif httpStatus == 404 then
+
+            reason = "WEBHOOK_NOT_FOUND"
+
+        else
+
+            reason = "DISCORD_HTTP_ERROR"
+
+        end
+
+    end
+
+    local result = {
+
+        ok = ok,
+
+        httpStatus = httpStatus,
+
+        reason = reason,
+
+        sentAt = sentAt,
+
+        transport = transport.name,
+
+        sections = details.sections,
+
+        embedCount = details.embedCount,
+
+        fieldCount = details.fieldCount,
+
+        totalChars = details.totalChars,
+
+        avatarResolution = details.avatar,
+
+        redactedWebhookUrl = redactUrl(state.webhookUrl),
+
+    }
+
+    state.lastResult = result
+
+    print("[UNO_WEBHOOK_SENDER_V1] testWebhook ok=" .. tostring(ok) .. " status=" .. tostring(httpStatus) .. " reason=" .. tostring(reason) .. " transport=" .. transport.name .. " webhook=" .. tostring(result.redactedWebhookUrl))
+
+    return result
+
+end
+
+local function setWebhookUrl(url)
+
+    local valid, reason = validateWebhookUrl(url)
+
+    if not valid then
+
+        state.webhookUrl = nil
+
+        return statusResult(false, reason, { redactedWebhookUrl = redactUrl(url) })
+
+    end
+
+    state.webhookUrl = trim(url)
+
+    return { ok = true, redactedWebhookUrl = redactUrl(state.webhookUrl), reason = nil }
+
+end
+
+local function setIncludeData(options)
+
+    if type(options) ~= "table" then return statusResult(false, "INCLUDE_OPTIONS_REQUIRED") end
+
+    for key, value in pairs(state.include) do
+
+        if options[key] ~= nil then state.include[key] = value == true end
+
+    end
+
+    return { ok = true, include = {
+
+        accountInfo = state.include.accountInfo,
+
+        chickenInfo = state.include.chickenInfo,
+
+        eggInventory = state.include.eggInventory,
+
+        arenaStats = state.include.arenaStats,
+
+        avatar = state.include.avatar,
+
+    } }
+
+end
+
+local function getStatus()
+
+    local transport = resolveTransport()
+
+    return {
+
+        destroyed = state.destroyed,
+
+        inFlight = state.inFlight,
+
+        webhookConfigured = state.webhookUrl ~= nil,
+
+        redactedWebhookUrl = redactUrl(state.webhookUrl),
+
+        transport = transport and transport.name or nil,
+
+        include = {
+
+            accountInfo = state.include.accountInfo,
+
+            chickenInfo = state.include.chickenInfo,
+
+            eggInventory = state.include.eggInventory,
+
+            arenaStats = state.include.arenaStats,
+
+            avatar = state.include.avatar,
+
+        },
+
+        lastResult = state.lastResult,
+
+        lastPreview = state.lastPreview and {
+
+            ok = state.lastPreview.ok,
+
+            reason = state.lastPreview.reason,
+
+            embedCount = state.lastPreview.embedCount,
+
+            fieldCount = state.lastPreview.fieldCount,
+
+            totalChars = state.lastPreview.totalChars,
+
+        } or nil,
+
+    }
+
+end
+
+local function destroy()
+
+    state.destroyed = true
+
+    state.webhookUrl = nil
+
+    state.lastResult = nil
+
+    state.lastPreview = nil
+
+    return { ok = true, destroyed = true }
+
+end
+
+local API = {
+
+    setWebhookUrl = setWebhookUrl,
+
+    setIncludeData = setIncludeData,
+
+    preview = preview,
+
+    testWebhook = testWebhook,
+
+    getStatus = getStatus,
+
+    destroy = destroy,
+
+}
+
+env.UNO_WEBHOOK_SENDER_V1 = API
+
+print("[UNO_WEBHOOK_SENDER_V1] READY — no automatic send; call preview() or testWebhook() explicitly")
+
+-- return API removed by All-In-One merge; continue loading next module
+
+-- ===== SCHEDULER V1 =====
+
+-- UNO_WEBHOOK_SCHEDULER_STANDALONE_V1.lua
+
+-- Automatic timing and trigger orchestration for the validated Snapshot V2 and Sender Fix3.
+
+-- This module does not collect gameplay data independently, build Discord payloads,
+
+-- implement HTTP, or perform gameplay actions. Loading it does not enable scheduling.
+
+local env = (getgenv and getgenv()) or _G
+
+local POLL_INTERVAL = 1
+
+local COLLISION_WINDOW = 5
+
+local PHASE_DISABLED = "DISABLED"
+
+local PHASE_INITIALIZING = "INITIALIZING"
+
+local PHASE_WAITING = "WAITING"
+
+local PHASE_WAITING_FOR_WEBHOOK = "WAITING_FOR_WEBHOOK"
+
+local PHASE_SENDING = "SENDING"
+
+local PHASE_ERROR = "ERROR"
+
+local state = {
+
+    enabled = false,
+
+    workerRunning = false,
+
+    generation = 0,
+
+    destroyed = false,
+
+    lastObservedRebirth = nil,
+
+    startupBaselineRebirth = nil,
+
+    lastSentMilestone = nil,
+
+    lastHourlyKey = nil,
+
+    lastSendAt = nil,
+
+    lastSendTrigger = nil,
+
+    lastSendResult = nil,
+
+    nextHourlyAt = nil,
+
+    phase = PHASE_DISABLED,
+
+    lastError = nil,
+
+    pendingTrigger = nil,
+
+}
+
+local function setPhase(phase)
+
+    state.phase = phase
+
+end
+
+local function snapshotApi()
+
+    local api = env.UNO_WEBHOOK_SNAPSHOT_V2
+
+    if type(api) ~= "table" or type(api.getSnapshot) ~= "function" then
+
+        return nil
+
+    end
+
+    return api
+
+end
+
+local function senderApi()
+
+    local api = env.UNO_WEBHOOK_SENDER_V1
+
+    if type(api) ~= "table" or type(api.testWebhook) ~= "function" or type(api.getStatus) ~= "function" then
+
+        return nil
+
+    end
+
+    return api
+
+end
+
+local function safeNumber(value)
+
+    local number = tonumber(value)
+
+    if not number then return nil end
+
+    if number ~= number or number == math.huge or number == -math.huge then return nil end
+
+    return math.floor(number)
+
+end
+
+local function localClock()
+
+    -- os.date("*t") is evaluated directly in the client-local wall-clock context.
+    -- The protected closure avoids the Luau analyzer warning from passing os.date
+    -- itself through pcall with a variadic argument list.
+    local ok, clock = pcall(function()
+
+        return os.date("*t")
+
+    end)
+
+    if not ok or type(clock) ~= "table" then return nil end
+
+    return clock
+
+end
+
+local function hourKey(clock)
+
+    if type(clock) ~= "table" then return nil end
+
+    return string.format("%04d-%02d-%02d-%02d", clock.year, clock.month, clock.day, clock.hour)
+
+end
+
+local function currentLocalTime(clock)
+
+    if type(clock) ~= "table" then return nil end
+
+    return string.format("%02d:%02d:%02d", clock.hour, clock.min, clock.sec)
+
+end
+
+local function nextHourlyLabel(clock)
+
+    if type(clock) ~= "table" then return nil end
+
+    return string.format("%02d:00", (clock.hour + 1) % 24)
+
+end
+
+local function secondsUntilNextHourly(clock)
+
+    if type(clock) ~= "table" then return nil end
+
+    return (59 - clock.min) * 60 + (60 - clock.sec)
+
+end
+
+local function evaluateClock(clock, lastKey)
+
+    local currentKey = hourKey(clock)
+
+    local hourlyWindow = type(clock) == "table" and clock.min == 0
+
+    return {
+
+        currentHourKey = currentKey,
+
+        hourlyWindow = hourlyWindow,
+
+        hourlyDue = hourlyWindow and currentKey ~= lastKey or false,
+
+        currentLocalTime = currentLocalTime(clock),
+
+        nextHourlyLabel = nextHourlyLabel(clock),
+
+        secondsUntilNextHourly = secondsUntilNextHourly(clock),
+
+    }
+
+end
+
+local function nextHourlyEstimate(now, clock)
+
+    local seconds = secondsUntilNextHourly(clock)
+
+    if not seconds then return nil end
+
+    return now + seconds
+
+end
+
+local function highestCrossedMilestone(previousRebirth, currentRebirth, lastSentMilestone)
+
+    local previous = safeNumber(previousRebirth)
+
+    local current = safeNumber(currentRebirth)
+
+    if not previous or not current or current <= previous or current < 100 then return nil end
+
+    local highest = math.floor(current / 100) * 100
+
+    if highest < 100 or highest <= previous then return nil end
+
+    if lastSentMilestone and highest <= lastSentMilestone then return nil end
+
+    return highest
+
+end
+
+local function evaluateDecision(previousRebirth, currentRebirth, hourlyDue, lastSentMilestone)
+
+    local milestone = highestCrossedMilestone(previousRebirth, currentRebirth, lastSentMilestone)
+
+    local hourly = hourlyDue == true
+
+    return {
+
+        milestone = milestone,
+
+        hourlyDue = hourly,
+
+        shouldSend = hourly or milestone ~= nil,
+
+        sendCount = (hourly or milestone ~= nil) and 1 or 0,
+
+        trigger = hourly and milestone and ("Hourly Report + Rebirth Milestone " .. tostring(milestone))
+
+            or milestone and ("Rebirth Milestone " .. tostring(milestone))
+
+            or hourly and "Hourly Report"
+
+            or nil,
+
+    }
+
+end
+
+local function mergeTrigger(existing, incoming)
+
+    if not existing then return incoming end
+
+    if not incoming then return existing end
+
+    if existing.milestone == nil then existing.milestone = incoming.milestone end
+
+    if existing.hourlyKey == nil then existing.hourlyKey = incoming.hourlyKey end
+
+    if existing.hourlyDue or incoming.hourlyDue then existing.hourlyDue = true end
+
+    if existing.milestone and existing.hourlyDue then
+
+        existing.trigger = "Hourly Report + Rebirth Milestone " .. tostring(existing.milestone)
+
+    elseif existing.milestone then
+
+        existing.trigger = "Rebirth Milestone " .. tostring(existing.milestone)
+
+    else
+
+        existing.trigger = "Hourly Report"
+
+    end
+
+    return existing
+
+end
+
+local function getSafeSenderStatus(sender)
+
+    local ok, result = pcall(sender.getStatus)
+
+    if not ok or type(result) ~= "table" then
+
+        return { webhookConfigured = false, inFlight = false, transport = nil, destroyed = nil }
+
+    end
+
+    return {
+
+        webhookConfigured = result.webhookConfigured == true,
+
+        inFlight = result.inFlight == true,
+
+        transport = result.transport,
+
+        destroyed = result.destroyed == true,
+
+    }
+
+end
+
+local function sendTrigger(trigger)
+
+    local sender = senderApi()
+
+    if not sender then
+
+        state.lastError = "SENDER_UNAVAILABLE"
+
+        setPhase(PHASE_ERROR)
+
+        return false, state.lastError
+
+    end
+
+    local senderStatus = getSafeSenderStatus(sender)
+
+    if senderStatus.destroyed then
+
+        state.lastError = "SENDER_DESTROYED"
+
+        setPhase(PHASE_ERROR)
+
+        return false, state.lastError
+
+    end
+
+    if not senderStatus.webhookConfigured then
+
+        setPhase(PHASE_WAITING_FOR_WEBHOOK)
+
+        return false, "WAITING_FOR_WEBHOOK"
+
+    end
+
+    if senderStatus.inFlight then
+
+        state.lastError = "SENDER_IN_FLIGHT"
+
+        setPhase(PHASE_WAITING)
+
+        return false, state.lastError
+
+    end
+
+    setPhase(PHASE_SENDING)
+
+    local okCall, result = pcall(sender.testWebhook)
+
+    if not okCall then
+
+        result = { ok = false, reason = "SENDER_CALL_FAILED" }
+
+    elseif type(result) ~= "table" then
+
+        result = { ok = false, reason = "SENDER_BAD_RESULT" }
+
+    end
+
+    state.lastSendAt = os.time()
+
+    state.lastSendTrigger = trigger.trigger
+
+    state.lastSendResult = result
+
+    if result.ok == true then
+
+        state.lastError = nil
+
+        setPhase(PHASE_WAITING)
+
+        return true, nil
+
+    end
+
+    state.lastError = result.reason or "SENDER_REJECTED"
+
+    setPhase(PHASE_ERROR)
+
+    return false, state.lastError
+
+end
+
+local function consumeTrigger(trigger)
+
+    if trigger.milestone then state.lastSentMilestone = trigger.milestone end
+
+    if trigger.hourlyKey then state.lastHourlyKey = trigger.hourlyKey end
+
+end
+
+local function processTrigger(trigger, now)
+
+    if not trigger then return { shouldSend = false, sendCount = 0 } end
+
+    if state.pendingTrigger then
+
+        state.pendingTrigger = mergeTrigger(state.pendingTrigger, trigger)
+
+        trigger = state.pendingTrigger
+
+    end
+
+    local sender = senderApi()
+
+    local senderStatus = sender and getSafeSenderStatus(sender) or { webhookConfigured = false }
+
+    if not senderStatus.webhookConfigured then
+
+        state.pendingTrigger = trigger
+
+        consumeTrigger(trigger)
+
+        setPhase(PHASE_WAITING_FOR_WEBHOOK)
+
+        return { shouldSend = true, sendCount = 0, deferred = true, trigger = trigger.trigger }
+
+    end
+
+    if state.lastSendAt and now - state.lastSendAt <= COLLISION_WINDOW then
+
+        consumeTrigger(trigger)
+
+        if state.lastSendTrigger and state.lastSendTrigger ~= trigger.trigger then
+
+            state.lastSendTrigger = state.lastSendTrigger .. " + " .. trigger.trigger
+
+        else
+
+            state.lastSendTrigger = trigger.trigger
+
+        end
+
+        state.pendingTrigger = nil
+
+        setPhase(PHASE_WAITING)
+
+        return { shouldSend = true, sendCount = 0, coalesced = true, trigger = state.lastSendTrigger }
+
+    end
+
+    consumeTrigger(trigger)
+
+    state.pendingTrigger = nil
+
+    local sent, reason = sendTrigger(trigger)
+
+    if not sent and reason == "SENDER_IN_FLIGHT" then
+
+        -- Keep one deferred decision for a sender operation already in progress.
+        state.pendingTrigger = trigger
+
+    end
+
+    return { shouldSend = true, sendCount = sent and 1 or 0, sent = sent, reason = reason, trigger = trigger.trigger }
+
+end
+
+local function readRebirth()
+
+    local api = snapshotApi()
+
+    if not api then return nil, "SNAPSHOT_V2_UNAVAILABLE" end
+
+    local ok, snapshot = pcall(api.getSnapshot)
+
+    if not ok or type(snapshot) ~= "table" then return nil, "SNAPSHOT_ACQUISITION_FAILED" end
+
+    local account = snapshot.account
+
+    local rebirth = type(account) == "table" and safeNumber(account.rebirth) or nil
+
+    if rebirth == nil then return nil, "REBIRTH_UNAVAILABLE" end
+
+    return rebirth, nil
+
+end
+
+local function tick(now)
+
+    now = tonumber(now) or os.time()
+
+    local clock = localClock()
+
+    if not clock then
+
+        state.lastError = "LOCAL_CLOCK_UNAVAILABLE"
+
+        setPhase(PHASE_ERROR)
+
+        return { ok = false, reason = state.lastError }
+
+    end
+
+    local clockState = evaluateClock(clock, state.lastHourlyKey)
+
+    state.nextHourlyAt = nextHourlyEstimate(now, clock)
+
+    local currentKey = clockState.currentHourKey
+
+    local hourlyDue = clockState.hourlyDue
+
+    local rebirth, rebirthError = readRebirth()
+
+    if not rebirth then
+
+        state.lastError = rebirthError
+
+        setPhase(PHASE_ERROR)
+
+        return { ok = false, reason = rebirthError, hourlyDue = hourlyDue }
+
+    end
+
+    if state.lastObservedRebirth == nil then
+
+        state.lastObservedRebirth = rebirth
+
+        setPhase(senderApi() and getSafeSenderStatus(senderApi()).webhookConfigured and PHASE_WAITING or PHASE_WAITING_FOR_WEBHOOK)
+
+        return { ok = true, baseline = true, rebirth = rebirth, hourlyDue = false, sendCount = 0 }
+
+    end
+
+    local milestone = highestCrossedMilestone(state.lastObservedRebirth, rebirth, state.lastSentMilestone)
+
+    state.lastObservedRebirth = rebirth
+
+    local trigger = nil
+
+    if hourlyDue or milestone then
+
+        trigger = {
+
+            hourlyDue = hourlyDue,
+
+            hourlyKey = hourlyDue and currentKey or nil,
+
+            milestone = milestone,
+
+            trigger = hourlyDue and milestone and ("Hourly Report + Rebirth Milestone " .. tostring(milestone))
+
+                or milestone and ("Rebirth Milestone " .. tostring(milestone))
+
+                or "Hourly Report",
+
+        }
+
+    end
+
+    if state.pendingTrigger and not trigger then trigger = state.pendingTrigger end
+
+    local result = processTrigger(trigger, now)
+
+    result.ok = true
+
+    result.rebirth = rebirth
+
+    result.hourlyDue = hourlyDue
+
+    result.milestone = milestone
+
+    return result
+
+end
+
+local function worker(myGeneration)
+
+    while state.enabled and not state.destroyed and state.generation == myGeneration do
+
+        local ok = pcall(tick)
+
+        if not ok then
+
+            state.lastError = "SCHEDULER_TICK_FAILED"
+
+            setPhase(PHASE_ERROR)
+
+        end
+
+        if not state.enabled or state.destroyed or state.generation ~= myGeneration then break end
+
+        task.wait(POLL_INTERVAL)
+
+    end
+
+    if state.generation == myGeneration then state.workerRunning = false end
+
+end
+
+local getStatus
+
+local function enable()
+
+    if state.destroyed then return { ok = false, reason = "DESTROYED" } end
+
+    if state.enabled then return { ok = true, alreadyEnabled = true, status = getStatus() } end
+
+    setPhase(PHASE_INITIALIZING)
+
+    local snapshot = snapshotApi()
+
+    local sender = senderApi()
+
+    if not snapshot then
+
+        state.lastError = "SNAPSHOT_V2_UNAVAILABLE"
+
+        setPhase(PHASE_ERROR)
+
+        return { ok = false, reason = state.lastError }
+
+    end
+
+    if not sender then
+
+        state.lastError = "SENDER_V1_UNAVAILABLE"
+
+        setPhase(PHASE_ERROR)
+
+        return { ok = false, reason = state.lastError }
+
+    end
+
+    local rebirth, rebirthError = readRebirth()
+
+    if not rebirth then
+
+        state.lastError = rebirthError
+
+        setPhase(PHASE_ERROR)
+
+        return { ok = false, reason = rebirthError }
+
+    end
+
+    local now = os.time()
+
+    local clock = localClock()
+
+    if not clock then
+
+        state.lastError = "LOCAL_CLOCK_UNAVAILABLE"
+
+        setPhase(PHASE_ERROR)
+
+        return { ok = false, reason = state.lastError }
+
+    end
+
+    state.enabled = true
+
+    state.lastError = nil
+
+    state.lastObservedRebirth = rebirth
+
+    state.startupBaselineRebirth = rebirth
+
+    local clockState = evaluateClock(clock, state.lastHourlyKey)
+
+    if clockState.hourlyWindow then state.lastHourlyKey = clockState.currentHourKey end
+
+    state.nextHourlyAt = nextHourlyEstimate(now, clock)
+
+    state.pendingTrigger = nil
+
+    state.generation += 1
+
+    local myGeneration = state.generation
+
+    state.workerRunning = true
+
+    setPhase(getSafeSenderStatus(sender).webhookConfigured and PHASE_WAITING or PHASE_WAITING_FOR_WEBHOOK)
+
+    task.spawn(function() worker(myGeneration) end)
+
+    return { ok = true, status = getStatus() }
+
+end
+
+local function disable()
+
+    state.enabled = false
+
+    state.generation += 1
+
+    state.workerRunning = false
+
+    state.pendingTrigger = nil
+
+    if not state.destroyed then setPhase(PHASE_DISABLED) end
+
+    return { ok = true, status = getStatus() }
+
+end
+
+local function runOnce()
+
+    if state.destroyed then return { ok = false, reason = "DESTROYED" } end
+
+    if not snapshotApi() then return { ok = false, reason = "SNAPSHOT_V2_UNAVAILABLE" } end
+
+    if state.lastObservedRebirth == nil then
+
+        local rebirth, reason = readRebirth()
+
+        if not rebirth then return { ok = false, reason = reason } end
+
+        state.lastObservedRebirth = rebirth
+
+        state.startupBaselineRebirth = state.startupBaselineRebirth or rebirth
+
+        local clock = localClock()
+
+        local now = os.time()
+
+        local clockState = clock and evaluateClock(clock, state.lastHourlyKey) or nil
+
+        if clockState and clockState.hourlyWindow then state.lastHourlyKey = clockState.currentHourKey end
+
+        state.nextHourlyAt = state.nextHourlyAt or (clock and nextHourlyEstimate(now, clock) or nil)
+
+        setPhase(senderApi() and getSafeSenderStatus(senderApi()).webhookConfigured and PHASE_WAITING or PHASE_WAITING_FOR_WEBHOOK)
+
+        return { ok = true, baseline = true, rebirth = rebirth, sendCount = 0 }
+
+    end
+
+    return tick()
+
+end
+
+local function resetBaseline()
+
+    if state.destroyed then return { ok = false, reason = "DESTROYED" } end
+
+    local rebirth, reason = readRebirth()
+
+    if not rebirth then return { ok = false, reason = reason } end
+
+    state.lastObservedRebirth = rebirth
+
+    state.startupBaselineRebirth = rebirth
+
+    state.lastSentMilestone = nil
+
+    state.pendingTrigger = nil
+
+    state.lastError = nil
+
+    setPhase(state.enabled and PHASE_WAITING or PHASE_DISABLED)
+
+    return { ok = true, rebirth = rebirth }
+
+end
+
+local function debugEvaluate(input)
+
+    input = type(input) == "table" and input or {}
+
+    local previous = input.previousRebirth
+
+    local current = input.currentRebirth
+
+    local lastSent = input.lastSentMilestone
+
+    local decision = evaluateDecision(previous, current, input.hourlyDue == true, lastSent)
+
+    decision.hourKey = input.hourKey
+
+    decision.httpPerformed = false
+
+    decision.gameplayMutated = false
+
+    return decision
+
+end
+
+local function debugEvaluateClock(input)
+
+    input = type(input) == "table" and input or {}
+
+    local clock = {
+
+        year = tonumber(input.year) or 1970,
+
+        month = tonumber(input.month) or 1,
+
+        day = tonumber(input.day) or 1,
+
+        hour = tonumber(input.hour) or 0,
+
+        min = tonumber(input.minute) or 0,
+
+        sec = tonumber(input.second) or 0,
+
+    }
+
+    local result = evaluateClock(clock, input.lastHourlyKey)
+
+    if type(input.hourKey) == "string" then result.currentHourKey = input.hourKey end
+
+    result.ok = true
+
+    result.httpPerformed = false
+
+    result.gameplayMutated = false
+
+    return result
+
+end
+
+local function debugClock()
+
+    local now = os.time()
+
+    local clock = localClock()
+
+    if not clock then
+
+        return {
+
+            ok = false,
+
+            reason = "LOCAL_CLOCK_UNAVAILABLE",
+
+            nowEpoch = now,
+
+            lastHourlyKey = state.lastHourlyKey,
+
+            enabled = state.enabled,
+
+            httpPerformed = false,
+
+            gameplayMutated = false,
+
+        }
+
+    end
+
+    local result = evaluateClock(clock, state.lastHourlyKey)
+
+    result.ok = true
+
+    result.nowEpoch = now
+
+    result.localYear = clock.year
+
+    result.localMonth = clock.month
+
+    result.localDay = clock.day
+
+    result.localHour = clock.hour
+
+    result.localMinute = clock.min
+
+    result.localSecond = clock.sec
+
+    result.lastHourlyKey = state.lastHourlyKey
+
+    result.enabled = state.enabled
+
+    result.httpPerformed = false
+
+    result.gameplayMutated = false
+
+    return result
+
+end
+
+getStatus = function()
+
+    local sender = senderApi()
+
+    local senderStatus = sender and getSafeSenderStatus(sender) or nil
+
+    local clock = localClock()
+
+    local clockState = clock and evaluateClock(clock, state.lastHourlyKey) or nil
+
+    return {
+
+        enabled = state.enabled,
+
+        workerRunning = state.workerRunning,
+
+        generation = state.generation,
+
+        lastObservedRebirth = state.lastObservedRebirth,
+
+        startupBaselineRebirth = state.startupBaselineRebirth,
+
+        lastSentMilestone = state.lastSentMilestone,
+
+        lastHourlyKey = state.lastHourlyKey,
+
+        lastSendAt = state.lastSendAt,
+
+        lastSendTrigger = state.lastSendTrigger,
+
+        lastSendResult = state.lastSendResult,
+
+        nextHourlyAt = state.nextHourlyAt,
+
+        currentLocalTime = clockState and clockState.currentLocalTime or nil,
+
+        currentHourKey = clockState and clockState.currentHourKey or nil,
+
+        hourlyWindow = clockState and clockState.hourlyWindow or false,
+
+        nextHourlyLabel = clockState and clockState.nextHourlyLabel or nil,
+
+        secondsUntilNextHourly = clockState and clockState.secondsUntilNextHourly or nil,
+
+        phase = state.phase,
+
+        lastError = state.lastError,
+
+        pendingTrigger = state.pendingTrigger and {
+
+            hourlyDue = state.pendingTrigger.hourlyDue,
+
+            hourlyKey = state.pendingTrigger.hourlyKey,
+
+            milestone = state.pendingTrigger.milestone,
+
+            trigger = state.pendingTrigger.trigger,
+
+        } or nil,
+
+        sender = senderStatus,
+
+        pollInterval = POLL_INTERVAL,
+
+        collisionWindow = COLLISION_WINDOW,
+
+    }
+
+end
+
+local function destroy()
+
+    disable()
+
+    state.destroyed = true
+
+    state.phase = PHASE_DISABLED
+
+    return { ok = true, destroyed = true }
+
+end
+
+local previous = env.UNO_WEBHOOK_SCHEDULER_V1
+
+if type(previous) == "table" and type(previous.destroy) == "function" then
+
+    pcall(previous.destroy)
+
+end
+
+local API = {
+
+    enable = enable,
+
+    disable = disable,
+
+    getStatus = getStatus,
+
+    runOnce = runOnce,
+
+    resetBaseline = resetBaseline,
+
+    debugEvaluate = debugEvaluate,
+
+    debugClock = debugClock,
+
+    debugEvaluateClock = debugEvaluateClock,
+
+    destroy = destroy,
+
+}
+
+env.UNO_WEBHOOK_SCHEDULER_V1 = API
+
+print("[UNO_WEBHOOK_SCHEDULER_V1] READY — disabled; call enable() to start scheduling")
+
+return API
+]=]
+
+    print("[UNO WEBHOOK MERGE] bootstrap compile start")
+    local __unoWebhookChunk, __unoWebhookCompileError = loadstring(__unoWebhookSource)
+    if type(__unoWebhookChunk) ~= "function" then
+        warn("[UNO WEBHOOK MERGE] COMPILE FAILED: " .. tostring(__unoWebhookCompileError))
+    else
+        print("[UNO WEBHOOK MERGE] bootstrap runtime start")
+        local __unoWebhookOk, __unoWebhookResult = pcall(__unoWebhookChunk)
+        if not __unoWebhookOk then
+            warn("[UNO WEBHOOK MERGE] RUNTIME FAILED: " .. tostring(__unoWebhookResult))
+        else
+            print("[UNO WEBHOOK MERGE] backend READY")
+        end
+    end
+end
+
+
+safeBuild("Webhook", function()
+    local sc = createScrollPage()
+    local webhookEnv = (getgenv and getgenv()) or _G
+
+    ----------------------------------------------------------------
+    -- WEBHOOK-ONLY PERSISTENCE
+    -- Completely separate from UNO HUB ConfigManager.
+    ----------------------------------------------------------------
+    local WEBHOOK_CONFIG_FOLDER = "UNOHUB"
+    local WEBHOOK_CONFIG_PATH = WEBHOOK_CONFIG_FOLDER .. "/webhook.json"
+
+    local webhookPrefs = {
+        url = "",
+        enabled = false,
+        include = {
+            accountInfo = true,
+            chickenInfo = true,
+            eggInventory = true,
+            arenaStats = true,
+            avatar = true,
+        },
+    }
+
+    local function envFunction(name)
+        local fn = webhookEnv and webhookEnv[name]
+        if type(fn) == "function" then return fn end
+        local g = _G and _G[name]
+        if type(g) == "function" then return g end
+        return nil
+    end
+
+    local webhookWritefile = envFunction("writefile")
+    local webhookReadfile = envFunction("readfile")
+    local webhookIsfile = envFunction("isfile")
+    local webhookMakefolder = envFunction("makefolder")
+
+    local webhookPersistenceAvailable =
+        type(webhookWritefile) == "function"
+        and type(webhookReadfile) == "function"
+        and type(webhookIsfile) == "function"
+        and type(webhookMakefolder) == "function"
+
+    local function sanitizePrefs(raw)
+        if type(raw) ~= "table" then return end
+
+        if type(raw.url) == "string" then
+            webhookPrefs.url = raw.url
+        end
+        webhookPrefs.enabled = raw.enabled == true
+
+        local inc = type(raw.include) == "table" and raw.include or nil
+        if inc then
+            if type(inc.accountInfo) == "boolean" then webhookPrefs.include.accountInfo = inc.accountInfo end
+            if type(inc.chickenInfo) == "boolean" then webhookPrefs.include.chickenInfo = inc.chickenInfo end
+            if type(inc.eggInventory) == "boolean" then webhookPrefs.include.eggInventory = inc.eggInventory end
+            if type(inc.arenaStats) == "boolean" then webhookPrefs.include.arenaStats = inc.arenaStats end
+            if type(inc.avatar) == "boolean" then webhookPrefs.include.avatar = inc.avatar end
+        end
+    end
+
+    local function loadWebhookPrefs()
+        if not webhookPersistenceAvailable then
+            return false
+        end
+
+        local okExists, exists = pcall(webhookIsfile, WEBHOOK_CONFIG_PATH)
+        if not okExists or exists ~= true then
+            return false
+        end
+
+        local okRead, rawText = pcall(webhookReadfile, WEBHOOK_CONFIG_PATH)
+        if not okRead or type(rawText) ~= "string" or rawText == "" then
+            return false
+        end
+
+        local okDecode, decoded = pcall(function()
+            return HttpService:JSONDecode(rawText)
+        end)
+        if not okDecode or type(decoded) ~= "table" then
+            return false
+        end
+
+        sanitizePrefs(decoded)
+        return true
+    end
+
+    local function saveWebhookPrefs()
+        if not webhookPersistenceAvailable then
+            return false
+        end
+
+        -- Existing-folder errors are harmless.
+        pcall(webhookMakefolder, WEBHOOK_CONFIG_FOLDER)
+
+        local okEncode, encoded = pcall(function()
+            return HttpService:JSONEncode({
+                version = 1,
+                url = tostring(webhookPrefs.url or ""),
+                enabled = webhookPrefs.enabled == true,
+                include = {
+                    accountInfo = webhookPrefs.include.accountInfo ~= false,
+                    chickenInfo = webhookPrefs.include.chickenInfo ~= false,
+                    eggInventory = webhookPrefs.include.eggInventory ~= false,
+                    arenaStats = webhookPrefs.include.arenaStats ~= false,
+                    avatar = webhookPrefs.include.avatar ~= false,
+                },
+            })
+        end)
+        if not okEncode or type(encoded) ~= "string" then
+            return false
+        end
+
+        local okWrite = pcall(webhookWritefile, WEBHOOK_CONFIG_PATH, encoded)
+        return okWrite == true
+    end
+
+    loadWebhookPrefs()
+
+    local _, mainCard = card(sc, 1, "WEBHOOK")
+
+    local urlLabel = text(mainCard, "Webhook URL", 12, Theme.TextSecondary)
+    urlLabel.LayoutOrder = 1
+    urlLabel.Size = UDim2.new(1, 0, 0, 18)
+
+    local urlBox = Instance.new("TextBox")
+    urlBox.LayoutOrder = 2
+    urlBox.Size = UDim2.new(1, 0, 0, 36)
+    urlBox.BackgroundColor3 = Theme.SurfaceElevated
+    urlBox.BorderSizePixel = 0
+    urlBox.ClearTextOnFocus = false
+    urlBox.Text = webhookPrefs.url
+    urlBox.PlaceholderText = "https://discord.com/api/webhooks/..."
+    urlBox.Font = Enum.Font.Gotham
+    urlBox.TextSize = 12
+    urlBox.TextColor3 = Theme.TextPrimary
+    urlBox.PlaceholderColor3 = Theme.TextMuted
+    urlBox.TextXAlignment = Enum.TextXAlignment.Left
+    urlBox.Parent = mainCard
+    corner(urlBox, 7)
+    stroke(urlBox)
+
+    local testButton = Instance.new("TextButton")
+    testButton.LayoutOrder = 3
+    testButton.Size = UDim2.new(1, 0, 0, 34)
+    testButton.BackgroundColor3 = Theme.SurfaceElevated
+    testButton.BorderSizePixel = 0
+    testButton.Text = "Test Webhook"
+    testButton.Font = Enum.Font.GothamMedium
+    testButton.TextSize = 12
+    testButton.TextColor3 = Theme.TextPrimary
+    testButton.AutoButtonColor = false
+    testButton.Parent = mainCard
+    corner(testButton, 7)
+    stroke(testButton)
+
+    local enableRow = Instance.new("Frame")
+    enableRow.LayoutOrder = 4
+    enableRow.Size = UDim2.new(1, 0, 0, 30)
+    enableRow.BackgroundTransparency = 1
+    enableRow.Parent = mainCard
+    text(enableRow, "Enable Webhook", 13, Theme.TextPrimary, Enum.Font.GothamMedium).Size = UDim2.new(1, -50, 1, 0)
+
+    local enableSwitch, setEnableSwitch
+    enableSwitch, setEnableSwitch = makeSwitch(enableRow, webhookPrefs.enabled == true, function(v)
+        local sender = webhookEnv.UNO_WEBHOOK_SENDER_V1
+        local scheduler = webhookEnv.UNO_WEBHOOK_SCHEDULER_V1
+        if type(sender) ~= "table" or type(scheduler) ~= "table" then
+            webhookPrefs.enabled = false
+            setEnableSwitch(false, false)
+            saveWebhookPrefs()
+            warn("[UNO WEBHOOK UI] backend unavailable")
+            return
+        end
+
+        webhookPrefs.url = tostring(urlBox.Text or "")
+
+        if v then
+            local okSet, setResult = pcall(sender.setWebhookUrl, webhookPrefs.url)
+            if not okSet or not setResult or setResult.ok ~= true then
+                webhookPrefs.enabled = false
+                setEnableSwitch(false, false)
+                saveWebhookPrefs()
+                warn("[UNO WEBHOOK UI] URL rejected")
+                return
+            end
+
+            local okEnable, result = pcall(scheduler.enable)
+            if not okEnable or not result or result.ok ~= true then
+                webhookPrefs.enabled = false
+                setEnableSwitch(false, false)
+                saveWebhookPrefs()
+                warn("[UNO WEBHOOK UI] scheduler enable failed")
+                return
+            end
+
+            webhookPrefs.enabled = true
+            saveWebhookPrefs()
+        else
+            pcall(scheduler.disable)
+            webhookPrefs.enabled = false
+            saveWebhookPrefs()
+        end
+    end)
+    enableSwitch.Position = UDim2.new(1, -40, 0.5, -11)
+
+    local _, includeCard = card(sc, 2, "INCLUDE DATA")
+    local includeState = webhookPrefs.include
+
+    local function pushInclude()
+        local sender = webhookEnv.UNO_WEBHOOK_SENDER_V1
+        if type(sender) == "table" and type(sender.setIncludeData) == "function" then
+            pcall(sender.setIncludeData, includeState)
+        end
+    end
+
+    local function includeToggle(order, title, key)
+        local f = Instance.new("Frame")
+        f.LayoutOrder = order
+        f.Size = UDim2.new(1, 0, 0, 28)
+        f.BackgroundTransparency = 1
+        f.Parent = includeCard
+        text(f, title, 13, Theme.TextPrimary, Enum.Font.GothamMedium).Size = UDim2.new(1, -50, 1, 0)
+
+        local sw = select(1, makeSwitch(f, includeState[key] ~= false, function(v)
+            includeState[key] = v == true
+            pushInclude()
+            saveWebhookPrefs()
+        end))
+        sw.Position = UDim2.new(1, -40, 0.5, -11)
+    end
+
+    includeToggle(1, "Account Info", "accountInfo")
+    includeToggle(2, "Chicken Info", "chickenInfo")
+    includeToggle(3, "Egg Inventory", "eggInventory")
+    includeToggle(4, "Arena Stats", "arenaStats")
+    includeToggle(5, "Avatar", "avatar")
+    pushInclude()
+
+    local _, statusCard = card(sc, 3, "STATUS")
+    local lastSend = row(statusCard, 1, "Last Send")
+    local nextSend = row(statusCard, 2, "Next Send")
+    local statusRow = row(statusCard, 3, "Status")
+    local triggerRow = row(statusCard, 4, "Last Trigger")
+
+    urlBox.FocusLost:Connect(function()
+        webhookPrefs.url = tostring(urlBox.Text or "")
+        saveWebhookPrefs()
+
+        local sender = webhookEnv.UNO_WEBHOOK_SENDER_V1
+        if type(sender) == "table" and webhookPrefs.url ~= "" then
+            local ok, result = pcall(sender.setWebhookUrl, webhookPrefs.url)
+            if ok and result and result.ok ~= true then
+                warn("[UNO WEBHOOK UI] URL rejected")
+            end
+        end
+    end)
+
+    testButton.MouseButton1Click:Connect(function()
+        local sender = webhookEnv.UNO_WEBHOOK_SENDER_V1
+        if type(sender) ~= "table" then
+            warn("[UNO WEBHOOK UI] sender unavailable")
+            return
+        end
+
+        webhookPrefs.url = tostring(urlBox.Text or "")
+        saveWebhookPrefs()
+
+        local okConfigured, configured = pcall(sender.setWebhookUrl, webhookPrefs.url)
+        if not okConfigured or not configured or configured.ok ~= true then
+            warn("[UNO WEBHOOK UI] Test blocked: invalid webhook URL")
+            return
+        end
+
+        task.spawn(function()
+            local okSend, result = pcall(sender.testWebhook)
+            if not okSend or not result or result.ok ~= true then
+                warn("[UNO WEBHOOK UI] Test failed")
+            end
+        end)
+    end)
+
+    ----------------------------------------------------------------
+    -- RESTORE BACKEND FROM WEBHOOK-ONLY CONFIG
+    ----------------------------------------------------------------
+    do
+        local sender = webhookEnv.UNO_WEBHOOK_SENDER_V1
+        local scheduler = webhookEnv.UNO_WEBHOOK_SCHEDULER_V1
+
+        if type(sender) == "table" then
+            pushInclude()
+
+            if webhookPrefs.url ~= "" then
+                local okConfigured, configured = pcall(sender.setWebhookUrl, webhookPrefs.url)
+
+                if webhookPrefs.enabled == true
+                    and okConfigured
+                    and configured
+                    and configured.ok == true
+                    and type(scheduler) == "table"
+                    and type(scheduler.enable) == "function"
+                then
+                    local okEnable, enabledResult = pcall(scheduler.enable)
+                    if not okEnable or not enabledResult or enabledResult.ok ~= true then
+                        webhookPrefs.enabled = false
+                        setEnableSwitch(false, false)
+                        saveWebhookPrefs()
+                    end
+                elseif webhookPrefs.enabled == true then
+                    webhookPrefs.enabled = false
+                    setEnableSwitch(false, false)
+                    saveWebhookPrefs()
+                end
+            elseif webhookPrefs.enabled == true then
+                webhookPrefs.enabled = false
+                setEnableSwitch(false, false)
+                saveWebhookPrefs()
+            end
+        end
+    end
+
+    Views.Webhook = {
+        root = sc,
+        update = function()
+            local sender = webhookEnv.UNO_WEBHOOK_SENDER_V1
+            local scheduler = webhookEnv.UNO_WEBHOOK_SCHEDULER_V1
+            if type(sender) ~= "table" or type(scheduler) ~= "table" then
+                setText(statusRow, "Unavailable")
+                setText(nextSend, "—")
+                setText(lastSend, "—")
+                setText(triggerRow, "—")
+                return
+            end
+
+            local okSender, ss = pcall(sender.getStatus)
+            local okScheduler, qs = pcall(scheduler.getStatus)
+            if not okSender then ss = nil end
+            if not okScheduler then qs = nil end
+
+            local connected = ss and ss.webhookConfigured == true
+            local active = qs and qs.enabled == true
+
+            if active and connected then
+                setText(statusRow, "Connected")
+            elseif connected then
+                setText(statusRow, "Ready")
+            else
+                setText(statusRow, "Not Configured")
+            end
+
+            if qs and qs.lastSendAt then
+                local ok, clock = pcall(function()
+                    return os.date("%H:%M:%S", qs.lastSendAt)
+                end)
+                setText(lastSend, ok and clock or tostring(qs.lastSendAt))
+            else
+                setText(lastSend, "—")
+            end
+
+            setText(nextSend, qs and qs.nextHourlyLabel or "—")
+            setText(triggerRow, qs and qs.lastSendTrigger or "—")
+        end,
+    }
+end)
+
+safeBuild("Configs", function()
+    local sc = createScrollPage()
+    local _, cfgCard = card(sc, 1, "Configs")
+
+    if not ConfigManager then
+        setText(row(cfgCard, 1, "Status"), "Unavailable")
+        Views.Configs = { root = sc, update = function() end }
+        return
+    end
+
+    local configNameLabel = text(cfgCard, "Config name", 12, Theme.TextSecondary)
+    configNameLabel.LayoutOrder = 1
+    configNameLabel.Size = UDim2.new(1, 0, 0, 18)
+
+    local configName = Instance.new("TextBox")
+    configName.LayoutOrder = 2
+    configName.Size = UDim2.new(1, 0, 0, 36)
+    configName.BackgroundColor3 = Theme.SurfaceElevated
+    configName.BorderSizePixel = 0
+    configName.ClearTextOnFocus = false
+    configName.Text = ConfigManager.getConfigName()
+    configName.PlaceholderText = "default"
+    configName.Font = Enum.Font.Gotham
+    configName.TextSize = 12
+    configName.TextColor3 = Theme.TextPrimary
+    configName.PlaceholderColor3 = Theme.TextMuted
+    configName.TextXAlignment = Enum.TextXAlignment.Left
+    configName.Parent = cfgCard
+    corner(configName, 7)
+    stroke(configName)
+    pad(configName, 0, 12, 0, 12)
+
+    local loadLabel = text(cfgCard, "Load config", 12, Theme.TextSecondary)
+    loadLabel.LayoutOrder = 3
+    loadLabel.Size = UDim2.new(1, 0, 0, 18)
+
+    local loadName = configName:Clone()
+    loadName.LayoutOrder = 4
+    loadName.Parent = cfgCard
+
+    local actions = Instance.new("Frame")
+    actions.LayoutOrder = 5
+    actions.Size = UDim2.new(1, 0, 0, 36)
+    actions.BackgroundTransparency = 1
+    actions.Parent = cfgCard
+
+    local saveButton = Instance.new("TextButton")
+    saveButton.Size = UDim2.new(0.5, -4, 1, 0)
+    saveButton.BackgroundColor3 = Theme.SurfaceElevated
+    saveButton.BorderSizePixel = 0
+    saveButton.Text = "Save config"
+    saveButton.Font = Enum.Font.GothamMedium
+    saveButton.TextSize = 12
+    saveButton.TextColor3 = Theme.TextPrimary
+    saveButton.AutoButtonColor = false
+    saveButton.Parent = actions
+    corner(saveButton, 7)
+    stroke(saveButton)
+
+    local loadButton = saveButton:Clone()
+    loadButton.Position = UDim2.new(0.5, 4, 0, 0)
+    loadButton.Text = "Load config"
+    loadButton.Parent = actions
+
+    saveButton.MouseButton1Click:Connect(function()
+        ConfigManager.setConfigName(configName.Text)
+        configName.Text = ConfigManager.getConfigName()
+        loadName.Text = configName.Text
+        ConfigManager.saveNow()
+    end)
+
+    loadButton.MouseButton1Click:Connect(function()
+        ConfigManager.setConfigName(loadName.Text)
+        loadName.Text = ConfigManager.getConfigName()
+        configName.Text = loadName.Text
+        isApplyingConfig = true
+        ConfigManager.load()
+        isApplyingConfig = false
+        State.toggles.antiAfk = true
+        setAntiAfk(true)
+    end)
+
+    local autoSaveRow = Instance.new("Frame")
+    autoSaveRow.LayoutOrder = 6
+    autoSaveRow.Size = UDim2.new(1, 0, 0, 44)
+    autoSaveRow.BackgroundColor3 = Theme.SurfaceElevated
+    autoSaveRow.BorderSizePixel = 0
+    autoSaveRow.Parent = cfgCard
+    corner(autoSaveRow, 7)
+    stroke(autoSaveRow)
+
+    local asTitle = text(autoSaveRow, "Auto Save & Load Config", 12, Theme.TextPrimary, Enum.Font.GothamMedium)
+    asTitle.Position = UDim2.fromOffset(12, 3)
+    asTitle.Size = UDim2.new(1, -64, 0, 20)
+
+    local asSub = text(autoSaveRow, "Save changes automatically.", 10, Theme.TextMuted)
+    asSub.Position = UDim2.fromOffset(12, 21)
+    asSub.Size = UDim2.new(1, -64, 0, 16)
+
+    local autoSaveSwitch = select(1, makeSwitch(autoSaveRow, ConfigManager.getAutoSave() == true, function(v)
+        ConfigManager.setAutoSave(v)
+    end))
+    autoSaveSwitch.Position = UDim2.new(1, -44, 0.5, -11)
+
+    local status = row(cfgCard, 7, "Status")
+    local path = row(cfgCard, 8, "File")
+
+    Views.Configs = {
+        root = sc,
+        update = function()
+            setText(status, ConfigManager.getStatus())
+            setText(path, ConfigManager.getConfigPath())
+        end,
+    }
+end)
+
+safeBuild("Settings", function()
+    local sc = createScrollPage()
+
+    local _, perfCard = card(sc, 1, "PERFORMANCE")
+    if PerformanceManager then
+        local function perfToggle(order, title, getter, setter)
+            local f = Instance.new("Frame"); f.LayoutOrder = order; f.Size = UDim2.new(1, 0, 0, 28)
+            f.BackgroundTransparency = 1; f.Parent = perfCard
+            text(f, title, 13, Theme.TextPrimary, Enum.Font.GothamMedium).Size = UDim2.new(1, -50, 1, 0)
+            local sw = select(1, makeSwitch(f, getter() == true, function(v)
+                setter(v)
+                markConfigDirty()
+            end))
+            sw.Position = UDim2.new(1, -40, 0.5, -11)
+        end
+        perfToggle(1, "Boost FPS + Low Graphics", PerformanceManager.getBoostFPS, PerformanceManager.setBoostFPS)
+        perfToggle(2, "Disable VFX", PerformanceManager.getDisableVFX, PerformanceManager.setDisableVFX)
+        perfToggle(3, "Disable Shadows", PerformanceManager.getDisableShadows, PerformanceManager.setDisableShadows)
+        perfToggle(4, "Hide Other Players", PerformanceManager.getHideOtherPlayers, PerformanceManager.setHideOtherPlayers)
+        perfToggle(5, "Hide Other Chickens", PerformanceManager.getHideOtherChickens, PerformanceManager.setHideOtherChickens)
+        perfToggle(6, "White Screen / AFK Saver", PerformanceManager.getWhiteScreen, PerformanceManager.setWhiteScreen)
+        perfToggle(7, "Ultra Performance", PerformanceManager.getUltraPerformance, PerformanceManager.setUltraPerformance)
+        if PerformanceManager.getPotatoMode and PerformanceManager.setPotatoMode then
+            perfToggle(8, "Potato Mode", PerformanceManager.getPotatoMode, PerformanceManager.setPotatoMode)
+        end
+        local restoreButton = Instance.new("TextButton")
+        restoreButton.LayoutOrder = 9
+        restoreButton.Size = UDim2.new(1, 0, 0, 30)
+        restoreButton.BackgroundColor3 = Theme.SurfaceElevated
+        restoreButton.BorderSizePixel = 0
+        restoreButton.Text = "Restore Visuals"
+        restoreButton.Font = Enum.Font.GothamMedium
+        restoreButton.TextSize = 11
+        restoreButton.TextColor3 = Theme.TextPrimary
+        restoreButton.AutoButtonColor = false
+        restoreButton.Parent = perfCard
+        corner(restoreButton, 7)
+        maid:Connect(restoreButton.MouseButton1Click, function()
+            if PerformanceManager.restoreVisuals then PerformanceManager.restoreVisuals(); markConfigDirty() end
+        end)
+        local pStatus = row(perfCard, 10, "Status")
+        local pVfx = row(perfCard, 11, "VFX Disabled")
+        local pPl = row(perfCard, 12, "Player Parts Hidden")
+        local pCh = row(perfCard, 13, "Chicken Parts Hidden")
+        local pCover = row(perfCard, 14, "Screen Cover")
+        local pRender = row(perfCard, 15, "Actual Rendering Disable")
+        local pNote = row(perfCard, 16, "Hide Chickens")
+        Views._perfUpdate = function()
+            setText(pStatus, PerformanceManager.getStatus())
+            local st = PerformanceManager.getStats()
+            setText(pVfx, st.visualObjectsDisabled)
+            setText(pPl, st.playerPartsHidden)
+            setText(pCh, st.chickenPartsHidden)
+            setText(pCover, st.whiteScreenIsVisualCover and "VISUAL COVER" or "OFF")
+            setText(pRender, "NO")
+            setText(pNote, "UNAVAILABLE — MAPPING NOT VERIFIED")
+        end
+    else
+        setText(row(perfCard, 1, "Status"), "MISSING")
+        Views._perfUpdate = function() end
+    end
+
+    local _, cfgCard = card(sc, 2, "CONFIG")
+    local resetArmedUntil = 0
+    if ConfigManager then
+        do
+            local f = Instance.new("Frame"); f.LayoutOrder = 1; f.Size = UDim2.new(1, 0, 0, 28)
+            f.BackgroundTransparency = 1; f.Parent = cfgCard
+            text(f, "Auto Save Config", 13, Theme.TextPrimary, Enum.Font.GothamMedium).Size = UDim2.new(1, -50, 1, 0)
+            local sw = select(1, makeSwitch(f, ConfigManager.getAutoSave() == true, function(v)
+                ConfigManager.setAutoSave(v)
+            end))
+            sw.Position = UDim2.new(1, -40, 0.5, -11)
+        end
+        do
+            local f = Instance.new("Frame"); f.LayoutOrder = 2; f.Size = UDim2.new(1, 0, 0, 28)
+            f.BackgroundTransparency = 1; f.Parent = cfgCard
+            text(f, "Restore Destructive Automation", 13, Theme.TextPrimary, Enum.Font.GothamMedium).Size = UDim2.new(1, -50, 1, 0)
+            local sw = select(1, makeSwitch(f, ConfigManager.getRestoreDestructiveAutomation() == true, function(v)
+                ConfigManager.setRestoreDestructiveAutomation(v)
+            end))
+            sw.Position = UDim2.new(1, -40, 0.5, -11)
+        end
+        local cPersist = row(cfgCard, 3, "Persistence")
+        local cStatus = row(cfgCard, 4, "Status")
+        local cDirty = row(cfgCard, 5, "Dirty")
+        local cErr = row(cfgCard, 6, "Last Error")
+        local function cfgBtn(parent, order, label, color, fn)
+            local f = Instance.new("Frame"); f.LayoutOrder = order; f.Size = UDim2.new(1, 0, 0, 34)
+            f.BackgroundTransparency = 1; f.Parent = parent
+            local b = Instance.new("TextButton"); b.Size = UDim2.new(1, 0, 1, 0)
+            b.BackgroundColor3 = color or Theme.SurfaceElevated; b.Text = label
+            b.Font = Enum.Font.GothamMedium; b.TextSize = 12; b.TextColor3 = Theme.TextPrimary
+            b.AutoButtonColor = false; b.Parent = f; corner(b, 6); b.MouseButton1Click:Connect(fn)
+            return b
+        end
+        cfgBtn(cfgCard, 7, "Save Now", Theme.Primary, function() ConfigManager.saveNow() end)
+        cfgBtn(cfgCard, 8, "Reload Config", Theme.SurfaceElevated, function()
+            isApplyingConfig = true
+            ConfigManager.load()
+            isApplyingConfig = false
+        end)
+        local resetBtn = cfgBtn(cfgCard, 9, "Reset Config", Theme.Danger, function()
+            local now = os.clock()
+            if now > resetArmedUntil then
+                resetArmedUntil = now + 4
+                if resetBtn then resetBtn.Text = "CONFIRM RESET" end
+                return
+            end
+            resetArmedUntil = 0
+            if resetBtn then resetBtn.Text = "Reset Config" end
+            isApplyingConfig = true
+            ConfigManager.resetToDefaults(true)
+            isApplyingConfig = false
+        end)
+        Views._cfgUpdate = function()
+            setText(cPersist, ConfigManager.isPersistenceAvailable() and "AVAILABLE" or "UNAVAILABLE")
+            setText(cStatus, ConfigManager.getStatus())
+            setText(cDirty, ConfigManager.isDirty() and "YES" or "NO")
+            setText(cErr, ConfigManager.getLastError())
+        end
+    else
+        setText(row(cfgCard, 1, "Status"), "MISSING")
+        Views._cfgUpdate = function() end
+    end
+
+    local _, uiCard = card(sc, 3, "UI SCALE")
+    do
+        local f = Instance.new("Frame"); f.LayoutOrder = 1; f.Size = UDim2.new(1, 0, 0, 28)
+        f.BackgroundTransparency = 1; f.Parent = uiCard
+        text(f, "Responsive UI (Auto)", 13, Theme.TextPrimary, Enum.Font.GothamMedium).Size = UDim2.new(1, -50, 1, 0)
+        local sw = select(1, makeSwitch(f, RESPONSIVE.enabled ~= false, function(v)
+            RESPONSIVE.enabled = v == true
+            if v then RESPONSIVE.mode = "Auto" end
+            updateResponsiveScale()
+            markConfigDirty()
+        end))
+        sw.Position = UDim2.new(1, -40, 0.5, -11)
+    end
+    local function scaleBtn(parent, order, label, modeVal)
+        local f = Instance.new("Frame"); f.LayoutOrder = order; f.Size = UDim2.new(1, 0, 0, 28)
+        f.BackgroundTransparency = 1; f.Parent = parent
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(1, 0, 1, 0)
+        b.BackgroundColor3 = Theme.SurfaceElevated
+        b.Text = label
+        b.Font = Enum.Font.Gotham
+        b.TextSize = 12
+        b.TextColor3 = Theme.TextPrimary
+        b.AutoButtonColor = false
+        b.Parent = f
+        corner(b, 6)
+        b.MouseButton1Click:Connect(function()
+            RESPONSIVE.enabled = true
+            RESPONSIVE.mode = modeVal
+            updateResponsiveScale()
+            markConfigDirty()
+        end)
+    end
+    scaleBtn(uiCard, 2, "Auto (viewport)", "Auto")
+    scaleBtn(uiCard, 3, "100%", "1")
+    scaleBtn(uiCard, 4, "90%", "0.9")
+    scaleBtn(uiCard, 5, "80%", "0.8")
+    scaleBtn(uiCard, 6, "70%", "0.7")
+    local scaleStatus = row(uiCard, 7, "Current Scale")
+    local prevUpdate = Views._cfgUpdate
+    Views._cfgUpdate = function()
+        if type(prevUpdate) == "function" then pcall(prevUpdate) end
+        if MainUIScale then
+            setText(scaleStatus, string.format("%.0f%%", MainUIScale.Scale * 100))
+        end
+    end
+
+    local _, actions = card(sc, 4, "ACTIONS")
+    local function actionBtn(parent, order, label, color, fn)
+        local f = Instance.new("Frame"); f.LayoutOrder = order; f.Size = UDim2.new(1, 0, 0, 34)
+        f.BackgroundTransparency = 1; f.Parent = parent
+        local b = Instance.new("TextButton"); b.Size = UDim2.new(1, 0, 1, 0)
+        b.BackgroundColor3 = color or Theme.SurfaceElevated; b.Text = label
+        b.Font = Enum.Font.GothamMedium; b.TextSize = 12; b.TextColor3 = Theme.TextPrimary
+        b.AutoButtonColor = false; b.Parent = f; corner(b, 6); b.MouseButton1Click:Connect(fn)
+    end
+    actionBtn(actions, 1, "Reset Window Position", Theme.SurfaceElevated, function() Main.Position = UDim2.fromScale(0.5, 0.5) end)
+    actionBtn(actions, 2, "Close UNO HUB", Theme.Danger, shutdown)
+    Views.Settings = { root = sc, update = function()
+        if Views._perfUpdate then pcall(Views._perfUpdate) end
+        if Views._cfgUpdate then pcall(Views._cfgUpdate) end
+    end }
+end)
+
+local function showPage(id)
+    State.page = id
+    PageTitle.Text = "Grow A Chicken Fighter | V2"
+    for pid, view in pairs(Views) do
+        if type(view) == "table" and typeof(view.root) == "Instance" then
+            view.root.Visible = (pid == id)
+        end
+    end
+    for pid, btn in pairs(navButtons) do
+        local selected = pid == id
+        btn.BackgroundTransparency = selected and 0 or 1
+        btn.BackgroundColor3 = selected and Theme.SurfaceElevated or Color3.new(0, 0, 0)
+        local accent = btn:FindFirstChild("Accent"); if accent then accent.Visible = selected end
+        local label = btn:FindFirstChild("Label")
+        if label then label.TextColor3 = selected and Theme.TextPrimary or Theme.TextSecondary end
+    end
+    local view = Views[id]
+    if view and view.update then pcall(view.update) end
+end
+
+for i, p in ipairs(pages) do
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, 0, 0, 32); btn.BackgroundTransparency = 1; btn.Text = ""
+    btn.AutoButtonColor = false; btn.LayoutOrder = i; btn.Parent = NavScroll; corner(btn, 6)
+    local accent = Instance.new("Frame"); accent.Name = "Accent"; accent.Size = UDim2.fromOffset(3, 16)
+    accent.Position = UDim2.fromOffset(0, 8); accent.BackgroundColor3 = Theme.Primary
+    accent.BorderSizePixel = 0; accent.Visible = false; accent.Parent = btn; corner(accent, 2)
+    local label = text(btn, (p.icon ~= "" and (p.icon .. "   ") or "") .. p.title, 12, Theme.TextSecondary)
+    label.Name = "Label"; label.Position = UDim2.fromOffset(14, 0); label.Size = UDim2.new(1, -20, 1, 0)
+    btn.MouseButton1Click:Connect(function() showPage(p.id) end)
+    navButtons[p.id] = btn
+end
+
+maid:Task(function(token)
+    while not token.cancelled and not State.closed do
+        refreshData()
+        pruneHazards()
+        HE.holding = isLocalHolding()
+        connDot.BackgroundColor3 = (Integration.modules.DataController or Integration.modules.Remotes) and Theme.Success or Theme.Warning
+        local view = Views[State.page]
+        if view and view.update then pcall(view.update) end
+        task.wait(0.45)
+    end
+end)
+
+
+refreshData()
+refreshEconomyStatus()
+showPage("Auto Farm")
+
+log("INFO", "UNO HUB — Responsive UIScale enabled")
+print("[UNO HUB] AutoSellFeature =", AutoSellFeature and "READY" or State.diagnostics["AutoSell.Feature"])
+print("[UNO HUB] AutoFuseFeature =", AutoFuseFeature and "READY" or State.diagnostics["AutoFuse.Feature"])
+print("[UNO HUB] HatchFeature =", HatchFeature and "READY" or "MISSING")
+print("[UNO HUB] AutoCollectEggFeature =", AutoCollectEggFeature and "READY" or "MISSING")
+print("[UNO HUB] IncubatorClaimFeature =", IncubatorClaimFeature and "READY" or "MISSING")
+print("[UNO HUB] AutoUpgradeIncubatorFeature =", AutoUpgradeIncubatorFeature and "READY" or "MISSING")
+
+
+do
+    local env = (getgenv and getgenv()) or _G
+    env.UNO_HUB_RUNTIME = {
+        State = State,
+        Integration = Integration,
+        Services = {
+            Players = Players,
+            ReplicatedStorage = ReplicatedStorage,
+            Workspace = Workspace,
+            CollectionService = CollectionService,
+            TweenService = TweenService,
+        },
+        MovementAdapter = MovementAdapter,
+        cancelMovement = cancelMovement,
+        moveTo = moveTo,
+        setHotEggCoordinatorPaused = function(reason, value)
+            reason = tostring(reason or "COORDINATOR")
+            if value == true then
+                HE.coordinatorPauseReasons[reason] = true
+            else
+                HE.coordinatorPauseReasons[reason] = nil
+            end
+        end,
+        setNormalFarmCoordinatorPaused = function(reason, value)
+            reason = tostring(reason or "COORDINATOR")
+            if value == true then
+                AFR.coordinatorPauseReasons[reason] = true
+            else
+                AFR.coordinatorPauseReasons[reason] = nil
+            end
+        end,
+        getHotEggCoordinatorPauseReasons = function() return HE.coordinatorPauseReasons end,
+        getNormalFarmCoordinatorPauseReasons = function() return AFR.coordinatorPauseReasons end,
+        setAutoHotEgg = setAutoHotEgg,
+        setAutoFarmRebirth = setAutoFarmRebirth,
+        towerAutomation = {
+            enableAutoTower = function()
+                local api = env.UNO_AUTO_TOWER_STANDALONE
+                return type(api) == "table" and type(api.enable) == "function" and api.enable() or false
+            end,
+            disableAutoTower = function()
+                local api = env.UNO_AUTO_TOWER_STANDALONE
+                return type(api) == "table" and type(api.disable) == "function" and api.disable() or false
+            end,
+            requestTowerEntry = function(options)
+                local manager = env.UNO_TOWER_ENTRY_MANAGER
+                if type(manager) == "table" and type(manager.requestEntry) == "function" then
+                    return manager.requestEntry(options or {})
+                end
+                return { ok = false, reason = "TOWER_AUTOMATION_UNAVAILABLE" }
+            end,
+            setUseFrontierSkip = function(value)
+                State.toggles.useFrontierSkip = value == true
+                local api = env.UNO_AUTO_TOWER_STANDALONE
+                if type(api) == "table" and type(api.setUseFrontierSkip) == "function" then
+                    return api.setUseFrontierSkip(value == true)
+                end
+                return true
+            end,
+            setStartDelay = function(value)
+                value = math.clamp(math.floor((tonumber(value) or 30) + 0.5), 0, 120)
+                State.autoTower.startDelay = value
+                local api = env.UNO_AUTO_TOWER_STANDALONE
+                if type(api) == "table" and type(api.setStartDelay) == "function" then
+                    return api.setStartDelay(value)
+                end
+                return true
+            end,
+            pause = function(reason)
+                local api = env.UNO_AUTO_TOWER_STANDALONE
+                return type(api) == "table" and type(api.pause) == "function" and api.pause(reason) or false
+            end,
+            resume = function(reason)
+                local api = env.UNO_AUTO_TOWER_STANDALONE
+                return type(api) == "table" and type(api.resume) == "function" and api.resume(reason) or false
+            end,
+            getStatus = function()
+                local api = env.UNO_AUTO_TOWER_STANDALONE
+                if type(api) == "table" and type(api.getStatus) == "function" then
+                    return api.getStatus()
+                end
+                return {
+                    enabled = false, phase = "UNAVAILABLE", workerRunning = false,
+                    useFrontierSkip = State.toggles.useFrontierSkip == true,
+                    startDelay = State.autoTower.startDelay, countdown = 0,
+                }
+            end,
+        },
+        setAutoRebirth = setAutoRebirth,
+        setUfoAscension = setUfoAscension,
+        setToggleVisual = setToggleVisual,
+        isTowerActive = isTowerActive,
+        isTowerExited = function() return not isTowerActive() end,
+        requestTowerSurrender = function() return requestSurrender(AFR.generation) end,
+        getHotEggState = function() return HE end,
+        getNormalFarmState = function() return AFR end,
+        shutdown = shutdown,
+    }
+    print("[UNO HUB] Core runtime bridge READY")
+end
+end
+
+
+__unoRunStage("01 CORE/UI + RUNTIME BRIDGE", __unoStage01)
+
+
+local function __unoStage02()
+-- AUTO EVENT CAPSULE
+-- Standalone integration-ready backend for UFO/Admin Scrap-style capsules.
+-- This module intentionally excludes Kraken Rain Eggs and does not inspect or filter egg IDs.
+-- It uses only the normal world interaction path: move to a capsule or owner Recycler,
+-- then wait for authoritative replicated state/events.
+
+local function createEventCapsuleCollector(deps)
+    deps = deps or {}
+
+    local player = assert(deps.player, "player is required")
+    local workspace = assert(deps.workspace, "workspace is required")
+    local scheduler = deps.task or task
+    local logger = deps.log
+    local collectionService = deps.collectionService
+    local scrapDeposited = deps.scrapDeposited
+    local movement = deps.movement
+    local moveTo = deps.moveTo or (movement and movement.moveTo)
+    local acquireMovement = deps.acquireMovement
+    local releaseMovement = deps.releaseMovement
+
+    assert(type(moveTo) == "function", "deps.moveTo or deps.movement.moveTo is required")
+
+    local enabled = false
+    local destroyed = false
+    local pausedReasons = {}
+    local generation = 0
+    local activeWorkerGeneration = nil
+    local workerRunning = false
+    local restartRequested = false
+    local inProgress = false
+    local activeMove = nil
+    local activeTarget = nil
+    local ownerRecycler = nil
+    local pendingCapsules = {}
+    local records = {}
+    local connections = {}
+    local looseConnections = {}
+    local status = "DISABLED"
+    local maxCarry = tonumber(deps.maxCarry) or 5
+    local movementMode = deps.movementMode or "Tween"
+    local lastError = nil
+    local lastPickup = nil
+    local lastDeposit = nil
+    local lastDepositError = nil
+    local depositFailed = false
+    local depositFailureOverride = false
+    local depositAttemptActive = false
+    local lastObservedCarry = nil
+    local depositEventSerial = 0
+    local characterSerial = 0
+
+    local pickupTimeout = tonumber(deps.pickupTimeout) or 8
+    local depositTimeout = tonumber(deps.depositTimeout) or 12
+    local movementTimeout = tonumber(deps.movementTimeout) or 15
+    local capsuleRetargetInterval = tonumber(deps.capsuleRetargetInterval) or 0.35
+    local capsuleRetargetDistance = tonumber(deps.capsuleRetargetDistance) or 3
+    local capsuleFollowDistance = tonumber(deps.capsuleFollowDistance) or 3
+    local recyclerFrontDistance = tonumber(deps.recyclerFrontDistance) or 5
+    local recyclerFrontSign = tonumber(deps.recyclerFrontSign) or 1
+    local retryBackoff = tonumber(deps.retryBackoff) or 2
+    local pollInterval = tonumber(deps.pollInterval) or 0.25
+
+    local function log(level, message)
+        if type(logger) == "function" then
+            pcall(logger, level, message)
+        end
+    end
+
+    local function wait(seconds)
+        if scheduler and type(scheduler.wait) == "function" then
+            scheduler.wait(seconds)
+        end
+    end
+
+    local function spawn(fn)
+        if scheduler and type(scheduler.spawn) == "function" then
+            return scheduler.spawn(fn)
+        end
+        return nil
+    end
+
+    local function now()
+        return os.clock()
+    end
+
+    local function signalChanged(signal, callback, bucket)
+        if not signal or type(signal.Connect) ~= "function" then
+            return nil
+        end
+        local ok, connection = pcall(function()
+            return signal:Connect(callback)
+        end)
+        if ok and connection then
+            table.insert(bucket or connections, connection)
+            return connection
+        end
+        return nil
+    end
+
+    local function isCurrentWorker(workerGeneration)
+        return enabled and not destroyed and workerGeneration == generation
+    end
+
+    local function wake()
+        -- State changes are observed by the single worker on its next bounded poll.
+    end
+
+    local function setStatus(nextStatus)
+        if status ~= nextStatus then
+            status = nextStatus
+        end
+    end
+
+    local function setError(message)
+        lastError = tostring(message)
+        log("warn", "[Capsule] " .. lastError)
+    end
+
+    local function clearDepositFailureOverride(reason)
+        if depositFailureOverride then
+            depositFailureOverride = false
+            log("info", "[Capsule] deposit failure override cleared")
+        end
+        if reason == "confirmed" or reason == "manual_or_external" then
+            depositFailed = false
+        end
+    end
+
+    local function readAttribute(instance, name)
+        if not instance then
+            return nil
+        end
+        local ok, value = pcall(function()
+            return instance:GetAttribute(name)
+        end)
+        return ok and value or nil
+    end
+
+    local function carryCount()
+        local value = readAttribute(player, "scrapCarry")
+        return type(value) == "number" and value or tonumber(value)
+    end
+
+    local function getCharacterRoot()
+        local character = player.Character
+        if not character then
+            return nil
+        end
+        return character:FindFirstChild("HumanoidRootPart")
+            or character.PrimaryPart
+    end
+
+    local function getPosition(instance)
+        if not instance then
+            return nil
+        end
+        local ok, position = pcall(function()
+            if instance:IsA("BasePart") then
+                return instance.Position
+            end
+            if instance:IsA("Model") then
+                return instance:GetPivot().Position
+            end
+            if instance:IsA("Attachment") then
+                return instance.WorldPosition
+            end
+            return nil
+        end)
+        return ok and position or nil
+    end
+
+    local function isLiveCapsule(instance)
+        return instance ~= nil
+            and instance:IsA("Model")
+            and instance.Name == "Egg"
+            and instance.Parent ~= nil
+            and instance.Parent.Name == "Loose"
+            and instance.Parent.Parent ~= nil
+            and instance.Parent.Parent.Name == "PitScrap"
+    end
+
+    local function findLoose()
+        local pitScrap = workspace:FindFirstChild("PitScrap")
+        return pitScrap and pitScrap:FindFirstChild("Loose") or nil
+    end
+
+    local function resolveOwnerRecycler()
+        local plot = readAttribute(player, "Plot")
+        local recyclers = workspace:FindFirstChild("Recyclers")
+        if plot == nil or not recyclers then
+            ownerRecycler = nil
+            return nil
+        end
+        local candidate = recyclers:FindFirstChild("Recycler" .. tostring(plot))
+        ownerRecycler = candidate
+        return candidate
+    end
+
+    local function resolveRecyclerPosition(recycler)
+        if not recycler then
+            return nil
+        end
+        local preferredNames = {
+            "Origin", "DepositZone", "Deposit", "Interaction", "Interact", "PromptPart", "Hitbox"
+        }
+        for _, preferredName in ipairs(preferredNames) do
+            local candidate = recycler:FindFirstChild(preferredName, true)
+            local position = getPosition(candidate)
+            if position then
+                return position, preferredName, recycler:GetPivot()
+            end
+        end
+        for _, descendant in ipairs(recycler:GetDescendants()) do
+            if descendant:IsA("Attachment") then
+                local lowered = string.lower(descendant.Name)
+                if lowered:find("deposit", 1, true) or lowered:find("origin", 1, true)
+                    or lowered:find("interact", 1, true) then
+                    return descendant.WorldPosition, "Attachment", recycler:GetPivot()
+                end
+            end
+        end
+        local pivot = recycler:GetPivot()
+        local characterRoot = getCharacterRoot()
+        local y = characterRoot and characterRoot.Position.Y or pivot.Position.Y
+        local frontDirection = Vector3.new(pivot.LookVector.X, 0, pivot.LookVector.Z)
+        if frontDirection.Magnitude < 0.01 then
+            frontDirection = Vector3.new(0, 0, 1)
+        else
+            frontDirection = frontDirection.Unit
+        end
+        local candidatePlus = Vector3.new(
+            pivot.Position.X + frontDirection.X * recyclerFrontDistance,
+            y,
+            pivot.Position.Z + frontDirection.Z * recyclerFrontDistance
+        )
+        local candidateMinus = Vector3.new(
+            pivot.Position.X - frontDirection.X * recyclerFrontDistance,
+            y,
+            pivot.Position.Z - frontDirection.Z * recyclerFrontDistance
+        )
+        local chosenSign = recyclerFrontSign == -1 and -1 or 1
+        local fallback = chosenSign == -1 and candidateMinus or candidatePlus
+        log("info", "[Capsule] recycler LookVector=" .. tostring(pivot.LookVector))
+        log("info", "[Capsule] candidate sign +1=" .. tostring(candidatePlus))
+        log("info", "[Capsule] candidate sign -1=" .. tostring(candidateMinus))
+        log("info", "[Capsule] chosen sign=" .. tostring(chosenSign))
+        log("info", "[Capsule] chosen distance=" .. tostring(recyclerFrontDistance))
+        return fallback, "FrontOffsetFallback", pivot
+    end
+
+    local function addCapsule(instance)
+        if not isLiveCapsule(instance) or records[instance] then
+            return
+        end
+        records[instance] = {
+            instance = instance,
+            createdAt = now(),
+            invalid = false,
+            processed = false,
+            disappearanceObserved = false,
+            queuedDuringDeposit = false,
+            lastMovementTargetPosition = nil,
+            currentCapsulePosition = nil,
+        }
+        pendingCapsules[instance] = true
+        log("info", "[Capsule] detected")
+        if (status == "DEPOSITING" or status == "WAITING_FOR_DEPOSIT_CONFIRMATION")
+            and records[instance] and not records[instance].queuedDuringDeposit then
+            records[instance].queuedDuringDeposit = true
+            log("info", "[Capsule] queued during deposit")
+        end
+        wake()
+    end
+
+    local function invalidateCapsule(instance, reason)
+        local record = records[instance]
+        pendingCapsules[instance] = nil
+        if record then
+            record.invalid = true
+            record.invalidReason = reason
+        end
+        if activeTarget == instance then
+            activeTarget = nil
+        end
+        if reason then
+            log("warn", "[Capsule] target invalid: " .. tostring(reason))
+        end
+        wake()
+    end
+
+    local function removeDeadCapsules()
+        for instance, record in pairs(records) do
+            if not isLiveCapsule(instance) then
+                if pendingCapsules[instance] or activeTarget == instance then
+                    invalidateCapsule(instance, "claimed_or_removed")
+                end
+                if record.processed or record.invalid then
+                    records[instance] = nil
+                end
+            end
+        end
+    end
+
+    local function capsuleDistance(instance)
+        local root = getCharacterRoot()
+        local position = getPosition(instance)
+        if not root or not position then
+            return math.huge
+        end
+        return (root.Position - position).Magnitude
+    end
+
+    local function selectNearestCapsule()
+        removeDeadCapsules()
+        local selected = nil
+        local selectedDistance = math.huge
+        for instance in pairs(pendingCapsules) do
+            if isLiveCapsule(instance) then
+                local distance = capsuleDistance(instance)
+                if distance < selectedDistance then
+                    selected = instance
+                    selectedDistance = distance
+                end
+            else
+                invalidateCapsule(instance, "not_live_under_loose")
+            end
+        end
+        return selected
+    end
+
+    local function cancelActiveMove(reason)
+        local handle = activeMove
+        activeMove = nil
+        if handle then
+            local cancel = handle.cancel or handle.stop or handle.destroy
+            if type(cancel) == "function" then
+                pcall(cancel, handle, reason)
+            end
+        end
+    end
+
+    local function movementResult(handle, timeout, workerGeneration, characterAtStart, shouldPreempt)
+        if type(handle) == "boolean" then
+            return handle
+        end
+        if type(handle) ~= "table" then
+            return false, "movement_handle_invalid"
+        end
+        if type(handle.isComplete) ~= "function" and handle.completed ~= true and handle.done ~= true then
+            return false, "movement_handle_not_cancellable"
+        end
+        local deadline = now() + timeout
+        while isCurrentWorker(workerGeneration) and now() < deadline do
+            if characterSerial ~= characterAtStart then
+                return false, "character_reset"
+            end
+            if type(shouldPreempt) == "function" and shouldPreempt() then
+                return false, "return_preempted"
+            end
+            if type(handle.isComplete) == "function" then
+                local ok, complete = pcall(handle.isComplete, handle)
+                if ok and complete then
+                    return true
+                end
+            elseif handle.completed == true or handle.done == true then
+                return true
+            end
+            wait(0.1)
+        end
+        return false, "movement_timeout_or_cancel"
+    end
+
+    local function moveToPosition(position, purpose, workerGeneration, shouldPreempt)
+        if not position or not isCurrentWorker(workerGeneration) then
+            return false
+        end
+        local characterAtStart = characterSerial
+        cancelActiveMove("replace")
+        local cancelToken = { cancelled = false }
+        local options = {
+            mode = movementMode,
+            purpose = purpose,
+            cancelToken = cancelToken,
+            isCancelled = function()
+                return cancelToken.cancelled or not isCurrentWorker(workerGeneration)
+            end,
+        }
+        local ok, handle = pcall(moveTo, position, options)
+        if not ok then
+            setError("movement failed: " .. tostring(handle))
+            return false
+        end
+        activeMove = handle
+        local completed, movementReason = movementResult(handle, movementTimeout, workerGeneration, characterAtStart, shouldPreempt)
+        if not completed then
+            cancelToken.cancelled = true
+            cancelActiveMove(movementReason or "movement_timeout_or_cancel")
+            return false, movementReason
+        end
+        activeMove = nil
+        if characterSerial ~= characterAtStart or not isCurrentWorker(workerGeneration) then
+            return false, "worker_or_character_changed"
+        end
+        return true
+    end
+
+    local function beginMovement(position, purpose, workerGeneration)
+        if not position or not isCurrentWorker(workerGeneration) then
+            return nil, "invalid_movement_request"
+        end
+        cancelActiveMove("replace")
+        local cancelToken = { cancelled = false }
+        local options = {
+            mode = movementMode,
+            purpose = purpose,
+            cancelToken = cancelToken,
+            isCancelled = function()
+                return cancelToken.cancelled or not isCurrentWorker(workerGeneration)
+            end,
+        }
+        local ok, handle = pcall(moveTo, position, options)
+        if not ok then
+            return nil, tostring(handle)
+        end
+        if type(handle) == "boolean" then
+            return handle, nil
+        end
+        if type(handle) ~= "table" then
+            return nil, "movement_handle_invalid"
+        end
+        if type(handle.isComplete) ~= "function" and handle.completed ~= true and handle.done ~= true then
+            return nil, "movement_handle_not_cancellable"
+        end
+        activeMove = handle
+        return handle, nil
+    end
+
+    local function movementComplete(handle)
+        if type(handle) == "boolean" then
+            return handle
+        end
+        if type(handle) ~= "table" then
+            return false
+        end
+        if type(handle.isComplete) == "function" then
+            local ok, complete = pcall(handle.isComplete, handle)
+            return ok and complete == true
+        end
+        return handle.completed == true or handle.done == true
+    end
+
+    local function moveToCapsuleDynamic(instance, workerGeneration)
+        local initialPosition = getPosition(instance)
+        if not initialPosition then
+            return false, "capsule_position_unavailable"
+        end
+        local targetPosition = initialPosition
+        local lastMovementTargetPosition = targetPosition
+        local record = records[instance]
+        if record then
+            record.lastMovementTargetPosition = lastMovementTargetPosition
+            record.currentCapsulePosition = initialPosition
+        end
+        log("info", "[Capsule] moving target=" .. tostring(targetPosition))
+        local handle, movementError = beginMovement(targetPosition, "EVENT_CAPSULE", workerGeneration)
+        if not handle then
+            return false, movementError
+        end
+        if type(handle) == "boolean" then
+            return handle, nil
+        end
+        local startedAt = now()
+        local nextRetargetAt = startedAt + capsuleRetargetInterval
+        local followingLogged = false
+        while isCurrentWorker(workerGeneration) and now() - startedAt < movementTimeout do
+            if not isLiveCapsule(instance) then
+                cancelActiveMove("capsule_disappeared")
+                log("info", "[Capsule] capsule disappeared")
+                return true, "capsule_disappeared"
+            end
+
+            if now() >= nextRetargetAt then
+                nextRetargetAt = now() + capsuleRetargetInterval
+                local currentCapsulePosition = getPosition(instance)
+                local currentPlayerRoot = getCharacterRoot()
+                if record then
+                    record.currentCapsulePosition = currentCapsulePosition
+                end
+                if currentCapsulePosition and currentPlayerRoot then
+                    local playerDistance = (currentPlayerRoot.Position - currentCapsulePosition).Magnitude
+                    local delta = (currentCapsulePosition - lastMovementTargetPosition).Magnitude
+                    local completed = movementComplete(handle)
+
+                    if completed then
+                        activeMove = nil
+                        if playerDistance > capsuleFollowDistance then
+                            log("info", "[Capsule] target moved old=" .. tostring(lastMovementTargetPosition)
+                                .. " new=" .. tostring(currentCapsulePosition)
+                                .. " delta=" .. string.format("%.2f", delta))
+                            log("info", "[Capsule] retargeting")
+                            local replacement, replacementError = beginMovement(currentCapsulePosition, "EVENT_CAPSULE", workerGeneration)
+                            if not replacement then
+                                return false, replacementError
+                            end
+                            handle = replacement
+                            targetPosition = currentCapsulePosition
+                            lastMovementTargetPosition = targetPosition
+                            followingLogged = false
+                            if record then
+                                record.lastMovementTargetPosition = lastMovementTargetPosition
+                            end
+                        else
+                            if not followingLogged then
+                                log("info", "[Capsule] reached current target; capsule still live")
+                                log("info", "[Capsule] following live capsule")
+                                followingLogged = true
+                            end
+                            handle = nil
+                        end
+                    elseif delta >= capsuleRetargetDistance then
+                        log("info", "[Capsule] target moved old=" .. tostring(lastMovementTargetPosition)
+                            .. " new=" .. tostring(currentCapsulePosition)
+                            .. " delta=" .. string.format("%.2f", delta))
+                        log("info", "[Capsule] retargeting")
+                        local replacement, replacementError = beginMovement(currentCapsulePosition, "EVENT_CAPSULE", workerGeneration)
+                        if not replacement then
+                            return false, replacementError
+                        end
+                        handle = replacement
+                        targetPosition = currentCapsulePosition
+                        lastMovementTargetPosition = targetPosition
+                        followingLogged = false
+                        if record then
+                            record.lastMovementTargetPosition = lastMovementTargetPosition
+                        end
+                    elseif playerDistance <= capsuleFollowDistance then
+                        if not followingLogged then
+                            log("info", "[Capsule] following live capsule")
+                            followingLogged = true
+                        end
+                    end
+                end
+            end
+            wait(0.1)
+        end
+        cancelActiveMove("capsule_movement_timeout")
+        return false, "capsule_movement_timeout"
+    end
+
+    local function acquire(owner, priority)
+        if type(acquireMovement) ~= "function" then
+            return true
+        end
+        local ok, result = pcall(acquireMovement, owner, priority)
+        return ok and result ~= false
+    end
+
+    local function release(owner)
+        if type(releaseMovement) == "function" then
+            pcall(releaseMovement, owner)
+        end
+    end
+
+    local function waitForPickup(instance, carryBefore, workerGeneration)
+        local deadline = now() + pickupTimeout
+        while isCurrentWorker(workerGeneration) and now() < deadline do
+            local carry = carryCount()
+            local gone = records[instance] and records[instance].disappearanceObserved or not isLiveCapsule(instance)
+            if gone and carry and carry > (carryBefore or 0) then
+                return true, carry
+            end
+            -- A root can disappear one replication step before scrapCarry updates.
+            -- Keep the bounded wait open so both authoritative signals can correlate.
+            wait(pollInterval)
+        end
+        local carry = carryCount()
+        return false, carry
+    end
+
+    local function collectCapsule(instance, workerGeneration)
+        if not isLiveCapsule(instance) then
+            invalidateCapsule(instance, "not_live_before_move")
+            return false
+        end
+        local position = getPosition(instance)
+        if not position then
+            invalidateCapsule(instance, "no_root_position")
+            return false
+        end
+        local carryBefore = carryCount() or 0
+        activeTarget = instance
+        setStatus("MOVING_TO_CAPSULE")
+        log("info", "[Capsule] target selected")
+        log("info", "[Capsule] moving")
+        if not acquire("EVENT_CAPSULE", 50) then
+            setError("movement ownership unavailable")
+            return false
+        end
+        local moved, moveReason = moveToCapsuleDynamic(instance, workerGeneration)
+        release("EVENT_CAPSULE")
+        if not moved then
+            setError("capsule movement did not complete: " .. tostring(moveReason))
+            return false
+        end
+        setStatus("WAITING_FOR_PICKUP_CONFIRMATION")
+        local confirmed, carryAfter = waitForPickup(instance, carryBefore, workerGeneration)
+        if confirmed then
+            pendingCapsules[instance] = nil
+            records[instance].disappearanceObserved = true
+            records[instance].processed = true
+            activeTarget = nil
+            lastPickup = {
+                instance = instance,
+                carryBefore = carryBefore,
+                carryAfter = carryAfter,
+                delta = carryAfter - carryBefore,
+                at = now(),
+            }
+            log("info", "[Capsule] pickup confirmed")
+            log("info", "[Capsule] carry=" .. tostring(carryAfter))
+            return true
+        end
+        invalidateCapsule(instance, "removed_without_local_carry_increase")
+        return false
+    end
+
+    local function waitForDeposit(carryBefore, eventSerialAtStart, workerGeneration)
+        local deadline = now() + depositTimeout
+        local sawEvent = false
+        while isCurrentWorker(workerGeneration) and now() < deadline do
+            local carry = carryCount()
+            if depositEventSerial > eventSerialAtStart then
+                sawEvent = true
+            end
+            if sawEvent and carry ~= nil and carry <= carryBefore then
+                return true, carry, "ScrapDeposited+carry_reconciled"
+            end
+            if carry ~= nil and carry < carryBefore then
+                return true, carry, "carry_decreased"
+            end
+            wait(pollInterval)
+        end
+        return false, carryCount(), "deposit_timeout"
+    end
+
+    local function deposit(workerGeneration)
+        local carryBefore = carryCount() or 0
+        if carryBefore <= 0 then
+            return true
+        end
+        local recycler = resolveOwnerRecycler()
+        if not recycler then
+            setStatus("OWNER_RECYCLER_NOT_FOUND")
+            log("warn", "[Capsule] owner Recycler missing")
+            return false
+        end
+        local approachAttempts = 0
+        local maxApproachAttempts = 2
+        while approachAttempts < maxApproachAttempts and isCurrentWorker(workerGeneration) do
+            approachAttempts += 1
+            recycler = resolveOwnerRecycler()
+            local position, resolverSource, recyclerPivot = resolveRecyclerPosition(recycler)
+            if not position then
+                setError("owner Recycler has no verified target position")
+                return false
+            end
+            log("info", "[Capsule] recycler pivot=" .. tostring(recyclerPivot and recyclerPivot.Position))
+            log("info", "[Capsule] recycler target=" .. tostring(position))
+            log("info", "[Capsule] recycler target source=" .. tostring(resolverSource))
+            setStatus("RETURNING_TO_RECYCLER")
+            log("info", "[Capsule] returning to Recycler")
+            if not acquire("EVENT_CAPSULE", 50) then
+                setError("movement ownership unavailable")
+                return false
+            end
+            local moved, moveReason = moveToPosition(position, "EVENT_CAPSULE_RECYCLER", workerGeneration, function()
+                return (carryCount() or 0) < maxCarry and next(pendingCapsules) ~= nil
+            end)
+            if not moved then
+                release("EVENT_CAPSULE")
+                if moveReason == "return_preempted" then
+                    setStatus("RETURN_PREEMPTED")
+                    log("info", "[Capsule] return preempted")
+                    return true
+                end
+                setError("Recycler movement did not complete: " .. tostring(moveReason))
+                return false
+            end
+            log("info", "[Capsule] recycler approach reached")
+            setStatus("DEPOSITING")
+            log("info", "[Capsule] deposit started")
+            setStatus("WAITING_FOR_DEPOSIT_CONFIRMATION")
+            local eventSerialAtStart = depositEventSerial
+            depositAttemptActive = true
+            local confirmed, carryAfter, evidence = waitForDeposit(carryBefore, eventSerialAtStart, workerGeneration)
+            depositAttemptActive = false
+            release("EVENT_CAPSULE")
+            if confirmed then
+                lastDeposit = {
+                    carryBefore = carryBefore,
+                    carryAfter = carryAfter,
+                    evidence = evidence,
+                    at = now(),
+                }
+                depositFailed = false
+                lastDepositError = nil
+                clearDepositFailureOverride("confirmed")
+                log("info", "[Capsule] deposit confirmed")
+                log("info", "[Capsule] carry=" .. tostring(carryAfter))
+                removeDeadCapsules()
+                if next(pendingCapsules) ~= nil then
+                    log("info", "[Capsule] processing pending capsule")
+                end
+                return true
+            end
+            log("warn", "[Capsule] deposit confirmation timeout")
+            if approachAttempts < maxApproachAttempts then
+                log("warn", "[Capsule] recycler approach retry 1/1")
+                wait(retryBackoff)
+            end
+        end
+        local currentCarry = carryCount()
+        depositFailed = true
+        lastDepositError = "deposit confirmation timeout after bounded approach retries"
+        depositFailureOverride = true
+        log("warn", "[Capsule] DEPOSIT FAILED carry=" .. tostring(currentCarry))
+        log("warn", "[Capsule] deposit failure override enabled")
+        log("info", "[Capsule] resuming capsule collection")
+        setError(lastDepositError)
+        return false
+    end
+
+    local function reconcile(workerGeneration)
+        removeDeadCapsules()
+        ownerRecycler = resolveOwnerRecycler()
+        local carry = carryCount() or 0
+        if depositFailureOverride and carry < maxCarry then
+            clearDepositFailureOverride("below_capacity")
+        end
+        if carry >= maxCarry and not depositFailureOverride then
+            setStatus("FORCE_DEPOSIT")
+            log("info", "[Capsule] force deposit")
+            return "deposit"
+        end
+        if carry > 0 and next(pendingCapsules) == nil then
+            return "deposit"
+        end
+        if next(pendingCapsules) ~= nil and not next(pausedReasons) then
+            return "collect"
+        end
+        if carry > 0 and next(pausedReasons) == nil then
+            return "deposit"
+        end
+        return "wait"
+    end
+
+    local function runWorker(workerGeneration)
+        while isCurrentWorker(workerGeneration) do
+            inProgress = false
+            if next(pausedReasons) ~= nil and (carryCount() or 0) <= 0 then
+                setStatus("PAUSED")
+                wait(pollInterval)
+            else
+                local action = reconcile(workerGeneration)
+                if action == "collect" then
+                    local target = selectNearestCapsule()
+                    if target then
+                        inProgress = true
+                        setStatus("TARGET_READY")
+                        collectCapsule(target, workerGeneration)
+                    else
+                        wait(pollInterval)
+                    end
+                elseif action == "deposit" then
+                    inProgress = true
+                    deposit(workerGeneration)
+                else
+                    setStatus(next(pausedReasons) and "PAUSED" or "WAITING_FOR_CAPSULE")
+                    wait(pollInterval)
+                end
+            end
+            if lastError then
+                wait(retryBackoff)
+                lastError = nil
+            end
+        end
+    end
+
+    local function startWorker()
+        if destroyed or not enabled or workerRunning then
+            return
+        end
+        generation += 1
+        activeWorkerGeneration = generation
+        restartRequested = false
+        workerRunning = true
+        spawn(function()
+            local workerGeneration = activeWorkerGeneration
+            runWorker(workerGeneration)
+            if activeWorkerGeneration == workerGeneration then
+                workerRunning = false
+            end
+            if enabled and not destroyed and restartRequested then
+                restartRequested = false
+                startWorker()
+            end
+        end)
+    end
+
+    local function requestRestart(reason)
+        if destroyed then
+            return
+        end
+        restartRequested = true
+        generation += 1
+        cancelActiveMove(reason or "restart")
+        wake()
+        if enabled and not workerRunning then
+            startWorker()
+        end
+    end
+
+    local function setEnabled(value)
+        if destroyed then
+            return
+        end
+        local nextEnabled = value == true
+        if enabled == nextEnabled then
+            if nextEnabled then startWorker() end
+            return
+        end
+        clearDepositFailureOverride("enabled_changed")
+        enabled = nextEnabled
+        generation += 1
+        cancelActiveMove("enabled_changed")
+        if enabled then
+            restartRequested = workerRunning
+            log("info", "[Capsule] enabled")
+            setStatus("WAITING_FOR_CAPSULE")
+            startWorker()
+        else
+            log("info", "[Capsule] disabled")
+            setStatus("DISABLED")
+        end
+    end
+
+    local function setPaused(reason, value)
+        if type(reason) ~= "string" or reason == "" then
+            reason = "external"
+        end
+        if value == true then
+            pausedReasons[reason] = true
+            log("info", "[Capsule] paused: " .. reason)
+        else
+            pausedReasons[reason] = nil
+            log("info", "[Capsule] resumed: " .. reason)
+        end
+        wake()
+        if enabled then startWorker() end
+    end
+
+    local function watchLoose(container)
+        for _, connection in ipairs(looseConnections) do
+            pcall(function() connection:Disconnect() end)
+        end
+        table.clear(looseConnections)
+        if not container then
+            return
+        end
+        for _, child in ipairs(container:GetChildren()) do
+            addCapsule(child)
+        end
+        signalChanged(container.ChildAdded, function(child)
+            addCapsule(child)
+        end, looseConnections)
+        signalChanged(container.ChildRemoved, function(child)
+            local record = records[child]
+            if not record then
+                return
+            end
+            if child == activeTarget and status == "WAITING_FOR_PICKUP_CONFIRMATION" then
+                record.disappearanceObserved = true
+                wake()
+                return
+            end
+            if pendingCapsules[child] or activeTarget == child then
+                invalidateCapsule(child, "removed_from_loose")
+            end
+        end, looseConnections)
+    end
+
+    local function watchPitScrap()
+        local pitScrap = workspace:FindFirstChild("PitScrap")
+        if not pitScrap then
+            watchLoose(nil)
+            return
+        end
+        watchLoose(pitScrap:FindFirstChild("Loose"))
+        signalChanged(pitScrap.ChildAdded, function(child)
+            if child.Name == "Loose" then
+                watchLoose(child)
+            end
+        end)
+    end
+
+    local function watchCharacter()
+        signalChanged(player.CharacterAdded, function()
+            characterSerial += 1
+            cancelActiveMove("character_reset")
+            requestRestart("character_reset")
+        end)
+    end
+
+    local function watchPlayerState()
+        signalChanged(player:GetAttributeChangedSignal("Plot"), function()
+            ownerRecycler = nil
+            wake()
+        end)
+        lastObservedCarry = carryCount()
+        signalChanged(player:GetAttributeChangedSignal("scrapCarry"), function()
+            local previousCarry = lastObservedCarry
+            local currentCarry = carryCount()
+            lastObservedCarry = currentCarry
+            if previousCarry ~= nil and currentCarry ~= nil and currentCarry < previousCarry then
+                if not depositAttemptActive then
+                    log("info", "[Capsule] external/manual deposit detected carry "
+                        .. tostring(previousCarry) .. " -> " .. tostring(currentCarry))
+                    clearDepositFailureOverride("manual_or_external")
+                end
+            end
+            wake()
+        end)
+    end
+
+    local function watchDeposit()
+        if scrapDeposited then
+            signalChanged(scrapDeposited, function()
+                depositEventSerial += 1
+                clearDepositFailureOverride("confirmed")
+                wake()
+            end)
+        end
+    end
+
+    local function getPending()
+        local result = {}
+        for instance in pairs(pendingCapsules) do
+            if isLiveCapsule(instance) then
+                table.insert(result, instance)
+            end
+        end
+        return result
+    end
+
+    local function getDebugState()
+        local pending = getPending()
+        return {
+            status = status,
+            carry = carryCount(),
+            maxCarry = maxCarry,
+            pendingCount = #pending,
+            activeTarget = activeTarget,
+            isReturning = status == "RETURNING_TO_RECYCLER",
+            isDepositing = status == "DEPOSITING" or status == "WAITING_FOR_DEPOSIT_CONFIRMATION",
+            depositFailed = depositFailed,
+            depositFailureOverride = depositFailureOverride,
+        }
+    end
+
+    local function destroy()
+        if destroyed then
+            return
+        end
+        destroyed = true
+        enabled = false
+        generation += 1
+        cancelActiveMove("destroy")
+        release("EVENT_CAPSULE")
+        for _, connection in ipairs(connections) do
+            pcall(function() connection:Disconnect() end)
+        end
+        for _, connection in ipairs(looseConnections) do
+            pcall(function() connection:Disconnect() end)
+        end
+        table.clear(connections)
+        table.clear(looseConnections)
+        table.clear(pendingCapsules)
+        activeTarget = nil
+        setStatus("DISABLED")
+    end
+
+    watchPitScrap()
+    signalChanged(workspace.ChildAdded, function(child)
+        if child.Name == "PitScrap" then
+            watchPitScrap()
+        end
+    end)
+    signalChanged(workspace.ChildRemoved, function(child)
+        if child.Name == "PitScrap" then
+            watchLoose(nil)
+        end
+    end)
+    watchCharacter()
+    watchPlayerState()
+    watchDeposit()
+
+    return {
+        setEnabled = setEnabled,
+        isEnabled = function() return enabled end,
+        setPaused = setPaused,
+        isPaused = function() return next(pausedReasons) ~= nil end,
+        getPauseReasons = function()
+            local result = {}
+            for reason in pairs(pausedReasons) do result[reason] = true end
+            return result
+        end,
+        setMaxCarry = function(value)
+            local parsed = tonumber(value)
+            if parsed and parsed > 0 then maxCarry = parsed end
+        end,
+        getMaxCarry = function() return maxCarry end,
+        getStatus = function() return status end,
+        getCarryCount = carryCount,
+        getActiveTarget = function() return activeTarget end,
+        getPendingCapsules = getPending,
+        getOwnerRecycler = function() return resolveOwnerRecycler() end,
+        isReturning = function() return status == "RETURNING_TO_RECYCLER" end,
+        isDepositing = function()
+            return status == "DEPOSITING" or status == "WAITING_FOR_DEPOSIT_CONFIRMATION"
+        end,
+        getDebugState = getDebugState,
+        getLastPickup = function() return lastPickup end,
+        getLastDeposit = function() return lastDeposit end,
+        getLastDepositError = function() return lastDepositError end,
+        isDepositFailed = function() return depositFailed end,
+        isDepositFailureOverride = function() return depositFailureOverride end,
+        getLastError = function() return lastError end,
+        resolveOwnerRecycler = resolveOwnerRecycler,
+        cancelMovement = function(reason)
+            cancelActiveMove(reason or "coordinator_preempt")
+            return true
+        end,
+        destroy = destroy,
+        -- Integration hooks for the future coordinator; no coordinator is installed here.
+        acquireMovement = function(owner, priority) return acquire(owner, priority) end,
+        releaseMovement = release,
+    }
+end
+
+local globalEnv = (getgenv and getgenv()) or _G
+globalEnv.UNO_EVENT_CAPSULE_COLLECTOR_FACTORY = createEventCapsuleCollector
+
+return createEventCapsuleCollector
+end
+
+
+__unoRunStage("02 02_UNO_HUB_EVENT_CAPSULE_COLLECTOR_PHASE9(1).lua", __unoStage02)
+
+
+local function __unoStage03()
+-- AUTO ARENA
+-- Standalone integration-ready backend.
+-- This module automates only the outer Arena loop through injected normal game APIs.
+-- It does not build teams, claim rewards, control abilities, click UI, or use coordinates.
+
+local function createAutoArena(deps)
+    deps = deps or {}
+
+    local ArenaClient = assert(deps.ArenaClient, "ArenaClient is required")
+    local ArenaState = assert(deps.ArenaState, "ArenaState is required")
+    local ArenaRankSettings = deps.ArenaRankSettings
+    local Remotes = deps.Remotes
+    local Charm = deps.Charm
+    local scheduler = deps.task or task
+    local logger = deps.log
+
+    local function log(level, message)
+        if type(logger) == "function" then
+            pcall(logger, level, message)
+        end
+    end
+
+    local function wait(seconds)
+        if scheduler and type(scheduler.wait) == "function" then
+            scheduler.wait(seconds)
+        end
+    end
+
+    local function spawn(fn)
+        if scheduler and type(scheduler.spawn) == "function" then
+            return scheduler.spawn(fn)
+        end
+        return nil
+    end
+
+    local function defer(fn)
+        if scheduler and type(scheduler.defer) == "function" then
+            return scheduler.defer(fn)
+        end
+        return spawn(fn)
+    end
+
+    local function now()
+        return os.clock()
+    end
+
+    local suffixMultiplier = {
+        [""] = 1,
+        K = 1e3,
+        M = 1e6,
+        B = 1e9,
+        T = 1e12,
+        Qa = 1e15,
+        Qi = 1e18,
+        Sx = 1e21,
+        Sp = 1e24,
+        Oc = 1e27,
+        No = 1e30,
+        Dc = 1e33,
+    }
+
+    local function parsePower(value)
+        if type(value) == "number" then
+            if value == value and value ~= math.huge and value ~= -math.huge then
+                return value
+            end
+            return nil
+        end
+        if type(value) ~= "string" then
+            return nil
+        end
+
+        local numberText, suffix = string.match(value, "^%s*([%+%-]?[%d,]*%.?%d+)%s*([%a]*)%s*$")
+        if not numberText then
+            return nil
+        end
+
+        numberText = string.gsub(numberText, ",", "")
+        local coefficient = tonumber(numberText)
+        local multiplier = suffixMultiplier[suffix]
+        if not coefficient or not multiplier then
+            return nil
+        end
+
+        local normalized = coefficient * multiplier
+        if normalized ~= normalized or normalized == math.huge or normalized == -math.huge then
+            return nil
+        end
+        return normalized
+    end
+
+    local enabled = false
+    local destroyed = false
+    local generation = 0
+    local workerRunning = false
+    local activeWorkerGeneration = nil
+    local restartRequested = false
+    local processQueued = false
+    local requestInProgress = false
+    local requestKind = nil
+    local pauseReasons = {}
+    local eventPending = false
+    local status = "DISABLED"
+    local decision = "WAIT_FOR_ARENA"
+    local lastError = nil
+    local lastResult = nil
+    local lastTrophyChange = nil
+    local resultHandled = false
+    local lastRefreshAt = 0
+    local nextAllowedAt = 0
+    local lastOpponentFingerprint = nil
+    local lastSkipFingerprint = nil
+    local refreshInterval = tonumber(deps.refreshInterval) or 10
+    local refillPollInterval = tonumber(deps.refillPollInterval) or 10
+    local startTimeout = tonumber(deps.startTimeout) or 12
+    local reconcileTimeout = tonumber(deps.reconcileTimeout) or 8
+    local failureBackoff = tonumber(deps.failureBackoff) or 3
+    local connections = {}
+
+    local function isCurrentWorker(workerGeneration)
+        return enabled and not destroyed and workerGeneration == generation
+    end
+
+    local function readAtom(atom)
+        if type(atom) ~= "function" then
+            return nil
+        end
+        local ok, value = pcall(atom)
+        return ok and value or nil
+    end
+
+    local function clone(value, depth)
+        if type(value) ~= "table" or (depth or 0) > 4 then
+            return value
+        end
+        local result = {}
+        for key, item in pairs(value) do
+            result[key] = clone(item, (depth or 0) + 1)
+        end
+        return result
+    end
+
+    local function getView()
+        return readAtom(ArenaState.view)
+    end
+
+    local function getBattle()
+        return readAtom(ArenaState.battle)
+    end
+
+    local function isBattling()
+        if readAtom(ArenaState.battling) == true then
+            return true
+        end
+        local battle = getBattle()
+        return type(battle) == "table" and battle.phase == "started"
+    end
+
+    local function currentOpponent(view)
+        if type(view) ~= "table" or type(view.opponents) ~= "table" then
+            return nil, nil
+        end
+        local count = #view.opponents
+        if count == 0 then
+            return nil, nil
+        end
+        local cursor = tonumber(view.cursor) or 0
+        local index = math.min(cursor + 1, count)
+        return view.opponents[index], index
+    end
+
+    local function opponentId(opponent)
+        if type(opponent) ~= "table" then
+            return nil
+        end
+        return opponent.id or opponent.userId or opponent.name
+    end
+
+    local function opponentFingerprint(view)
+        local opponent, index = currentOpponent(view)
+        if not opponent then
+            return nil
+        end
+        return table.concat({
+            tostring(tonumber(view.cursor) or 0),
+            tostring(index or 0),
+            tostring(opponentId(opponent) or ""),
+            tostring(opponent.power or ""),
+        }, "|")
+    end
+
+    local function viewReady(view)
+        if type(view) ~= "table" then
+            return false
+        end
+        if view.available ~= true or view.unlocked ~= true then
+            return false
+        end
+        local opponent = currentOpponent(view)
+        if not opponent then
+            return false
+        end
+        if readAtom(ArenaState.busy) == true or isBattling() then
+            return false
+        end
+        if readAtom(ArenaState.result) ~= nil then
+            return false
+        end
+        return true
+    end
+
+    local function safeRequest(kind, fn, ...)
+        if requestInProgress then
+            return false, nil, "request_in_progress"
+        end
+        requestInProgress = true
+        requestKind = kind
+        local ok, response = pcall(fn, ...)
+        requestInProgress = false
+        requestKind = nil
+        if not ok then
+            return false, nil, tostring(response)
+        end
+        if type(response) ~= "table" then
+            return false, response, "invalid_response"
+        end
+        if response.ok ~= true then
+            return false, response, tostring(response.error or "request_failed")
+        end
+        return true, response, nil
+    end
+
+    local function recordError(message)
+        lastError = tostring(message)
+        log("warn", "[Arena] " .. lastError)
+        nextAllowedAt = now() + failureBackoff
+    end
+
+    local function refresh(force, ownerGeneration)
+        if ownerGeneration and not isCurrentWorker(ownerGeneration) then
+            return false
+        end
+        if requestInProgress then
+            return false
+        end
+        if not force and now() - lastRefreshAt < refreshInterval then
+            return true
+        end
+        local ok, response, errorMessage = safeRequest("refresh", ArenaClient.refresh)
+        if ok then
+            lastRefreshAt = now()
+            lastError = nil
+            return true, response
+        end
+        if errorMessage ~= "request_in_progress" then
+            recordError("refresh failed: " .. tostring(errorMessage))
+        end
+        return false, response
+    end
+
+    local function ensureOfficialAuto()
+        if not ArenaRankSettings or type(ArenaRankSettings.autoAbility) ~= "function" or type(ArenaRankSettings.setAutoAbility) ~= "function" then
+            return true
+        end
+        local ok, current = pcall(ArenaRankSettings.autoAbility)
+        if not ok or current == true then
+            return ok
+        end
+        local setOk, setError = pcall(ArenaRankSettings.setAutoAbility, true)
+        if not setOk then
+            recordError("official Arena AUTO enable failed: " .. tostring(setError))
+            return false
+        end
+        log("info", "[Arena] official AUTO enabled")
+        return true
+    end
+
+    local function scheduleProcess()
+        if not enabled or destroyed or processQueued then
+            return
+        end
+        processQueued = true
+        defer(function()
+            processQueued = false
+            if enabled and not destroyed then
+                -- The worker owns all actions. This callback only wakes it by leaving
+                -- the next loop iteration to observe authoritative state.
+            end
+        end)
+    end
+
+    local function waitForViewChange(oldFingerprint, timeout)
+        local deadline = now() + timeout
+        while enabled and not destroyed and now() < deadline do
+            local view = getView()
+            local fingerprint = opponentFingerprint(view)
+            if fingerprint and fingerprint ~= oldFingerprint then
+                return true
+            end
+            wait(0.25)
+        end
+        return false
+    end
+
+    local function reconcileAfterSkip(oldFingerprint, oldSkips, workerGeneration)
+        local function changed(view)
+            local fingerprint = opponentFingerprint(view)
+            local skips = tonumber(view and view.skips) or 0
+            return fingerprint and fingerprint ~= oldFingerprint or skips < oldSkips
+        end
+
+        local deadline = now() + reconcileTimeout
+        while isCurrentWorker(workerGeneration) and now() < deadline do
+            if changed(getView()) then
+                log("info", "[Arena] opponent reconciled after Skip")
+                return true
+            end
+            wait(0.25)
+        end
+
+        local refreshed = refresh(true, workerGeneration)
+        if refreshed then
+            deadline = now() + reconcileTimeout
+            while isCurrentWorker(workerGeneration) and now() < deadline do
+                if changed(getView()) then
+                    log("info", "[Arena] opponent reconciled after refresh")
+                    return true
+                end
+                wait(0.25)
+            end
+        end
+        return false
+    end
+
+    local function waitForBattleStart(timeout, workerGeneration)
+        local deadline = now() + timeout
+        while isCurrentWorker(workerGeneration) and now() < deadline do
+            if isBattling() then
+                return true
+            end
+            local battle = getBattle()
+            if type(battle) == "table" and battle.phase == "started" then
+                return true
+            end
+            wait(0.25)
+        end
+        return false
+    end
+
+    local function handleResultReconciliation(workerGeneration)
+        status = "RECONCILE"
+        decision = "WAIT_FOR_ARENA"
+        refresh(true, workerGeneration)
+        if eventPending or next(pauseReasons) ~= nil then
+            status = "PAUSED FOR EVENT"
+            decision = "PAUSED_FOR_EVENT"
+        else
+            status = "RESULT"
+        end
+    end
+
+    local function processCycle(workerGeneration)
+        if not isCurrentWorker(workerGeneration) then
+            return
+        end
+        if now() < nextAllowedAt then
+            wait(math.min(0.5, math.max(0, nextAllowedAt - now())))
+            return
+        end
+
+        if next(pauseReasons) ~= nil then
+            if isBattling() then
+                eventPending = true
+                status = "EVENT PENDING"
+                decision = "BATTLE_IN_PROGRESS"
+            else
+                status = "PAUSED FOR EVENT"
+                decision = "PAUSED_FOR_EVENT"
+            end
+            wait(0.25)
+            return
+        end
+
+        if eventPending and not isBattling() then
+            if next(pauseReasons) == nil and readAtom(ArenaState.result) == nil then
+                eventPending = false
+            else
+                status = "PAUSED FOR EVENT"
+                decision = "PAUSED_FOR_EVENT"
+                wait(0.25)
+                return
+            end
+        end
+
+        if isBattling() then
+            status = "BATTLE"
+            decision = "BATTLE_IN_PROGRESS"
+            wait(0.25)
+            return
+        end
+
+        if readAtom(ArenaState.result) ~= nil then
+            if not resultHandled then
+                resultHandled = true
+                handleResultReconciliation(workerGeneration)
+            end
+            wait(0.5)
+            return
+        else
+            resultHandled = false
+        end
+
+        local view = getView()
+        if type(view) ~= "table" then
+            status = "WAITING FOR ARENA"
+            decision = "WAIT_FOR_ARENA"
+            refresh(true, workerGeneration)
+            wait(1)
+            return
+        end
+
+        if view.available ~= true then
+            status = "ARENA UNAVAILABLE"
+            decision = "WAIT_FOR_ARENA"
+            refresh(false, workerGeneration)
+            wait(refreshInterval)
+            return
+        end
+        if view.unlocked ~= true then
+            status = "ARENA LOCKED"
+            decision = "WAIT_FOR_ARENA"
+            wait(refreshInterval)
+            return
+        end
+
+        if not viewReady(view) then
+            status = "WAITING FOR ARENA"
+            decision = "WAIT_FOR_OPPONENT"
+            refresh(false, workerGeneration)
+            wait(1)
+            return
+        end
+
+        local opponent, index = currentOpponent(view)
+        local myPowerRaw = view.teamPower
+        local opponentPowerRaw = opponent and opponent.power
+        local myPower = parsePower(myPowerRaw)
+        local opponentPower = parsePower(opponentPowerRaw)
+        if not myPower or not opponentPower then
+            status = "POWER UNAVAILABLE"
+            decision = "POWER_UNAVAILABLE"
+            recordError("power parse failed; my=" .. tostring(myPowerRaw) .. " opponent=" .. tostring(opponentPowerRaw))
+            refresh(true, workerGeneration)
+            wait(failureBackoff)
+            return
+        end
+
+        local fingerprint = opponentFingerprint(view)
+        if fingerprint ~= lastOpponentFingerprint then
+            lastOpponentFingerprint = fingerprint
+            log("info", "[Arena] opponent ready index=" .. tostring(index) .. " id=" .. tostring(opponentId(opponent)))
+        end
+
+        if opponentPower > myPower then
+            local skipsRemaining = tonumber(view.skips) or 0
+
+            if skipsRemaining > 0 then
+                -- While Arena refresh/skip charges are available, preserve the
+                -- existing behavior: keep searching for a lower-power opponent.
+                status = "SKIPPING"
+                decision = "SKIP"
+                local oldFingerprint = fingerprint
+                local oldSkips = skipsRemaining
+                if oldFingerprint == lastSkipFingerprint then
+                    wait(0.25)
+                    return
+                end
+                lastSkipFingerprint = oldFingerprint
+                if not isCurrentWorker(workerGeneration) then
+                    return
+                end
+                local ok, _, errorMessage = safeRequest("skip", ArenaClient.skip)
+                if not ok then
+                    lastSkipFingerprint = nil
+                    recordError("Skip failed: " .. tostring(errorMessage))
+                    refresh(true, workerGeneration)
+                    wait(failureBackoff)
+                    return
+                end
+                log("info", "[Arena] skip success")
+                if not reconcileAfterSkip(oldFingerprint, oldSkips, workerGeneration) then
+                    recordError("Skip succeeded but opponent reconciliation timed out")
+                    -- Keep the old fingerprint locked. A later worker pass may observe
+                    -- the authoritative change; it must not send a duplicate Skip first.
+                    wait(failureBackoff)
+                    return
+                end
+                lastSkipFingerprint = nil
+                return
+            end
+
+            -- No refresh/skip charge is currently available (for example 0/0
+            -- during its refill countdown). Do NOT pause Auto Arena. Fight the
+            -- current opponent and let the normal Arena loop continue.
+            status = "NO REFRESH — FIGHTING CURRENT"
+            decision = "BATTLE_NO_REFRESH"
+            log("info", "[Arena] refresh unavailable; fighting current opponent instead of waiting")
+        end
+
+        decision = "BATTLE"
+        if not isCurrentWorker(workerGeneration) then
+            return
+        end
+        if not ensureOfficialAuto() then
+            status = "ERROR / RETRY"
+            wait(failureBackoff)
+            return
+        end
+
+        status = "STARTING BATTLE"
+        if not isCurrentWorker(workerGeneration) then
+            return
+        end
+        local ok, _, errorMessage = safeRequest("fight", ArenaClient.fight)
+        if not ok then
+            recordError("Fight failed: " .. tostring(errorMessage))
+            refresh(true, workerGeneration)
+            wait(failureBackoff)
+            return
+        end
+        log("info", "[Arena] fight requested")
+        status = "BATTLE"
+        if not waitForBattleStart(startTimeout, workerGeneration) then
+            recordError("Fight returned success but battle start was not confirmed")
+            refresh(true, workerGeneration)
+            wait(failureBackoff)
+            return
+        end
+        log("info", "[Arena] battle started")
+    end
+
+    local function worker(workerGeneration)
+        if workerRunning then
+            restartRequested = true
+            return
+        end
+        workerRunning = true
+        activeWorkerGeneration = workerGeneration
+        while isCurrentWorker(workerGeneration) do
+            local ok, errorMessage = pcall(processCycle, workerGeneration)
+            if not ok then
+                recordError("worker error: " .. tostring(errorMessage))
+                wait(failureBackoff)
+            end
+            wait(0.1)
+        end
+        if activeWorkerGeneration == workerGeneration then
+            activeWorkerGeneration = nil
+        end
+        workerRunning = false
+        if restartRequested then
+            restartRequested = false
+            if enabled and not destroyed then
+                local newestGeneration = generation
+                spawn(function()
+                    worker(newestGeneration)
+                end)
+            end
+        end
+    end
+
+    local function startWorker()
+        if not enabled or destroyed then
+            return
+        end
+        if workerRunning then
+            restartRequested = true
+            return
+        end
+        local workerGeneration = generation
+        spawn(function()
+            worker(workerGeneration)
+        end)
+    end
+
+    local function onBattleState(payload)
+        if type(payload) ~= "table" then
+            return
+        end
+        if payload.phase == "started" then
+            status = "BATTLE"
+            decision = "BATTLE_IN_PROGRESS"
+            log("info", "[Arena] battle phase started")
+        elseif payload.phase == "finished" then
+            status = "WAITING FOR RESULT"
+            decision = "BATTLE_IN_PROGRESS"
+            log("info", "[Arena] battle phase finished; waiting for result")
+        end
+    end
+
+    local function onBattleResult(payload)
+        if type(payload) ~= "table" then
+            return
+        end
+        lastResult = clone(payload)
+        lastTrophyChange = payload.delta
+        resultHandled = false
+        status = "RESULT"
+        decision = "WAIT_FOR_ARENA"
+        log("info", "[Arena] battle result " .. (payload.won == true and "WIN" or "LOSS") .. " delta=" .. tostring(payload.delta))
+        if eventPending or next(pauseReasons) ~= nil then
+            status = "PAUSED FOR EVENT"
+            decision = "PAUSED_FOR_EVENT"
+        end
+    end
+
+    local function addConnection(connection)
+        if connection then
+            table.insert(connections, connection)
+        end
+        return connection
+    end
+
+    local function subscribeAtom(atom)
+        if not Charm or type(Charm.subscribe) ~= "function" or type(atom) ~= "function" then
+            return nil
+        end
+        local ok, connection = pcall(function()
+            return Charm.subscribe(atom, scheduleProcess)
+        end)
+        return ok and connection or nil
+    end
+
+    local function subscribeRemote(definition, callback)
+        if not Remotes or type(Remotes.onClient) ~= "function" or not definition then
+            return nil
+        end
+        local ok, connection = pcall(function()
+            return Remotes.onClient(definition, callback)
+        end)
+        if not ok then
+            log("warn", "[Arena] event subscription failed: " .. tostring(connection))
+            return nil
+        end
+        return connection
+    end
+
+    local function disconnectAll()
+        for i = #connections, 1, -1 do
+            local connection = connections[i]
+            if typeof(connection) == "RBXScriptConnection" then
+                pcall(function() connection:Disconnect() end)
+            elseif type(connection) == "function" then
+                pcall(connection)
+            end
+            connections[i] = nil
+        end
+    end
+
+    local API = {}
+
+    function API.setAutoArena(value)
+        if destroyed then return false end
+        local nextValue = value == true
+        enabled = nextValue
+        generation += 1
+        if not enabled then
+            status = "DISABLED"
+            decision = "WAIT_FOR_ARENA"
+            log("info", "[Arena] Auto Arena disabled; active battle is not cancelled")
+            return true
+        end
+        if not ensureOfficialAuto() then
+            enabled = false
+            status = "ERROR / RETRY"
+            return false
+        end
+        status = "WAITING FOR ARENA"
+        decision = "WAIT_FOR_ARENA"
+        nextAllowedAt = 0
+        startWorker()
+        log("info", "[Arena] Auto Arena enabled")
+        return true
+    end
+
+    function API.isEnabled()
+        return enabled
+    end
+
+    function API.setPaused(value, reason)
+        reason = tostring(reason or "EXTERNAL_EVENT")
+        if value == true then
+            pauseReasons[reason] = true
+            if isBattling() then
+                eventPending = true
+                status = "EVENT PENDING"
+                decision = "BATTLE_IN_PROGRESS"
+            elseif requestInProgress then
+                status = "PAUSED FOR EVENT"
+                decision = "PAUSED_FOR_EVENT"
+            else
+                status = "PAUSED FOR EVENT"
+                decision = "PAUSED_FOR_EVENT"
+            end
+            log("info", "[Arena] paused " .. reason)
+            return true
+        end
+
+        pauseReasons[reason] = nil
+        if next(pauseReasons) == nil and not isBattling() and readAtom(ArenaState.result) == nil then
+            eventPending = false
+            status = enabled and "RECONCILE" or "DISABLED"
+            decision = enabled and "WAIT_FOR_ARENA" or "WAIT_FOR_ARENA"
+            nextAllowedAt = 0
+            if enabled then
+                -- The worker owns Arena requests. If another request is active,
+                -- leave reconciliation to that worker after it returns.
+                if not requestInProgress then
+                    refresh(true)
+                end
+                startWorker()
+            end
+        end
+        return true
+    end
+
+    function API.isPaused()
+        return next(pauseReasons) ~= nil
+    end
+
+    function API.getPauseReasons()
+        return clone(pauseReasons)
+    end
+
+    function API.isBattling()
+        return isBattling()
+    end
+
+    function API.isEventPending()
+        return eventPending
+    end
+
+    function API.getStatus()
+        return status
+    end
+
+    function API.getMyPower()
+        local view = getView()
+        return view and view.teamPower or nil
+    end
+
+    function API.getOpponentPower()
+        local view = getView()
+        local opponent = currentOpponent(view)
+        return opponent and opponent.power or nil
+    end
+
+    function API.getOpponent()
+        local view = getView()
+        local opponent = currentOpponent(view)
+        return clone(opponent)
+    end
+
+    function API.getSkips()
+        local view = getView()
+        return view and view.skips or nil
+    end
+
+    function API.getMaxSkips()
+        local view = getView()
+        return view and view.maxSkips or nil
+    end
+
+    function API.getDecision()
+        return decision
+    end
+
+    function API.getCurrentRank()
+        local view = getView()
+        return view and (view.rankId or view.rank) or nil
+    end
+
+    function API.getTrophies()
+        local view = getView()
+        return view and view.trophies or nil
+    end
+
+    function API.getSeasonWins()
+        local view = getView()
+        return view and view.wins or nil
+    end
+
+    function API.getLastResult()
+        return clone(lastResult)
+    end
+
+    function API.getLastTrophyChange()
+        return lastTrophyChange
+    end
+
+    function API.getLastError()
+        return lastError
+    end
+
+    function API.refreshNow()
+        return refresh(true)
+    end
+
+    function API.destroy()
+        if destroyed then return end
+        destroyed = true
+        enabled = false
+        generation += 1
+        disconnectAll()
+        status = "DISABLED"
+        decision = "WAIT_FOR_ARENA"
+        log("info", "[Arena] Auto Arena destroyed; no active battle was cancelled")
+    end
+
+    if Remotes and Remotes.defs then
+        addConnection(subscribeRemote(Remotes.defs.ArenaBattleState, onBattleState))
+        addConnection(subscribeRemote(Remotes.defs.ArenaBattleResult, onBattleResult))
+    end
+    for _, name in ipairs({ "view", "loading", "busy", "picking", "battling", "result", "battle" }) do
+        addConnection(subscribeAtom(ArenaState[name]))
+    end
+
+    return API
+end
+
+-- Integration example:
+-- local AutoArenaFeature = createAutoArena({
+--     ArenaClient = Integration.modules.ArenaClient,
+--     ArenaState = Integration.modules.ArenaState,
+--     ArenaRankSettings = Integration.modules.ArenaRankSettings,
+--     Remotes = Integration.modules.Remotes,
+--     Charm = Integration.modules.Charm,
+--     log = log,
+-- })
+-- AutoArenaFeature.setAutoArena(true)
+
+local globalEnv = (getgenv and getgenv()) or _G
+globalEnv.UNO_AUTO_ARENA_FACTORY = createAutoArena
+return createAutoArena
+end
+
+
+__unoRunStage("03 03_UNO_HUB_AUTO_ARENA_PHASE9(1).lua", __unoStage03)
+
+
+local function __unoStage04()
+-- KRAKEN EGG COLLECTOR
+-- EXPERIMENTAL — SOURCE VERIFIED, RUNTIME UNVALIDATED
+-- Standalone integration-ready backend. No UI, Config Manager, Auto Arena, or golden-egg fight integration.
+-- The injected fireClientSignal dependency must map to the verified Event contract:
+-- LiveEventClientSignal({ eventName = "kraken", action = action, args = { eggId } })
+
+local function createKrakenEggCollector(deps)
+    assert(type(deps) == "table", "createKrakenEggCollector requires deps")
+
+    local taskWait = deps.taskWait or task.wait
+    local now = deps.now or os.clock
+    local log = deps.log or function(message) print("[Kraken] " .. tostring(message)) end
+
+    local getEventState = deps.getKrakenEventState
+    local isEventActive = deps.isKrakenActive
+    local getLandedEggs = deps.getLandedEggs
+    local getEggId = deps.getEggId
+    local getEggPosition = deps.getEggPosition
+    local getEggExpiry = deps.getEggExpiry
+    local isEggReady = deps.isEggReady
+    local moveTo = deps.moveTo
+    local fireClientSignal = deps.fireClientSignal
+    local onLiveEventSignal = deps.onLiveEventSignal
+
+    local enabled = false
+    local destroyed = false
+    local workerRunning = false
+    local requestInProgress = false
+    local generation = 0
+    local restartRequested = false
+    local signalDirty = true
+    local signalDisconnect = nil
+    local target = nil
+    local pending = {}
+    local attempted = {}
+    local completed = {}
+    local lastSuccess = nil
+    local lastError = nil
+    local status = "DISABLED"
+    local eventState = nil
+    local retryAt = 0
+    local openDeadline = 0
+    local claimDeadline = 0
+    local targetReward = nil
+    local pauseReasons = {}
+
+    local function setStatus(nextStatus, detail)
+        if status == nextStatus and detail == nil then return end
+        status = nextStatus
+        if detail then
+            log("[Kraken] " .. tostring(nextStatus) .. " " .. tostring(detail))
+        else
+            log("[Kraken] " .. tostring(nextStatus))
+        end
+    end
+
+    local function safeCall(callback, ...)
+        if type(callback) ~= "function" then
+            return false, "dependency unavailable"
+        end
+        local args = table.pack(...)
+        return pcall(function()
+            return callback(table.unpack(args, 1, args.n))
+        end)
+    end
+
+    local function currentWorker(myGeneration)
+        return enabled and not destroyed and myGeneration == generation
+    end
+
+    local function clearTarget()
+        target = nil
+        targetReward = nil
+        openDeadline = 0
+        claimDeadline = 0
+        requestInProgress = false
+    end
+
+    local function eventActive()
+        local ok, value = safeCall(isEventActive)
+        if ok and type(value) == "boolean" then
+            return value
+        end
+        if type(getEventState) == "function" then
+            local stateOk, state = safeCall(getEventState)
+            if stateOk and type(state) == "table" then
+                eventState = state
+                return state.active == true or state.id == "kraken" or state.eventName == "kraken"
+            end
+        end
+        return false
+    end
+
+    local function snapshotEventState()
+        if type(getEventState) == "function" then
+            local ok, value = safeCall(getEventState)
+            if ok then eventState = value end
+        end
+        return eventState
+    end
+
+    local function modelValid(item, expectedId)
+        if not item or not item.Parent then return false end
+        local ok, id = safeCall(getEggId, item)
+        if not ok or id == nil or tostring(id) ~= tostring(expectedId) then return false end
+        local expiryOk, expiresAt = safeCall(getEggExpiry, item)
+        if expiryOk and type(expiresAt) == "number" and expiresAt <= os.time() then return false end
+        if type(isEggReady) == "function" then
+            local readyOk, ready = safeCall(isEggReady, item)
+            if readyOk and ready == false then return false end
+        end
+        return true
+    end
+
+    local function scanTargets()
+        local found = {}
+        local ok, eggs = safeCall(getLandedEggs)
+        if not ok or type(eggs) ~= "table" then
+            return found
+        end
+        local characterPosition = nil
+        if type(deps.getPlayerPosition) == "function" then
+            local positionOk, position = safeCall(deps.getPlayerPosition)
+            if positionOk then characterPosition = position end
+        end
+        for _, item in pairs(eggs) do
+            if item and item.Parent then
+                local idOk, id = safeCall(getEggId, item)
+                if idOk and id ~= nil then
+                    id = tostring(id)
+                    local expiryOk, expiresAt = safeCall(getEggExpiry, item)
+                    if not (expiryOk and type(expiresAt) == "number" and expiresAt <= os.time()) then
+                        local positionOk, position = safeCall(getEggPosition, item)
+                        local distance = math.huge
+                        if positionOk and characterPosition and position then
+                            local delta = position - characterPosition
+                            distance = delta.Magnitude
+                        end
+                        found[id] = {
+                            id = id,
+                            instance = item,
+                            position = positionOk and position or nil,
+                            distance = distance,
+                            expiresAt = expiryOk and expiresAt or nil,
+                        }
+                    end
+                end
+            end
+        end
+        pending = found
+        return found
+    end
+
+    local function chooseTarget(found)
+        local best = nil
+        for id, item in pairs(found) do
+            if not completed[id] and not attempted[id] then
+                if not best or item.distance < best.distance then
+                    best = item
+                end
+            end
+        end
+        return best
+    end
+
+    local function fireAction(action, eggId)
+        if requestInProgress then
+            return false, "request already in progress"
+        end
+        if type(fireClientSignal) ~= "function" then
+            return false, "fireClientSignal dependency unavailable"
+        end
+        requestInProgress = true
+        local ok, result = safeCall(fireClientSignal, {
+            eventName = "kraken",
+            action = action,
+            args = { eggId },
+        })
+        requestInProgress = false
+        if not ok then
+            return false, result
+        end
+        if result == false then
+            return false, "action dependency rejected request"
+        end
+        return true
+    end
+
+    local function invalidate(reason)
+        if target then
+            log("[Kraken] target invalid id=" .. tostring(target.id) .. " reason=" .. tostring(reason))
+        end
+        clearTarget()
+        retryAt = now() + 1
+        setStatus("TARGET_INVALID", reason)
+        signalDirty = true
+    end
+
+    local function handleEggRoll(data)
+        if type(data) ~= "table" or data.id == nil then return end
+        local id = tostring(data.id)
+        if not target or tostring(target.id) ~= id then
+            return
+        end
+        if status ~= "WAITING_FOR_EGG_ROLL" then return end
+        targetReward = data.reward
+        local ok, result = fireAction("claimEgg", id)
+        if not ok then
+            lastError = "claimEgg: " .. tostring(result)
+            clearTarget()
+            retryAt = now() + 3
+            setStatus("ERROR_RETRY", lastError)
+            return
+        end
+        attempted[id] = true
+        claimDeadline = now() + 12
+        setStatus("WAITING_FOR_CONFIRMATION", "id=" .. id)
+        log("[Kraken] interaction accepted id=" .. id .. " reward=" .. tostring(data.reward))
+    end
+
+    local function onSignal(payload)
+        if type(payload) ~= "table" or payload.eventName ~= "kraken" then return end
+        signalDirty = true
+        local action = payload.action
+        local args = payload.args
+        local data = type(args) == "table" and args[1] or nil
+        if action == "eggRoll" then
+            handleEggRoll(data)
+        end
+    end
+
+    local function attachSignalObserver()
+        if signalDisconnect or type(onLiveEventSignal) ~= "function" then return end
+        local ok, disconnect = safeCall(onLiveEventSignal, onSignal)
+        if ok and type(disconnect) == "function" then
+            signalDisconnect = disconnect
+        elseif ok and disconnect == nil then
+            signalDisconnect = function() end
+        end
+    end
+
+    local function detachSignalObserver()
+        if signalDisconnect then
+            pcall(signalDisconnect)
+            signalDisconnect = nil
+        end
+    end
+
+    local function finishIfRemoved(myGeneration)
+        if not target or not currentWorker(myGeneration) then return false end
+        if target.instance and target.instance.Parent then
+            local idOk, currentId = safeCall(getEggId, target.instance)
+            if idOk and currentId ~= nil and tostring(currentId) == tostring(target.id) then
+                return false
+            end
+        end
+        completed[target.id] = true
+        lastSuccess = {
+            eggId = target.id,
+            reward = targetReward,
+            at = now(),
+        }
+        log("[Kraken] success id=" .. tostring(target.id))
+        clearTarget()
+        signalDirty = true
+        setStatus("SEARCH_NEXT")
+        return true
+    end
+
+    local function waitForMove(myGeneration, item)
+        if type(moveTo) ~= "function" then
+            return false, "moveTo dependency unavailable"
+        end
+        if not item.position then
+            return false, "egg position unavailable"
+        end
+        local ok, result = safeCall(moveTo, item.position, {
+            mode = "Tween",
+            stopDistance = 12,
+            maxInteractionDistance = 13,
+            target = item.instance,
+            eggId = item.id,
+            isCurrent = function() return currentWorker(myGeneration) and modelValid(item.instance, item.id) end,
+        })
+        if not currentWorker(myGeneration) then
+            return false, "worker superseded"
+        end
+        if not ok then return false, result end
+        if result == false then return false, "movement rejected" end
+        return true
+    end
+
+    local function work(myGeneration)
+        while currentWorker(myGeneration) do
+            if next(pauseReasons) ~= nil then
+                setStatus("PAUSED_FOR_EVENT")
+                taskWait(0.35)
+                continue
+            end
+            snapshotEventState()
+            if not eventActive() then
+                clearTarget()
+                setStatus("WAITING_FOR_KRAKEN")
+                taskWait(1)
+            elseif now() < retryAt then
+                taskWait(math.min(1, retryAt - now()))
+            elseif target and status == "WAITING_FOR_EGG_ROLL" then
+                if finishIfRemoved(myGeneration) then
+                    continue
+                end
+                if now() >= openDeadline then
+                    lastError = "eggRoll timeout for " .. tostring(target.id)
+                    attempted[target.id] = true
+                    clearTarget()
+                    retryAt = now() + 4
+                    setStatus("ERROR_RETRY", lastError)
+                else
+                    taskWait(0.25)
+                end
+            elseif target and status == "WAITING_FOR_CONFIRMATION" then
+                if finishIfRemoved(myGeneration) then
+                    continue
+                end
+                if now() >= claimDeadline then
+                    lastError = "claim confirmation timeout for " .. tostring(target.id)
+                    clearTarget()
+                    retryAt = now() + 5
+                    setStatus("ERROR_RETRY", lastError)
+                else
+                    taskWait(0.25)
+                end
+            else
+                local found = scanTargets()
+                if target and not modelValid(target.instance, target.id) then
+                    invalidate("despawned, expired, or no longer landed")
+                elseif not target then
+                    local selected = chooseTarget(found)
+                    if selected then
+                        target = selected
+                        setStatus("TARGET_READY", "id=" .. selected.id)
+                        log("[Kraken] target selected id=" .. selected.id)
+                        setStatus("MOVING_TO_EGG", "id=" .. selected.id)
+                        local moved, moveError = waitForMove(myGeneration, selected)
+                        if not moved then
+                            lastError = tostring(moveError)
+                            clearTarget()
+                            retryAt = now() + 3
+                            setStatus("ERROR_RETRY", lastError)
+                        elseif modelValid(selected.instance, selected.id) and eventActive() then
+                            local actionOk, actionError = fireAction("openEgg", selected.id)
+                            if actionOk then
+                                openDeadline = now() + 8
+                                setStatus("WAITING_FOR_EGG_ROLL", "id=" .. selected.id)
+                                log("[Kraken] interaction started id=" .. selected.id)
+                            else
+                                lastError = "openEgg: " .. tostring(actionError)
+                                attempted[selected.id] = true
+                                clearTarget()
+                                retryAt = now() + 3
+                                setStatus("ERROR_RETRY", lastError)
+                            end
+                        else
+                            invalidate("target invalid after movement")
+                        end
+                    else
+                        setStatus("WAITING_FOR_LANDED_EGG")
+                        taskWait(signalDirty and 0.25 or 1)
+                    end
+                end
+            end
+            signalDirty = false
+        end
+        workerRunning = false
+        if enabled and not destroyed and generation ~= myGeneration then
+            restartRequested = false
+            task.spawn(function()
+                local currentGeneration = generation
+                if enabled and not workerRunning then
+                    workerRunning = true
+                    work(currentGeneration)
+                end
+            end)
+        end
+    end
+
+    local api = {}
+
+    function api.setEnabled(value)
+        if destroyed then return false end
+        value = value == true
+        if enabled == value then
+            if value and not workerRunning then restartRequested = true end
+            return true
+        end
+        enabled = value
+        generation += 1
+        restartRequested = value
+        if enabled then
+            lastError = nil
+            attachSignalObserver()
+            if not workerRunning then
+                workerRunning = true
+                local myGeneration = generation
+                task.spawn(function() work(myGeneration) end)
+            end
+        else
+            detachSignalObserver()
+            clearTarget()
+            setStatus("DISABLED")
+        end
+        return true
+    end
+
+    function api.isEnabled()
+        return enabled and not destroyed
+    end
+    function api.setPaused(reason, value)
+        reason = tostring(reason or "EXTERNAL_EVENT")
+        if value == true then
+            pauseReasons[reason] = true
+        else
+            pauseReasons[reason] = nil
+        end
+        generation += 1
+        restartRequested = enabled
+        return true
+    end
+    function api.isPaused()
+        return next(pauseReasons) ~= nil
+    end
+    function api.getPauseReasons()
+        local result = {}
+        for reason in pairs(pauseReasons) do result[reason] = true end
+        return result
+    end
+    function api.cancelMovement()
+        generation += 1
+        restartRequested = enabled
+        return true
+    end
+
+    function api.getStatus()
+        return status
+    end
+
+    function api.getKrakenEventState()
+        snapshotEventState()
+        return eventState
+    end
+
+    function api.getActiveTarget()
+        if not target then return nil end
+        return {
+            eggId = target.id,
+            instance = target.instance,
+            position = target.position,
+            status = status,
+        }
+    end
+
+    function api.getPendingEggs()
+        local result = {}
+        for id, item in pairs(pending) do
+            result[id] = {
+                eggId = id,
+                instance = item.instance,
+                position = item.position,
+                distance = item.distance,
+                completed = completed[id] == true,
+                attempted = attempted[id] == true,
+            }
+        end
+        return result
+    end
+
+    function api.getLastEggId()
+        return lastSuccess and lastSuccess.eggId or nil
+    end
+
+    function api.getLastSuccess()
+        return lastSuccess
+    end
+
+    function api.getLastError()
+        return lastError
+    end
+
+    function api.destroy()
+        if destroyed then return end
+        destroyed = true
+        enabled = false
+        generation += 1
+        table.clear(pauseReasons)
+        detachSignalObserver()
+        clearTarget()
+        setStatus("DISABLED")
+    end
+
+    api.isWorkerRunning = function() return workerRunning end
+    api.isRequestInProgress = function() return requestInProgress end
+    api.getGeneration = function() return generation end
+    api.getAttempted = function() return attempted end
+    api.getCompleted = function() return completed end
+    api.isRestartRequested = function() return restartRequested end
+
+    return api
+end
+
+local globalEnv = (getgenv and getgenv()) or _G
+globalEnv.UNO_KRAKEN_EGG_COLLECTOR_FACTORY = createKrakenEggCollector
+return createKrakenEggCollector
+end
+
+
+__unoRunStage("04 04_UNO_HUB_KRAKEN_EGG_COLLECTOR_PHASE9(1).lua", __unoStage04)
+
+
+local function __unoStage05()
+-- EVENT PRIORITY COORDINATOR
+-- Standalone Phase 7 arbitration module.
+-- This file coordinates injected feature adapters only; it does not implement feature logic.
+
+local PRIORITY = {
+    HOT_EGG = 100,
+    EVENT_CAPSULE = 80,
+    KRAKEN_EGG = 70,
+    AUTO_ARENA = 40,
+    AUTO_TOWER = 20,
+    NORMAL_FARM = 10,
+}
+
+local DEFAULT_FEATURES = {
+    "HOT_EGG",
+    "EVENT_CAPSULE",
+    "KRAKEN_EGG",
+    "AUTO_ARENA",
+    "AUTO_TOWER",
+    "NORMAL_FARM",
+}
+
+local function createEventPriorityCoordinator(deps)
+    deps = type(deps) == "table" and deps or {}
+    local logger = deps.log or deps.logger
+    local features = deps.features or {}
+    local featureState = {}
+    local currentMovementOwner = nil
+    local currentPriority = nil
+    local lastPreemption = nil
+    local lastRelease = nil
+    local lastError = nil
+    local destroyed = false
+
+    local function log(level, message)
+        if type(logger) == "function" then
+            pcall(logger, level, message)
+        end
+    end
+
+    local function now()
+        return os.clock()
+    end
+
+    local function adapter(owner)
+        local feature = features[owner]
+        return type(feature) == "table" and feature or {}
+    end
+
+    local function ensureFeature(owner, priority)
+        if type(owner) ~= "string" or owner == "" then
+            return nil
+        end
+        local state = featureState[owner]
+        if not state then
+            state = {
+                owner = owner,
+                priority = tonumber(priority) or tonumber(PRIORITY[owner]) or 0,
+                requested = false,
+                enabled = true,
+                critical = false,
+                pauseReasons = {},
+                eventPending = false,
+                requestOptions = {},
+            }
+            featureState[owner] = state
+        elseif priority ~= nil then
+            state.priority = tonumber(priority) or state.priority
+        end
+        return state
+    end
+
+    for _, owner in ipairs(DEFAULT_FEATURES) do
+        ensureFeature(owner, PRIORITY[owner])
+    end
+    for owner, feature in pairs(features) do
+        ensureFeature(owner, type(feature) == "table" and feature.priority or nil)
+    end
+
+    local function isCriticalInternal(owner)
+        local state = ensureFeature(owner)
+        if not state then
+            return false
+        end
+        if state.critical then
+            return true
+        end
+        local feature = adapter(owner)
+        if type(feature.isCritical) == "function" then
+            local ok, result = pcall(feature.isCritical)
+            return ok and result == true
+        end
+        return false
+    end
+
+    local function setFeaturePaused(owner, reason, value)
+        local state = ensureFeature(owner)
+        if not state then
+            return false
+        end
+        reason = tostring(reason or "COORDINATOR")
+        if value == true then
+            if state.pauseReasons[reason] then
+                return true
+            end
+            state.pauseReasons[reason] = true
+            local feature = adapter(owner)
+            if type(feature.setPaused) == "function" then
+                local ok, result = pcall(feature.setPaused, reason, true)
+                if not ok then
+                    lastError = "pause failed for " .. owner .. ": " .. tostring(result)
+                    log("warn", "[Coordinator] " .. lastError)
+                    return false
+                end
+            end
+            log("info", "[Coordinator] paused " .. owner .. " reason=" .. reason)
+            return true
+        end
+        if not state.pauseReasons[reason] then
+            return true
+        end
+        state.pauseReasons[reason] = nil
+        local feature = adapter(owner)
+        if type(feature.setPaused) == "function" then
+            local ok, result = pcall(feature.setPaused, reason, false)
+            if not ok then
+                lastError = "resume failed for " .. owner .. ": " .. tostring(result)
+                log("warn", "[Coordinator] " .. lastError)
+                return false
+            end
+        end
+        log("info", "[Coordinator] resumed " .. owner)
+        return true
+    end
+
+    local function setArenaEventPending(value, reason)
+        local state = ensureFeature("AUTO_ARENA", PRIORITY.AUTO_ARENA)
+        if not state then
+            return
+        end
+        state.eventPending = value == true
+        local feature = adapter("AUTO_ARENA")
+        if type(feature.setEventPending) == "function" then
+            pcall(feature.setEventPending, state.eventPending, reason)
+        elseif type(feature.markEventPending) == "function" then
+            pcall(feature.markEventPending, state.eventPending, reason)
+        end
+    end
+
+    local function clearOwner(reason)
+        local oldOwner = currentMovementOwner
+        if not oldOwner then
+            return
+        end
+        currentMovementOwner = nil
+        currentPriority = nil
+        lastRelease = {
+            owner = oldOwner,
+            reason = reason,
+            at = now(),
+        }
+        if oldOwner == "AUTO_ARENA" then
+            setArenaEventPending(false, reason)
+        end
+        log("info", "[Coordinator] released " .. oldOwner)
+    end
+
+    local function cancelForPreemption(owner, byOwner)
+        local feature = adapter(owner)
+        if type(feature.cancelMovement) == "function" then
+            local ok, result = pcall(feature.cancelMovement, byOwner)
+            if not ok then
+                lastError = "cancel failed for " .. owner .. ": " .. tostring(result)
+                log("warn", "[Coordinator] " .. lastError)
+                return false
+            end
+        end
+        return true
+    end
+
+    local arbitrate
+
+    local function syncPauses()
+        local coordinatorPrefix = "COORDINATOR_OWNER:"
+
+        if not currentMovementOwner then
+            for owner, state in pairs(featureState) do
+                local staleReasons = {}
+                for reason in pairs(state.pauseReasons) do
+                    if string.sub(reason, 1, #coordinatorPrefix) == coordinatorPrefix then
+                        table.insert(staleReasons, reason)
+                    end
+                end
+                for _, reason in ipairs(staleReasons) do
+                    setFeaturePaused(owner, reason, false)
+                end
+            end
+            return
+        end
+
+        local ownerState = ensureFeature(currentMovementOwner, currentPriority)
+
+        for owner, state in pairs(featureState) do
+            local desiredReason = owner ~= currentMovementOwner
+                and (coordinatorPrefix .. currentMovementOwner)
+                or nil
+
+            -- Clear stale coordinator pauses from ALL features, including
+            -- the feature that just became the current owner.
+            local staleReasons = {}
+            for reason in pairs(state.pauseReasons) do
+                if string.sub(reason, 1, #coordinatorPrefix) == coordinatorPrefix
+                    and reason ~= desiredReason then
+                    table.insert(staleReasons, reason)
+                end
+            end
+            for _, reason in ipairs(staleReasons) do
+                setFeaturePaused(owner, reason, false)
+            end
+
+            if owner ~= currentMovementOwner then
+                if state.priority < ownerState.priority then
+                    setFeaturePaused(owner, desiredReason, true)
+                else
+                    setFeaturePaused(owner, desiredReason, false)
+                end
+            end
+        end
+    end
+
+    local function transferTo(owner, reason)
+        local state = ensureFeature(owner)
+        if not state then
+            return false
+        end
+        currentMovementOwner = owner
+        currentPriority = state.priority
+        if owner == "AUTO_ARENA" then
+            setArenaEventPending(false, reason)
+        end
+        local stateForOwner = ensureFeature(owner)
+        if stateForOwner then
+            stateForOwner.eventPending = false
+        end
+        syncPauses()
+        log("info", "[Coordinator] owner " .. tostring(reason and reason.oldOwner or "NONE")
+            .. " -> " .. owner)
+        return true
+    end
+
+    arbitrate = function()
+        if destroyed then
+            return false
+        end
+        local bestOwner = nil
+        local bestPriority = -math.huge
+        for owner, state in pairs(featureState) do
+            if state.requested and state.enabled and state.priority > bestPriority then
+                bestOwner = owner
+                bestPriority = state.priority
+            end
+        end
+        if currentMovementOwner then
+            local currentState = ensureFeature(currentMovementOwner)
+            if currentState and currentState.requested and currentState.enabled then
+                if bestOwner == currentMovementOwner or bestPriority <= (currentPriority or -math.huge) then
+                    syncPauses()
+                    return true
+                end
+                if isCriticalInternal(currentMovementOwner) then
+                    if bestOwner then
+                        currentState.eventPending = true
+                        if currentMovementOwner == "AUTO_ARENA" then
+                            setArenaEventPending(true, bestOwner)
+                        end
+                        log("info", "[Coordinator] current owner critical; " .. bestOwner .. " pending")
+                    end
+                    syncPauses()
+                    return true
+                end
+                local oldOwner = currentMovementOwner
+                lastPreemption = {
+                    from = oldOwner,
+                    to = bestOwner,
+                    at = now(),
+                }
+                log("info", "[Coordinator] preempt requested " .. bestOwner)
+                cancelForPreemption(oldOwner, bestOwner)
+                setFeaturePaused(oldOwner, "COORDINATOR_OWNER:" .. bestOwner, true)
+                clearOwner({ oldOwner = oldOwner, reason = "preempted_by_" .. bestOwner })
+            else
+                clearOwner("stale_owner")
+            end
+        end
+        if bestOwner then
+            return transferTo(bestOwner, { oldOwner = lastRelease and lastRelease.owner or "NONE" })
+        end
+        syncPauses()
+        return true
+    end
+
+    local function requestPriority(owner, priority, options)
+        if destroyed then
+            return false
+        end
+        local state = ensureFeature(owner, priority)
+        if not state then
+            return false
+        end
+        options = type(options) == "table" and options or {}
+        state.requested = true
+        state.enabled = options.enabled ~= false
+        state.requestOptions = options
+        if options.critical ~= nil then
+            state.critical = options.critical == true
+        end
+        log("info", "[Coordinator] request " .. owner .. " priority=" .. tostring(state.priority))
+        return arbitrate()
+    end
+
+    local function releasePriority(owner)
+        local state = ensureFeature(owner)
+        if not state then
+            return false
+        end
+        state.requested = false
+        state.requestOptions = {}
+        if owner == "AUTO_ARENA" then
+            setArenaEventPending(false, "release")
+        end
+        if currentMovementOwner == owner then
+            clearOwner("releasePriority")
+        end
+        return arbitrate()
+    end
+
+    local function acquireMovement(owner, priority)
+        return requestPriority(owner, priority)
+    end
+
+    local function releaseMovement(owner)
+        return releasePriority(owner)
+    end
+
+    local function setFeatureEnabled(owner, value)
+        local state = ensureFeature(owner)
+        if not state then
+            return false
+        end
+        state.enabled = value == true
+        if not state.enabled and currentMovementOwner == owner then
+            clearOwner("feature_disabled")
+        end
+        return arbitrate()
+    end
+
+    local function setCritical(owner, value)
+        local state = ensureFeature(owner)
+        if not state then
+            return false
+        end
+        state.critical = value == true
+        if not state.critical then
+            if owner == "AUTO_ARENA" then
+                setArenaEventPending(false, "critical_ended")
+            end
+            log("info", "[Coordinator] critical ended " .. owner)
+        end
+        return arbitrate()
+    end
+
+    local function isOwnerActive(owner)
+        return currentMovementOwner == owner
+    end
+
+    local function getCurrentOwner()
+        return currentMovementOwner
+    end
+
+    local function getCurrentPriority()
+        return currentPriority
+    end
+
+    local function getPendingRequests()
+        local result = {}
+        for owner, state in pairs(featureState) do
+            result[owner] = {
+                requested = state.requested,
+                priority = state.priority,
+                critical = isCriticalInternal(owner),
+                eventPending = state.eventPending,
+            }
+        end
+        return result
+    end
+
+    local function getPausedFeatures()
+        local result = {}
+        for owner, state in pairs(featureState) do
+            local reasons = {}
+            for reason in pairs(state.pauseReasons) do
+                table.insert(reasons, reason)
+            end
+            result[owner] = reasons
+        end
+        return result
+    end
+
+    local function getDebugState()
+        return {
+            owner = currentMovementOwner,
+            priority = currentPriority,
+            pending = getPendingRequests(),
+            critical = (function()
+                local result = {}
+                for owner in pairs(featureState) do result[owner] = isCriticalInternal(owner) end
+                return result
+            end)(),
+            paused = getPausedFeatures(),
+            eventPending = (function()
+                local result = {}
+                for owner, state in pairs(featureState) do result[owner] = state.eventPending end
+                return result
+            end)(),
+            lastPreemption = lastPreemption,
+            lastRelease = lastRelease,
+            lastError = lastError,
+        }
+    end
+
+    local function destroy()
+        if destroyed then
+            return
+        end
+        destroyed = true
+        for owner, state in pairs(featureState) do
+            for reason in pairs(state.pauseReasons) do
+                local feature = adapter(owner)
+                if type(feature.setPaused) == "function" then
+                    pcall(feature.setPaused, reason, false)
+                end
+            end
+            state.pauseReasons = {}
+        end
+        setArenaEventPending(false, "destroy")
+        currentMovementOwner = nil
+        currentPriority = nil
+        log("info", "[Coordinator] destroyed")
+    end
+
+    return {
+        PRIORITY = PRIORITY,
+        requestPriority = requestPriority,
+        releasePriority = releasePriority,
+        acquireMovement = acquireMovement,
+        releaseMovement = releaseMovement,
+        setFeatureEnabled = setFeatureEnabled,
+        setCritical = setCritical,
+        isCritical = isCriticalInternal,
+        isOwnerActive = isOwnerActive,
+        getCurrentOwner = getCurrentOwner,
+        getCurrentPriority = getCurrentPriority,
+        getPendingRequests = getPendingRequests,
+        getPausedFeatures = getPausedFeatures,
+        getStatus = getDebugState,
+        getDebugState = getDebugState,
+        destroy = destroy,
+    }
+end
+
+local globalEnv = (getgenv and getgenv()) or _G
+globalEnv.UNO_EVENT_PRIORITY_COORDINATOR_FACTORY = createEventPriorityCoordinator
+
+globalEnv.UNO_EVENT_PRIORITY = PRIORITY
+
+return createEventPriorityCoordinator
+end
+
+
+__unoRunStage("05 05_UNO_HUB_EVENT_PRIORITY_COORDINATOR_PHASE9(1).lua", __unoStage05)
+
+
+local function __unoStage06()
+-- UNO HUB PRIORITY INTEGRATION
+-- Phase 8 thin compatibility bridge. It does not duplicate feature logic.
+
+local function createUNOHubPriorityIntegration(deps)
+    deps = type(deps) == "table" and deps or {}
+    local env = (getgenv and getgenv()) or _G
+    local runtime = deps.runtime or env.UNO_HUB_RUNTIME
+    local coordinatorFactory = deps.coordinatorFactory or env.UNO_EVENT_PRIORITY_COORDINATOR_FACTORY
+    local scheduler = deps.task or task
+    local logger = deps.log or function(level, message)
+        if runtime and runtime.State and runtime.State.log then
+            table.insert(runtime.State.log, 1, {
+                t = os.clock(),
+                level = level,
+                text = tostring(message),
+            })
+        end
+    end
+
+    assert(type(runtime) == "table", "UNOHUB runtime bridge is required")
+    assert(type(coordinatorFactory) == "function", "priority coordinator factory is required")
+
+    local backends = deps.backends or {}
+    local destroyed = false
+    local running = false
+    local workerToken = { cancelled = false }
+    local connections = {}
+    local requestCache = {}
+    local criticalCache = {}
+
+    local function log(level, message)
+        pcall(logger, level, message)
+    end
+
+    local function safeCall(fn, ...)
+        if type(fn) ~= "function" then
+            return false, nil
+        end
+        local ok, result = pcall(fn, ...)
+        return ok, result
+    end
+
+    local function wait(seconds)
+        if scheduler and type(scheduler.wait) == "function" then
+            scheduler.wait(seconds)
+        end
+    end
+
+    local function spawn(fn)
+        if scheduler and type(scheduler.spawn) == "function" then
+            return scheduler.spawn(fn)
+        end
+        return nil
+    end
+
+    local function setMainPause(kind, reason, value)
+        local fn = kind == "HOT_EGG"
+            and runtime.setHotEggCoordinatorPaused
+            or runtime.setNormalFarmCoordinatorPaused
+        if type(fn) == "function" then
+            return pcall(fn, reason, value)
+        end
+        return false
+    end
+
+    local function makeHotEggAdapter()
+        return {
+            setPaused = function(reason, value)
+                setMainPause("HOT_EGG", reason, value)
+            end,
+            cancelMovement = function(byOwner)
+                if type(runtime.cancelMovement) == "function" then
+                    return runtime.cancelMovement(byOwner)
+                end
+                return true
+            end,
+            isCritical = function()
+                return false
+            end,
+        }
+    end
+
+    local function makeNormalFarmAdapter()
+        return {
+            setPaused = function(reason, value)
+                local reasonText = tostring(reason or "")
+
+                -- NORMAL_FARM is pet-side automation. These world-event owners
+                -- move the PLAYER, so they may coexist with pet farming.
+                if reasonText == "COORDINATOR_OWNER:HOT_EGG"
+                    or reasonText == "COORDINATOR_OWNER:EVENT_CAPSULE"
+                    or reasonText == "COORDINATOR_OWNER:KRAKEN_EGG" then
+                    setMainPause("NORMAL_FARM", reasonText, false)
+                    return true
+                end
+
+                return setMainPause("NORMAL_FARM", reasonText, value)
+            end,
+            cancelMovement = function(byOwner)
+                -- Do not cancel NORMAL_FARM just because a player-movement event
+                -- took priority. Pet-side farm can continue independently.
+                if byOwner == "HOT_EGG"
+                    or byOwner == "EVENT_CAPSULE"
+                    or byOwner == "KRAKEN_EGG" then
+                    return true
+                end
+                if type(runtime.cancelMovement) == "function" then
+                    return runtime.cancelMovement(byOwner)
+                end
+                return true
+            end,
+            isCritical = function()
+                return false
+            end,
+        }
+    end
+
+    local function makeEventAdapter()
+        local backend = backends.EVENT_CAPSULE
+        assert(type(backend) == "table", "EVENT_CAPSULE backend is required")
+        return {
+            setPaused = function(reason, value)
+                if type(backend.setPaused) == "function" then
+                    return backend.setPaused(reason, value)
+                end
+                return false
+            end,
+            cancelMovement = function(byOwner)
+                if type(backend.cancelMovement) == "function" then
+                    return backend.cancelMovement("coordinator_preempt:" .. tostring(byOwner))
+                end
+                return false
+            end,
+            isCritical = function()
+                if type(backend.isDepositing) == "function" then
+                    return backend.isDepositing() == true
+                end
+                local status = type(backend.getStatus) == "function" and backend.getStatus() or nil
+                return status == "DEPOSITING" or status == "WAITING_FOR_DEPOSIT_CONFIRMATION"
+            end,
+        }
+    end
+
+    local function makeArenaAdapter()
+        local backend = backends.AUTO_ARENA
+        if type(backend) ~= "table" then
+            return {}
+        end
+        return {
+            setPaused = function(reason, value)
+                if type(backend.setPaused) == "function" then
+                    return backend.setPaused(value == true, reason)
+                end
+                return false
+            end,
+            cancelMovement = function(byOwner)
+                -- Arena cancellation is deliberately not requested for a critical battle.
+                if type(backend.cancelMovement) == "function" then
+                    return backend.cancelMovement(byOwner)
+                end
+                return true
+            end,
+            isCritical = function()
+                if type(backend.isBattling) == "function" then
+                    return backend.isBattling() == true
+                end
+                return false
+            end,
+            setEventPending = function(value, reason)
+                if type(backend.setEventPending) == "function" then
+                    return backend.setEventPending(value == true, reason)
+                end
+                return true
+            end,
+        }
+    end
+
+    local function makeAutoTowerAdapter()
+        return {
+            setPaused = function(reason, value)
+                local tower = runtime.towerAutomation
+                if type(tower) ~= "table" then return false end
+                if value == true then
+                    return type(tower.pause) == "function" and tower.pause(reason) or false
+                end
+                return type(tower.resume) == "function" and tower.resume(reason) or false
+            end,
+            cancelMovement = function() return true end,
+            isCritical = function() return false end,
+        }
+    end
+
+    local function makeKrakenAdapter()
+        local backend = backends.KRAKEN_EGG
+        if type(backend) ~= "table" then
+            return {}
+        end
+        return {
+            setPaused = function(reason, value)
+                if type(backend.setPaused) == "function" then
+                    return backend.setPaused(reason, value)
+                end
+                return false
+            end,
+            isCritical = function()
+                return false
+            end,
+            cancelMovement = function(byOwner)
+                if type(backend.cancelMovement) == "function" then
+                    return backend.cancelMovement(byOwner)
+                end
+                return true
+            end,
+        }
+    end
+
+    local features = {
+        HOT_EGG = makeHotEggAdapter(),
+        EVENT_CAPSULE = makeEventAdapter(),
+        KRAKEN_EGG = makeKrakenAdapter(),
+        AUTO_ARENA = makeArenaAdapter(),
+        AUTO_TOWER = makeAutoTowerAdapter(),
+        NORMAL_FARM = makeNormalFarmAdapter(),
+    }
+    for _, owner in ipairs({ "HOT_EGG", "EVENT_CAPSULE", "KRAKEN_EGG", "AUTO_ARENA", "AUTO_TOWER", "NORMAL_FARM" }) do
+        requestCache[owner] = false
+        criticalCache[owner] = false
+    end
+
+    local coordinator = coordinatorFactory({
+        features = features,
+        log = function(level, message)
+            log(level, message)
+        end,
+    })
+
+    local function hotEggRequested()
+        local state = runtime.getHotEggState and runtime.getHotEggState() or runtime.State.hotEgg
+        if type(state) ~= "table" or state.enabled ~= true then
+            return false
+        end
+        if state.eventActive == true or state.holding == true then
+            return true
+        end
+        local phase = state.phase
+        return phase == "EVENT_STARTED" or phase == "SEARCHING_HOT_EGG"
+            or phase == "MOVING_TO_HOT_EGG" or phase == "VERIFYING_PICKUP"
+            or phase == "HOLDING_HOT_EGG" or phase == "EVADING_METEOR"
+            or phase == "METEOR_WARNING" or phase == "EXITING_PIT"
+    end
+
+    local function eventRequested()
+        local backend = backends.EVENT_CAPSULE
+        if type(backend) ~= "table" then return false end
+
+        -- UPCOMING countdown / toggle enabled alone must NOT pause NORMAL_FARM.
+        -- Request priority only when there is real capsule work.
+        local ok, pending = safeCall(backend.getPendingCapsules)
+        if ok and type(pending) == "table" and #pending > 0 then
+            return true
+        end
+
+        local statusOk, status = safeCall(backend.getStatus)
+        if not statusOk then return false end
+
+        local activeStatus = {
+            ["TARGET_READY"] = true,
+            ["MOVING_TO_CAPSULE"] = true,
+            ["WAITING_FOR_PICKUP_CONFIRMATION"] = true,
+            ["RETURNING_TO_RECYCLER"] = true,
+            ["FORCE_DEPOSIT"] = true,
+            ["DEPOSITING"] = true,
+            ["WAITING_FOR_DEPOSIT_CONFIRMATION"] = true,
+        }
+        return activeStatus[tostring(status)] == true
+    end
+
+    local function krakenRequested()
+        local backend = backends.KRAKEN_EGG
+        if type(backend) ~= "table" then return false end
+        local stateOk, state = safeCall(backend.getKrakenEventState)
+        if not stateOk or type(state) ~= "table" or state.active ~= true then
+            return false
+        end
+        local pendingOk, pending = safeCall(backend.getPendingEggs)
+        return pendingOk and type(pending) == "table" and next(pending) ~= nil
+    end
+
+    local function arenaRequested()
+        local backend = backends.AUTO_ARENA
+        if type(backend) ~= "table"
+            or type(backend.isEnabled) ~= "function"
+            or backend.isEnabled() ~= true
+            or (type(backend.isPaused) == "function" and backend.isPaused() == true) then
+            return false
+        end
+
+        -- IMPORTANT:
+        -- Auto Arena must NOT permanently starve NORMAL_FARM simply because
+        -- its toggle is enabled. It owns priority only while an Arena action
+        -- is actually in progress / critical.
+        if type(backend.isBattling) == "function" and backend.isBattling() == true then
+            return true
+        end
+
+        local status = type(backend.getStatus) == "function" and tostring(backend.getStatus()) or ""
+        local activeStatus = {
+            ["STARTING BATTLE"] = true,
+            ["BATTLE"] = true,
+            ["WAITING FOR RESULT"] = true,
+            ["SKIPPING"] = true,
+            ["RESULT"] = true,
+            ["RECONCILE"] = true,
+            ["EVENT PENDING"] = true,
+        }
+        return activeStatus[status] == true
+    end
+
+    local function autoTowerRequested()
+        if not (runtime.State and runtime.State.toggles and runtime.State.toggles.autoTower == true) then
+            return false
+        end
+        local tower = runtime.towerAutomation
+        if type(tower) ~= "table" or type(tower.getStatus) ~= "function" then return false end
+        local ok, status = pcall(tower.getStatus)
+        return ok and type(status) == "table" and status.enabled == true
+    end
+
+    local function normalFarmRequested()
+        local state = runtime.getNormalFarmState and runtime.getNormalFarmState() or runtime.State.autoFarmRebirth
+        return type(state) == "table" and state.enabled == true
+    end
+
+    local function syncFeature(owner, requested, critical)
+        requested = requested == true
+        critical = critical == true
+        if requestCache[owner] ~= requested then
+            requestCache[owner] = requested
+            if requested then
+                log("info", "[UNO Integration] request " .. owner)
+                coordinator.requestPriority(owner, nil, { critical = critical })
+            else
+                coordinator.releasePriority(owner)
+            end
+        end
+        if criticalCache[owner] ~= critical then
+            criticalCache[owner] = critical
+            coordinator.setCritical(owner, critical)
+            if owner == "EVENT_CAPSULE" and critical then
+                log("info", "[UNO Integration] EVENT_CAPSULE critical=true deposit")
+            elseif owner == "EVENT_CAPSULE" and not critical then
+                log("info", "[UNO Integration] EVENT_CAPSULE critical=false")
+            elseif owner == "AUTO_ARENA" and critical then
+                log("info", "[UNO Integration] AUTO_ARENA critical=true battle")
+            end
+        end
+    end
+
+    local function sync()
+        syncFeature("HOT_EGG", hotEggRequested(), false)
+        syncFeature("EVENT_CAPSULE", eventRequested(), features.EVENT_CAPSULE.isCritical())
+        syncFeature("KRAKEN_EGG", krakenRequested(), false)
+        local arenaCritical = features.AUTO_ARENA.isCritical()
+        syncFeature("AUTO_ARENA", arenaRequested(), arenaCritical)
+        syncFeature("AUTO_TOWER", autoTowerRequested(), false)
+        syncFeature("NORMAL_FARM", normalFarmRequested(), false)
+    end
+
+    local function run()
+        if running then return end
+        running = true
+        spawn(function()
+            while not workerToken.cancelled and not destroyed do
+                local ok, err = pcall(sync)
+                if not ok then
+                    log("warn", "[UNO Integration] sync error: " .. tostring(err))
+                end
+                wait(0.25)
+            end
+            running = false
+        end)
+    end
+
+    local function getState()
+        return coordinator.getDebugState()
+    end
+
+    local function destroy()
+        if destroyed then return end
+        destroyed = true
+        workerToken.cancelled = true
+        for _, connection in ipairs(connections) do
+            pcall(function() connection:Disconnect() end)
+        end
+        table.clear(connections)
+        if coordinator then coordinator.destroy() end
+        if deps.destroyBackends == true then
+            for _, backend in pairs(backends) do
+                if type(backend.destroy) == "function" then pcall(backend.destroy) end
+            end
+        end
+        if env.UNO_HUB_PRIORITY_INTEGRATION == api then
+            env.UNO_HUB_PRIORITY_INTEGRATION = nil
+        end
+    end
+
+    local api = {
+        coordinator = coordinator,
+        backends = backends,
+        run = run,
+        sync = sync,
+        getState = getState,
+        getCoordinator = function() return coordinator end,
+        destroy = destroy,
+    }
+    env.UNO_HUB_PRIORITY_INTEGRATION = api
+    return api
+end
+
+local globalEnv = (getgenv and getgenv()) or _G
+globalEnv.UNO_HUB_PRIORITY_INTEGRATION_FACTORY = createUNOHubPriorityIntegration
+return createUNOHubPriorityIntegration
+end
+
+
+__unoRunStage("06 06_UNO_HUB_PRIORITY_INTEGRATION_PHASE9(1).lua", __unoStage06)
+
+
+-- AUTO TOWER / FRONTIER STANDALONE BACKENDS
+local __unoTowerManagerOK, __unoTowerManagerResult = pcall(function()
+--[=[
+    UNO_TOWER_ENTRY_MANAGER_STANDALONE.lua
+
+    Public standalone Tower-entry package. Loading this file never starts Tower.
+    Execute runFrontierTest() or call requestEntry() explicitly.
+
+    Public API:
+      UNO_TOWER_ENTRY_MANAGER.getFrontierInfo()
+      UNO_TOWER_ENTRY_MANAGER.requestEntry(options)
+      UNO_TOWER_ENTRY_MANAGER.getStatus()
+      UNO_TOWER_ENTRY_MANAGER.declineContinue()
+      UNO_TOWER_ENTRY_MANAGER.runFrontierTest(options)
+      UNO_TOWER_ENTRY_MANAGER.destroy()
+
+    The host may inject dependencies through create(deps). When direct-executed,
+    the package resolves only the source-backed game modules and remotes below.
+]=]
+
+local env = (getgenv and getgenv()) or _G
+local previous = env.UNO_TOWER_ENTRY_MANAGER
+if type(previous) == "table" and type(previous.destroy) == "function" then
+    pcall(previous.destroy)
+end
+
+env.UNO_TOWER_ENTRY_MANAGER = nil
+
+local function safeRequire(instance)
+    if not instance then return nil end
+    local ok, value = pcall(require, instance)
+    return ok and value or nil
+end
+
+local function child(root, ...)
+    local current = root
+    for i = 1, select("#", ...) do
+        if not current then return nil end
+        local name = select(i, ...)
+        current = current:FindFirstChild(name)
+    end
+    return current
+end
+
+local function safeLog(deps, level, text)
+    if type(deps.log) == "function" then pcall(deps.log, level, text) else print(text) end
+end
+
+local function waitFor(deps, seconds)
+    if type(deps.wait) == "function" then
+        deps.wait(seconds)
+    elseif task and type(task.wait) == "function" then
+        task.wait(seconds)
+    end
+end
+
+local function now()
+    return os.clock()
+end
+
+local function number(value, fallback)
+    local n = tonumber(value)
+    return n or fallback
+end
+
+local function invoke(deps, name, ...)
+    if type(deps.invoke) ~= "function" then return false, nil, "INVOKER_UNAVAILABLE" end
+    local args = table.pack(...)
+    local ok, response = pcall(deps.invoke, name, table.unpack(args, 1, args.n))
+    if not ok then return false, nil, tostring(response) end
+    return true, response, nil
+end
+
+local function rejected(response)
+    return type(response) == "table" and response.ok == false
+end
+
+local function readAtom(moduleValue, key, fallback)
+    local value = moduleValue and moduleValue[key]
+    if type(value) == "function" then
+        local ok, result = pcall(value)
+        if ok then return result end
+    elseif value ~= nil then
+        return value
+    end
+    return fallback
+end
+
+local function stateIsRunning(state)
+    return state.active == true
+        or state.runActive == true
+        or state.status == "RUNNING"
+        or state.status == "FLOOR CLEARED"
+end
+
+local function resolveDirectDependencies()
+    local Players = game:GetService("Players")
+    local ReplicatedStorage = game:GetService("ReplicatedStorage")
+    local Workspace = game:GetService("Workspace")
+    local player = Players.LocalPlayer
+    local scripts = player and player:FindFirstChild("PlayerScripts")
+    local remotesModule = safeRequire(child(ReplicatedStorage, "Core", "Remotes"))
+    local dataController = safeRequire(child(scripts, "Core", "Data", "DataController"))
+    local chickenController = safeRequire(child(scripts, "Features", "Chicken", "controllers", "ChickenController"))
+    local chickenMode = safeRequire(child(scripts, "Features", "Chicken", "ChickenMode"))
+    local towerFloor = safeRequire(child(ReplicatedStorage, "Features", "Battle", "tower", "TowerFloor"))
+    local gameConfig = safeRequire(child(ReplicatedStorage, "Content", "GameConfig"))
+    local remotesFolder = ReplicatedStorage:FindFirstChild("Remotes")
+    local observed = { active = false, runActive = false, status = "IDLE", floor = nil, continueOpen = false }
+    local connections = {}
+
+    local function readAtomValue(atom)
+        if type(atom) ~= "function" then return nil end
+        local ok, value = pcall(atom)
+        return ok and value or nil
+    end
+
+    local function numberFromCharm(value)
+        if type(value) == "number" then return value end
+        if type(value) == "table" and type(value.toNumber) == "function" then
+            local ok, result = pcall(function() return value:toNumber() end)
+            if ok then return tonumber(result) end
+        end
+        return tonumber(value)
+    end
+
+    local function connect(name, callback)
+        local definition = remotesModule and remotesModule.defs and remotesModule.defs[name]
+        if definition and type(remotesModule.onClient) == "function" then
+            local ok, connection = pcall(remotesModule.onClient, definition, callback)
+            if ok and connection then table.insert(connections, connection) end
+        end
+    end
+
+    connect("TowerRunStarted", function(payload)
+        observed.active = true
+        observed.runActive = true
+        observed.status = "RUNNING"
+        if type(payload) == "table" then observed.floor = payload.floor or payload.index or observed.floor end
+    end)
+    connect("TowerFloorCleared", function(payload)
+        observed.active = true
+        observed.runActive = true
+        observed.status = "FLOOR CLEARED"
+        if type(payload) == "table" then observed.floor = payload.floor or payload.index or observed.floor end
+    end)
+    connect("TowerDefeat", function() observed.status = "K.O." end)
+    connect("TowerContinueOffer", function() observed.continueOpen = true end)
+    connect("TowerRunEnded", function() observed.active = false; observed.runActive = false; observed.status = "RUN ENDED"; observed.continueOpen = false end)
+    connect("TowerContinued", function() observed.active = true; observed.runActive = true; observed.status = "RUNNING"; observed.continueOpen = false end)
+
+    local function readTowerState()
+        local arena = Workspace:FindFirstChild("Arenas") and Workspace.Arenas:FindFirstChild("Arena2")
+        local attrActive = arena and arena:GetAttribute("TowerActive")
+        local attrFloor = arena and arena:GetAttribute("TowerFloor")
+        local result = {}
+        for key, value in pairs(observed) do result[key] = value end
+        if attrActive ~= nil then result.active = attrActive == true; result.runActive = attrActive == true end
+        if attrFloor ~= nil then result.floor = attrFloor end
+        return result
+    end
+
+    local function data(path)
+        if type(dataController) ~= "table" then return nil end
+        local current = dataController
+        for _, key in ipairs(path) do current = readAtom(current, key, nil) end
+        return current
+    end
+
+    local deps = {
+        invoke = function(name, ...)
+            local definition = remotesModule and remotesModule.defs and remotesModule.defs[name]
+            if definition and type(remotesModule.invoke) == "function" then
+                local kind = definition.kind or definition.type
+                if kind == "Function" then return remotesModule.invoke(definition, ...) end
+            end
+            local remote = remotesFolder and remotesFolder:FindFirstChild(name)
+            if remote and remote:IsA("RemoteFunction") then return remote:InvokeServer(...) end
+            error("missing Function remote " .. tostring(name))
+        end,
+        fire = function(name, ...)
+            local definition = remotesModule and remotesModule.defs and remotesModule.defs[name]
+            if definition and type(remotesModule.fire) == "function" then
+                local kind = definition.kind or definition.type
+                if kind == "Event" then return remotesModule.fire(definition, ...) end
+            end
+            local remote = remotesFolder and remotesFolder:FindFirstChild(name)
+            if remote and remote:IsA("RemoteEvent") then return remote:FireServer(...) end
+            error("missing Event remote " .. tostring(name))
+        end,
+        getTowerState = readTowerState,
+        getTowerBest = function() return number(data({ "towerBest" }), 0) end,
+        getMoney = function()
+            return number(numberFromCharm(readAtomValue(dataController and dataController.money)), 0)
+        end,
+        getMoneySourceInfo = function()
+            local raw = readAtomValue(dataController and dataController.money)
+            local numeric = numberFromCharm(raw)
+            return {
+                path = "PlayerScripts.Core.Data.DataController.money():toNumber()",
+                raw = raw,
+                numeric = numeric,
+            }
+        end,
+        getActiveChickenLevel = function()
+            local helper = readAtomValue(dataController and dataController.chicken)
+            if type(helper) == "table" and helper.level ~= nil then
+                return number(helper.level, 0)
+            end
+            local roster = readAtomValue(dataController and dataController.roster)
+            if type(roster) ~= "table" then return 0 end
+            local activeId = roster.activeId
+            for _, record in pairs(roster.chickens or {}) do
+                if type(record) == "table" and record.id == activeId then
+                    return number(record.level, 0)
+                end
+            end
+            return 0
+        end,
+        getChickenSourceInfo = function()
+            local roster = readAtomValue(dataController and dataController.roster)
+            local activeId = type(roster) == "table" and roster.activeId or nil
+            local matchedId = nil
+            local rawLevel = nil
+            local rawLevelSource = nil
+            local helper = readAtomValue(dataController and dataController.chicken)
+            if type(helper) == "table" then
+                matchedId = helper.id or activeId
+                rawLevel = helper.level
+                rawLevelSource = "DataController.chicken().level"
+            end
+            if rawLevel == nil and type(roster) == "table" then
+                for _, record in pairs(roster.chickens or {}) do
+                    if type(record) == "table" and record.id == activeId then
+                        matchedId = record.id
+                        rawLevel = record.level
+                        rawLevelSource = "DataController.roster().chickens[activeId].level"
+                        break
+                    end
+                end
+            end
+            return {
+                activeId = activeId,
+                matchedChickenId = matchedId,
+                rawLevel = rawLevel,
+                rawLevelSource = rawLevelSource,
+                resolvedLevel = number(rawLevel, 0),
+            }
+        end,
+        getTowerFloorMoney = function(index)
+            local row = towerFloor and type(towerFloor.at) == "function" and towerFloor.at(index)
+            return row and row.money
+        end,
+        getTowerFloorCount = function() return towerFloor and tonumber(towerFloor.count) or nil end,
+        getTowerMinFloor = function() return 2 end,
+        getTowerCostFactor = function() return number(gameConfig and gameConfig.premium and gameConfig.premium.elevator and gameConfig.premium.elevator.costFactor, 1) end,
+        getTowerVipDiscount = function() return number(gameConfig and gameConfig.premium and gameConfig.premium.elevator and gameConfig.premium.elevator.vipDiscount, 0.5) end,
+        hasElevatorVip = function()
+            local owned = data({ "owned" })
+            return type(owned) == "table" and owned.elevatorVip == true
+        end,
+        setChickenOrder = function(order)
+            if chickenController and type(chickenController.setOrder) == "function" then return chickenController:setOrder(order) end
+            if chickenMode and type(chickenMode.order) == "function" then return chickenMode.order(order) end
+            return false
+        end,
+        isPaused = function() return false end,
+        isClosed = function() return false end,
+        wait = task.wait,
+        log = function(level, text) print(text) end,
+        _connections = connections,
+    }
+    return deps
+end
+
+local function create(deps)
+    deps = deps or resolveDirectDependencies()
+    local destroyed = false
+    local busy = false
+    local sequence = 0
+    local lastResult = nil
+
+    local function towerState()
+        if type(deps.getTowerState) == "function" then
+            local ok, result = pcall(deps.getTowerState)
+            if ok and type(result) == "table" then return result end
+        end
+        return {}
+    end
+
+    local function waitStarted(deadline, token)
+        while now() < deadline do
+            if token and token.cancelled then return false, "CANCELLED" end
+            if type(deps.isClosed) == "function" and deps.isClosed() == true then return false, "CLOSED" end
+            if stateIsRunning(towerState()) then return true end
+            waitFor(deps, 0.25)
+        end
+        return false, "TOWER START TIMEOUT"
+    end
+
+    local function costFor(floor)
+        local total = 0
+        for index = 1, floor - 1 do
+            if type(deps.getTowerFloorMoney) ~= "function" then return nil, "TOWER FLOOR DATA UNAVAILABLE" end
+            local ok, value = pcall(deps.getTowerFloorMoney, index)
+            value = tonumber(value)
+            if not ok or value == nil then return nil, "TOWER FLOOR DATA UNAVAILABLE" end
+            total += value
+        end
+        local factor = number(type(deps.getTowerCostFactor) == "function" and deps.getTowerCostFactor(), 1)
+        local discount = number(type(deps.getTowerVipDiscount) == "function" and deps.getTowerVipDiscount(), 0.5)
+        local vip = type(deps.hasElevatorVip) == "function" and deps.hasElevatorVip() == true
+        return math.max(0, math.floor(total * factor * (1 - (vip and discount or 0)) + 0.5))
+    end
+
+    local function finish(result, id)
+        result.requestId = id
+        lastResult = result
+        busy = false
+        return result
+    end
+
+    local function normalStart(token, reason)
+        safeLog(deps, "INFO", "[UNO TowerEntry] FALLBACK_NORMAL_START " .. tostring(reason or ""))
+        if type(deps.setChickenOrder) == "function" then pcall(deps.setChickenOrder, "tower") end
+        local ok, response, errorValue = invoke(deps, "TowerStart")
+        if not ok or rejected(response) then return { ok = false, mode = "NORMAL", reason = errorValue or "TOWERSTART_REJECTED", response = response } end
+        local started, startError = waitStarted(now() + 6, token)
+        local state = towerState()
+        if not started then return { ok = false, mode = "NORMAL", reason = startError, response = response, state = state } end
+        safeLog(deps, "INFO", "[UNO TowerEntry] TowerStart accepted")
+        safeLog(deps, "INFO", "[UNO TowerEntry] TowerRunStarted floor=" .. tostring(state.floor or "?"))
+        return { ok = true, mode = "NORMAL", response = response, startedFloor = tonumber(state.floor), state = state }
+    end
+
+    local api = {}
+    function api.getFrontierInfo()
+        local best = number(type(deps.getTowerBest) == "function" and deps.getTowerBest(), 0)
+        local frontier = best + 1
+        local count = number(type(deps.getTowerFloorCount) == "function" and deps.getTowerFloorCount(), nil)
+        if count then frontier = math.min(frontier, count) end
+        local cost, costError = costFor(frontier)
+        local money = number(type(deps.getMoney) == "function" and deps.getMoney(), 0)
+        local level = number(type(deps.getActiveChickenLevel) == "function" and deps.getActiveChickenLevel(), 0)
+        return {
+            best = best, frontier = frontier, cost = cost, costError = costError,
+            money = money, level = level, affordable = cost ~= nil and money >= math.max(1, cost),
+            vip = type(deps.hasElevatorVip) == "function" and deps.hasElevatorVip() == true,
+        }
+    end
+
+    function api.debugDataSources()
+        local frontierInfo = api.getFrontierInfo()
+        local moneyInfo = type(deps.getMoneySourceInfo) == "function" and deps.getMoneySourceInfo() or {}
+        local chickenInfo = type(deps.getChickenSourceInfo) == "function" and deps.getChickenSourceInfo() or {}
+        local result = {
+            moneySourcePath = moneyInfo.path,
+            rawNumericMoney = moneyInfo.numeric,
+            activeId = chickenInfo.activeId,
+            matchedChickenId = chickenInfo.matchedChickenId,
+            rawChickenLevelSource = chickenInfo.rawLevelSource,
+            rawChickenLevel = chickenInfo.rawLevel,
+            resolvedChickenLevel = chickenInfo.resolvedLevel,
+            towerBest = frontierInfo.best,
+            frontier = frontierInfo.frontier,
+            cost = frontierInfo.cost,
+            vip = frontierInfo.vip,
+            affordable = frontierInfo.affordable,
+        }
+        for key, value in pairs(result) do
+            safeLog(deps, "INFO", "[UNO TowerEntry] " .. tostring(key) .. "=" .. tostring(value))
+        end
+        return result
+    end
+
+    function api.requestEntry(options)
+        options = options or {}
+        if destroyed then return { ok = false, reason = "DESTROYED" } end
+        if busy then return { ok = false, reason = "ENTRY_IN_FLIGHT" } end
+        if type(deps.isPaused) == "function" and deps.isPaused() == true then return { ok = false, reason = "PAUSED" } end
+        busy = true
+        sequence += 1
+        local id = sequence
+        local token = options.token or { cancelled = false }
+        if options.useFrontier ~= true then return finish(normalStart(token, "FRONTIER_OFF"), id) end
+        local info = api.getFrontierInfo()
+        safeLog(deps, "INFO", string.format("[UNO TowerEntry] best=%s", info.best))
+        safeLog(deps, "INFO", string.format("[UNO TowerEntry] frontier=%s", info.frontier))
+        safeLog(deps, "INFO", string.format("[UNO TowerEntry] money=%s", info.money))
+        safeLog(deps, "INFO", string.format("[UNO TowerEntry] cost=%s", tostring(info.cost)))
+        if info.level < 2 or info.frontier <= 1 or info.cost == nil then return finish(normalStart(token, info.costError or "FRONTIER_UNAVAILABLE"), id) end
+        if not info.affordable then
+            safeLog(deps, "INFO", "[UNO TowerEntry] INSUFFICIENT_FUNDS")
+            return finish(normalStart(token, "INSUFFICIENT_FUNDS"), id)
+        end
+        local invoked, response, errorValue = invoke(deps, "TowerElevator", info.frontier)
+        if not invoked or rejected(response) then return finish(normalStart(token, errorValue or "ELEVATOR_REJECTED"), id) end
+        safeLog(deps, "INFO", "[UNO TowerEntry] TowerElevator accepted")
+        if type(deps.setChickenOrder) == "function" then pcall(deps.setChickenOrder, "tower") end
+        local startedInvoke, startResponse, startError = invoke(deps, "TowerStart")
+        if not startedInvoke or rejected(startResponse) then return finish(normalStart(token, startError or "TOWERSTART_REJECTED"), id) end
+        safeLog(deps, "INFO", "[UNO TowerEntry] TowerStart accepted")
+        local started, timeoutError = waitStarted(now() + 6, token)
+        local state = towerState()
+        if started then
+            safeLog(deps, "INFO", "[UNO TowerEntry] TowerRunStarted floor=" .. tostring(state.floor or "?"))
+            safeLog(deps, "INFO", "[UNO TowerEntry] RESULT=FRONTIER_CONFIRMED")
+            return finish({ ok = true, mode = "FRONTIER", requestedFloor = info.frontier, startedFloor = tonumber(state.floor), response = response, startResponse = startResponse, state = state }, id)
+        end
+        return finish(normalStart(token, timeoutError or startError or "FRONTIER_TIMEOUT"), id)
+    end
+
+    function api.declineContinue()
+        if destroyed then return false, "DESTROYED" end
+        if type(deps.fire) ~= "function" then return false, "CONTINUE_DECLINE_EVENT_UNAVAILABLE" end
+        local ok, response = pcall(deps.fire, "TowerContinueDecline")
+        if not ok then return false, tostring(response) end
+        return true, response
+    end
+
+    function api.getStatus()
+        return { destroyed = destroyed, busy = busy, sequence = sequence, lastResult = lastResult, state = towerState(), frontier = api.getFrontierInfo() }
+    end
+
+    function api.runFrontierTest(options)
+        options = options or {}
+        options.useFrontier = true
+        return api.requestEntry(options)
+    end
+
+    function api.destroy()
+        destroyed = true
+        busy = false
+        for _, connection in ipairs(deps._connections or {}) do pcall(function() connection:Disconnect() end) end
+        deps._connections = {}
+    end
+
+    api.create = create
+    return api
+end
+
+local directDeps = resolveDirectDependencies()
+local manager = create(directDeps)
+env.UNO_TOWER_ENTRY_MANAGER_FACTORY = create
+env.UNO_TOWER_ENTRY_MANAGER = manager
+
+print("[UNO TowerEntry] STANDALONE READY (no automatic Tower start)")
+return manager
+
+end)
+if not __unoTowerManagerOK then
+    warn("[UNO TowerEntry] optional backend unavailable: " .. tostring(__unoTowerManagerResult))
+end
+
+local __unoAutoTowerOK, __unoAutoTowerResult = pcall(function()
+--[=[
+    UNO_AUTO_TOWER_STANDALONE.lua
+
+    Standalone Auto Tower backend. It has no UI dependency and never performs
+    Rebirth. Load the TowerEntryManager standalone first, or inject a manager
+    into create({ towerEntryManager = manager }). Loading never starts a worker.
+
+    Public API:
+      enable(), disable(), setUseFrontierSkip(value)
+      pause(reason), resume(reason), getStatus(), destroy()
+]=]
+
+local env = (getgenv and getgenv()) or _G
+local previous = env.UNO_AUTO_TOWER_STANDALONE
+if type(previous) == "table" and type(previous.destroy) == "function" then pcall(previous.destroy) end
+env.UNO_AUTO_TOWER_STANDALONE = nil
+
+local function safeLog(deps, level, text)
+    if type(deps.log) == "function" then pcall(deps.log, level, text) else print(text) end
+end
+
+local function waitFor(deps, seconds)
+    if type(deps.wait) == "function" then deps.wait(seconds)
+    elseif task and type(task.wait) == "function" then task.wait(seconds) end
+end
+
+local function spawnFor(deps, fn)
+    if type(deps.spawn) == "function" then return deps.spawn(fn) end
+    if task and type(task.spawn) == "function" then return task.spawn(fn) end
+    local thread = coroutine.create(fn)
+    coroutine.resume(thread)
+    return thread
+end
+
+local function isRunning(state)
+    return type(state) == "table" and (state.active == true or state.runActive == true or state.status == "RUNNING" or state.status == "FLOOR CLEARED")
+end
+
+local function isEnded(state)
+    return type(state) == "table"
+        and state.active ~= true
+        and state.runActive ~= true
+        and state.status ~= "RUNNING"
+        and state.status ~= "FLOOR CLEARED"
+        and state.status ~= "K.O."
+        and state.continueOpen ~= true
+end
+
+local function create(deps)
+    deps = deps or {}
+    local manager = deps.towerEntryManager or env.UNO_TOWER_ENTRY_MANAGER
+    local state = {
+        enabled = false,
+        destroyed = false,
+        phase = "DISABLED",
+        generation = 0,
+        paused = {},
+        useFrontierSkip = false,
+        startDelay = 30,
+        countdown = 0,
+        workerRunning = false,
+        runCount = 0,
+        lastResult = nil,
+        lastError = nil,
+        continueDeclineInFlight = false,
+        continueDeclineFailed = false,
+    }
+    local token = nil
+
+    local function paused()
+        if next(state.paused) ~= nil then return true end
+        if type(deps.isPaused) == "function" then
+            local ok, value = pcall(deps.isPaused)
+            if ok and value == true then return true end
+        end
+        return false
+    end
+
+    local function closed()
+        if type(deps.isClosed) == "function" then
+            local ok, value = pcall(deps.isClosed)
+            return ok and value == true
+        end
+        return false
+    end
+
+    local function towerState()
+        if type(deps.getTowerState) == "function" then
+            local ok, value = pcall(deps.getTowerState)
+            if ok and type(value) == "table" then return value end
+        end
+        if manager and type(manager.getStatus) == "function" then
+            local ok, status = pcall(manager.getStatus)
+            if ok and type(status) == "table" and type(status.state) == "table" then return status.state end
+        end
+        return {}
+    end
+
+    local function waitStartDelay(myToken)
+        local delaySeconds = math.max(0, math.floor(tonumber(state.startDelay) or 30))
+        state.countdown = delaySeconds
+        if delaySeconds <= 0 then return true end
+
+        while delaySeconds > 0 do
+            if state.destroyed or not state.enabled or myToken.cancelled or state.generation ~= myToken.generation then
+                state.countdown = 0
+                return false, "CANCELLED"
+            end
+            if paused() then
+                -- Restart the full configured delay after the blocking event ends.
+                state.countdown = 0
+                state.phase = "PAUSED"
+                return false, "PAUSED"
+            end
+            state.phase = "START_DELAY"
+            state.countdown = delaySeconds
+            waitFor(deps, 1)
+            delaySeconds -= 1
+        end
+
+        state.countdown = 0
+        return true
+    end
+
+    local function declineContinue()
+        if state.continueDeclineInFlight then return end
+        state.continueDeclineInFlight = true
+        state.phase = "DECLINING_CONTINUE"
+        local ok, reason = false, "CONTINUE_DECLINE_UNAVAILABLE"
+        if manager and type(manager.declineContinue) == "function" then
+            ok, reason = manager.declineContinue()
+        elseif type(deps.declineContinue) == "function" then
+            ok, reason = pcall(deps.declineContinue)
+        end
+        state.continueDeclineInFlight = false
+        if not ok then
+            state.continueDeclineFailed = true
+            state.lastError = tostring(reason)
+            state.phase = "WAITING_EXIT_AFTER_DECLINE_FAILURE"
+        else
+            state.continueDeclineFailed = false
+            state.lastError = nil
+        end
+    end
+
+    local function worker(myToken)
+        state.workerRunning = true
+        while state.enabled and not state.destroyed and not myToken.cancelled and state.generation == myToken.generation do
+            if closed() then
+                state.lastError = "CLOSED"
+                break
+            elseif paused() then
+                state.phase = "PAUSED"
+                waitFor(deps, 0.35)
+            elseif not manager or type(manager.requestEntry) ~= "function" then
+                state.phase = "UNAVAILABLE"
+                state.lastError = "TOWER_ENTRY_MANAGER_UNAVAILABLE"
+                waitFor(deps, 2)
+            else
+                local current = towerState()
+                if current.continueOpen == true then
+                    if not state.continueDeclineFailed then
+                        declineContinue()
+                    else
+                        state.phase = "WAITING_EXIT_AFTER_DECLINE_FAILURE"
+                    end
+                    waitFor(deps, 0.5)
+                elseif state.continueDeclineFailed then
+                    local authoritativeExit = current.status == "RUN ENDED"
+                        or (current.active ~= true and current.runActive ~= true and current.status ~= "K.O." and current.continueOpen ~= true)
+                    if authoritativeExit then
+                        state.continueDeclineFailed = false
+                        state.lastError = nil
+                        state.phase = "WAITING"
+                    else
+                        state.phase = "WAITING_EXIT_AFTER_DECLINE_FAILURE"
+                        waitFor(deps, 0.5)
+                    end
+                elseif isRunning(current) then
+                    state.phase = "TOWER_RUNNING"
+                    waitFor(deps, 0.5)
+                elseif current.status == "K.O." then
+                    state.phase = "WAITING_EXIT"
+                    waitFor(deps, 0.35)
+                elseif isEnded(current) or current.status == "IDLE" or current.status == "ERROR" then
+                    local delayOK, delayReason = waitStartDelay(myToken)
+                    if not delayOK then
+                        if delayReason == "PAUSED" then
+                            state.phase = "PAUSED"
+                            waitFor(deps, 0.35)
+                            continue
+                        end
+                        break
+                    end
+
+                    state.phase = "STARTING_TOWER"
+                    local ok, result = pcall(manager.requestEntry, {
+                        owner = "AUTO_TOWER",
+                        useFrontier = state.useFrontierSkip,
+                        token = myToken,
+                    })
+                    if not ok then
+                        state.lastError = tostring(result)
+                        state.lastResult = { ok = false, mode = "NORMAL", reason = state.lastError }
+                        state.phase = "RETRY_WAIT"
+                        waitFor(deps, 5)
+                    else
+                        state.lastResult = result
+                        if type(result) == "table" and result.ok == true then
+                            state.runCount += 1
+                            state.lastError = nil
+                            state.phase = "TOWER_RUNNING"
+                        elseif type(result) == "table" and (result.reason == "PAUSED" or result.reason == "CANCELLED") then
+                            state.phase = "PAUSED"
+                        else
+                            state.lastError = type(result) == "table" and result.reason or "ENTRY_FAILED"
+                            state.phase = "RETRY_WAIT"
+                            waitFor(deps, 5)
+                        end
+                    end
+                else
+                    waitFor(deps, 0.4)
+                end
+            end
+        end
+        state.workerRunning = false
+        if not state.enabled then state.phase = "DISABLED" end
+    end
+
+    local api = {}
+    function api.enable()
+        if state.destroyed then return false end
+        if state.enabled then return true end
+        state.enabled = true
+        state.generation += 1
+        token = { cancelled = false, generation = state.generation }
+        state.phase = "WAITING"
+        spawnFor(deps, function() worker(token) end)
+        return true
+    end
+
+    function api.disable()
+        state.enabled = false
+        state.generation += 1
+        if token then token.cancelled = true end
+        state.phase = "DISABLED"
+        return true
+    end
+
+    function api.setUseFrontierSkip(value)
+        state.useFrontierSkip = value == true
+        return true
+    end
+
+    function api.setStartDelay(value)
+        value = tonumber(value)
+        if not value then return false end
+        state.startDelay = math.clamp(math.floor(value + 0.5), 0, 120)
+        return true
+    end
+
+    function api.pause(reason)
+        state.paused[tostring(reason or "PAUSE")] = true
+        return true
+    end
+
+    function api.resume(reason)
+        state.paused[tostring(reason or "PAUSE")] = nil
+        if state.enabled and next(state.paused) == nil then state.phase = "WAITING" end
+        return true
+    end
+
+    function api.getStatus()
+        local reasons = {}
+        for reason in pairs(state.paused) do reasons[#reasons + 1] = reason end
+        return {
+            enabled = state.enabled,
+            destroyed = state.destroyed,
+            phase = state.phase,
+            workerRunning = state.workerRunning,
+            useFrontierSkip = state.useFrontierSkip,
+            startDelay = state.startDelay,
+            countdown = state.countdown,
+            runCount = state.runCount,
+            lastResult = state.lastResult,
+            lastError = state.lastError,
+            pauseReasons = reasons,
+            towerState = towerState(),
+        }
+    end
+
+    function api.destroy()
+        if state.destroyed then return end
+        api.disable()
+        state.destroyed = true
+        if env.UNO_AUTO_TOWER_STANDALONE == api then env.UNO_AUTO_TOWER_STANDALONE = nil end
+    end
+
+    api.create = create
+    api.towerEntryManager = manager
+    return api
+end
+
+local api = create({ towerEntryManager = env.UNO_TOWER_ENTRY_MANAGER })
+env.UNO_AUTO_TOWER_STANDALONE = api
+print("[UNO AutoTower] STANDALONE READY (disabled; no Rebirth)")
+return api
+
+end)
+if not __unoAutoTowerOK then
+    warn("[UNO AutoTower] optional backend unavailable: " .. tostring(__unoAutoTowerResult))
+end
+
+local function __unoStage07()
+-- UNO HUB PHASE 9 AUTOMATIC RUNTIME BOOTSTRAP
+-- Constructs real backend instances from source-backed game modules.
+-- It never fabricates Arena/Kraken dependencies and never claims runtime PASS.
+
+local env = (getgenv and getgenv()) or _G
+local old = env.UNO_HUB_PHASE9
+if old and type(old.destroy) == "function" then
+    pcall(old.destroy)
+end
+
+local status = "BOOTSTRAPPING"
+local lastError = nil
+local backends: {[string]: any} = {}
+local integration: any = nil
+local destroyed = false
+local ownedBackends: {[string]: any} = {}
+local movementBroker = { integration = nil }
+
+local function log(message)
+    print("[UNO Bootstrap] " .. tostring(message))
+end
+
+local function block(reason)
+    status = "BLOCKED"
+    lastError = tostring(reason)
+    for key, backend in pairs(ownedBackends) do
+        if backend and type(backend.destroy) == "function" then pcall(backend.destroy) end
+        ownedBackends[key] = nil
+    end
+    backends = {}
+    env.UNO_HUB_BACKENDS = nil
+    env.UNO_REAL_BACKENDS = nil
+    log("BLOCKED " .. lastError)
+    print("PHASE 9 BOOTSTRAP: BLOCKED — " .. lastError)
+end
+
+local function safeRequire(instance)
+    if not instance then return nil end
+    local ok, result = pcall(require, instance)
+    return ok and result or nil
+end
+
+local function child(root, name)
+    return root and root:FindFirstChild(name) or nil
+end
+
+local function getRoot()
+    local runtime = env.UNO_HUB_RUNTIME
+    if type(runtime) ~= "table" then
+        return nil, "UNOHUB_PHASE9.lua runtime bridge unavailable"
+    end
+    local services = runtime.Services
+    if type(services) ~= "table" then
+        return nil, "UNOHUB_PHASE9.lua runtime services unavailable"
+    end
+    return {
+        runtime = runtime,
+        Players = services.Players,
+        ReplicatedStorage = services.ReplicatedStorage,
+        Workspace = services.Workspace,
+        CollectionService = services.CollectionService,
+        TweenService = services.TweenService,
+        player = services.Players and services.Players.LocalPlayer,
+    }
+end
+
+local function createTweenMovement(root)
+    local active = nil
+    local serial = 0
+    local function getRootPart()
+        local character = root.player and root.player.Character
+        return character and character:FindFirstChild("HumanoidRootPart")
+    end
+    local function cancel(reason)
+        serial += 1
+        local current = active
+        active = nil
+        if current and current.tween then
+            pcall(function() current.tween:Cancel() end)
+        end
+        return true
+    end
+    local function moveTo(position, options)
+        if typeof(position) ~= "Vector3" then return false end
+        options = type(options) == "table" and options or {}
+        cancel("replace")
+        serial += 1
+        local mySerial = serial
+        local hrp = getRootPart()
+        if not hrp then return false end
+        local distance = (hrp.Position - position).Magnitude
+        -- Match Auto Hot Egg tween profile:
+        -- ~48 studs/s, Quad Out, clamped to 0.12s..1.8s.
+        -- Keep Event Capsule's own cancellation / dynamic-retarget logic intact.
+        local speed = tonumber(options.speed) or 48
+        local duration = math.clamp(distance / math.max(1, speed), 0.12, 1.8)
+        local tween = root.TweenService:Create(
+            hrp,
+            TweenInfo.new(duration, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+            { CFrame = CFrame.new(position + Vector3.new(0, 3, 0)) }
+        )
+        local handle = {
+            completed = false,
+            cancelled = false,
+            done = false,
+            cancel = function(self)
+                if self.cancelled or self.done then return end
+                self.cancelled = true
+                cancel("handle_cancel")
+            end,
+            stop = function(self) self:cancel() end,
+            destroy = function(self) self:cancel() end,
+            isComplete = function(self) return self.completed or self.done end,
+        }
+        active = { tween = tween, handle = handle, serial = mySerial }
+        tween.Completed:Connect(function()
+            if mySerial ~= serial then return end
+            handle.completed = true
+            handle.done = true
+            if active and active.serial == mySerial then active = nil end
+        end)
+        tween:Play()
+        task.spawn(function()
+            while mySerial == serial and not handle.done do
+                if type(options.isCancelled) == "function" then
+                    local ok, cancelled = pcall(options.isCancelled)
+                    if ok and cancelled == true then
+                        handle:cancel()
+                        break
+                    end
+                end
+                task.wait(0.1)
+            end
+        end)
+        return handle
+    end
+    return {
+        moveTo = moveTo,
+        cancelMovement = cancel,
+    }
+end
+
+local function resolveArena(root, modules, remotes, charm)
+    local scripts = root.player and root.player:FindFirstChild("PlayerScripts")
+    local ui = scripts and scripts:FindFirstChild("UI")
+    local ui2d = ui and ui:FindFirstChild("2d")
+    local arenaFolder = ui2d and ui2d:FindFirstChild("Arena")
+    local settingsFolder = ui2d and ui2d:FindFirstChild("Settings")
+    local arenaClient = safeRequire(arenaFolder and arenaFolder:FindFirstChild("ArenaClient"))
+    local arenaState = safeRequire(arenaFolder and arenaFolder:FindFirstChild("ArenaState"))
+    local rankSettings = safeRequire(settingsFolder and settingsFolder:FindFirstChild("ArenaRankSettings"))
+    if not arenaClient then return nil, "ArenaClient source path unresolved" end
+    if not arenaState then return nil, "ArenaState source path unresolved" end
+    if not rankSettings then return nil, "ArenaRankSettings source path unresolved" end
+    if not remotes then return nil, "ReplicatedStorage.Core.Remotes unresolved" end
+    if not charm then return nil, "ReplicatedStorage.Packages.Charm unresolved" end
+    return {
+        ArenaClient = arenaClient,
+        ArenaState = arenaState,
+        ArenaRankSettings = rankSettings,
+        Remotes = remotes,
+        Charm = charm,
+    }
+end
+
+local function resolveKraken(root, modules, remotes)
+    if not remotes or type(remotes.fire) ~= "function" or type(remotes.onClient) ~= "function" then
+        return nil, "ReplicatedStorage.Core.Remotes fire/onClient API unresolved"
+    end
+    if type(remotes.defs) ~= "table" or not remotes.defs.LiveEventClientSignal or not remotes.defs.LiveEventSignal then
+        return nil, "Core.Remotes LiveEventClientSignal/LiveEventSignal definitions unresolved"
+    end
+    local scripts = root.player and root.player:FindFirstChild("PlayerScripts")
+    local features = scripts and scripts:FindFirstChild("Features")
+    local admin = features and features:FindFirstChild("Admin")
+    local controllers = admin and admin:FindFirstChild("controllers")
+    local liveEventController = safeRequire(controllers and controllers:FindFirstChild("LiveEventController"))
+    if not liveEventController then
+        return nil, "PlayerScripts.Features.Admin.controllers.LiveEventController unresolved"
+    end
+    if type(liveEventController.isEventActive) ~= "function" or type(liveEventController.getEventState) ~= "function" then
+        return nil, "LiveEventController isEventActive/getEventState API unresolved"
+    end
+    local function getLandedEggs()
+        local folder = root.Workspace:FindFirstChild("KrakenEggs")
+        local result = {}
+        if not folder then return result end
+        for _, instance in ipairs(folder:GetChildren()) do
+            if instance:IsA("Model") then table.insert(result, instance) end
+        end
+        return result
+    end
+    local function getEggId(instance)
+        return instance and instance:GetAttribute("eggId")
+    end
+    local function getEggPosition(instance)
+        return instance and instance:GetPivot().Position
+    end
+    local function getEggExpiry(instance)
+        -- The official controller keeps expiresAt in the event record and
+        -- schedules despawn there; it does not replicate an expiry attribute
+        -- onto the visual Model. The backend therefore receives nil.
+        return nil
+    end
+    local function isEggReady(instance)
+        local prompt = instance and instance:FindFirstChildWhichIsA("ProximityPrompt", true)
+        return prompt ~= nil and prompt.Enabled == true
+    end
+    local function onLiveEventSignal(callback)
+        return remotes.onClient(remotes.defs.LiveEventSignal, callback)
+    end
+    local function fireClientSignal(payload)
+        return remotes.fire(remotes.defs.LiveEventClientSignal, payload)
+    end
+    local function getPlayerPosition()
+        local character = root.player and root.player.Character
+        local hrp = character and character:FindFirstChild("HumanoidRootPart")
+        return hrp and hrp.Position
+    end
+    return {
+        getKrakenEventState = function()
+            return liveEventController:getEventState("kraken")
+        end,
+        isKrakenActive = function()
+            return liveEventController:isEventActive("kraken")
+        end,
+        getLandedEggs = getLandedEggs,
+        getEggId = getEggId,
+        getEggPosition = getEggPosition,
+        getEggExpiry = getEggExpiry,
+        isEggReady = isEggReady,
+        fireClientSignal = fireClientSignal,
+        onLiveEventSignal = onLiveEventSignal,
+        getPlayerPosition = getPlayerPosition,
+        moveTo = createTweenMovement(root).moveTo,
+    }
+end
+
+local function createBootstrap()
+    local root, rootError = getRoot()
+    if not root then block(rootError) return end
+    status = "RESOLVING_DEPENDENCIES"
+    local integrationModules = root.runtime.Integration and root.runtime.Integration.modules or {}
+    local remotes = integrationModules.Remotes
+        or safeRequire(child(child(root.ReplicatedStorage, "Core"), "Remotes"))
+    local charm = integrationModules.Charm
+        or safeRequire(child(child(root.ReplicatedStorage, "Packages"), "Charm"))
+    local eventFactory = env.UNO_EVENT_CAPSULE_COLLECTOR_FACTORY
+    local arenaFactory = env.UNO_AUTO_ARENA_FACTORY
+    local krakenFactory = env.UNO_KRAKEN_EGG_COLLECTOR_FACTORY
+    local integrationFactory = env.UNO_HUB_PRIORITY_INTEGRATION_FACTORY
+    if type(eventFactory) ~= "function" then block("Event Capsule factory unavailable: UNO_EVENT_CAPSULE_COLLECTOR_FACTORY") return end
+    if type(arenaFactory) ~= "function" then block("Auto Arena factory unavailable: UNO_AUTO_ARENA_FACTORY") return end
+    if type(krakenFactory) ~= "function" then block("Kraken factory unavailable: UNO_KRAKEN_EGG_COLLECTOR_FACTORY") return end
+    if type(integrationFactory) ~= "function" then block("Priority integration factory unavailable: UNO_HUB_PRIORITY_INTEGRATION_FACTORY") return end
+    status = "CONSTRUCTING_BACKENDS"
+    local tween = createTweenMovement(root)
+    local looseRemotes = child(root.ReplicatedStorage, "Remotes")
+    local scrapDepositedRemote = looseRemotes and looseRemotes:FindFirstChild("ScrapDeposited")
+    local scrapDeposited = scrapDepositedRemote
+    if scrapDepositedRemote and scrapDepositedRemote:IsA("RemoteEvent") then
+        scrapDeposited = scrapDepositedRemote.OnClientEvent
+    end
+    if not scrapDeposited or type(scrapDeposited.Connect) ~= "function" then
+        block("ScrapDeposited client signal unresolved")
+        return
+    end
+    local eventOk, eventBackend = pcall(eventFactory, {
+        player = root.player,
+        workspace = root.Workspace,
+        collectionService = root.CollectionService,
+        scrapDeposited = scrapDeposited,
+        task = task,
+        log = function(level, message) log(message) end,
+        movement = tween,
+        moveTo = tween.moveTo,
+        acquireMovement = function(owner, priority)
+            if not movementBroker.integration then return false end
+            return movementBroker.integration.getCoordinator().acquireMovement("EVENT_CAPSULE", priority)
+        end,
+        releaseMovement = function(owner)
+            if movementBroker.integration then
+                return movementBroker.integration.getCoordinator().releaseMovement("EVENT_CAPSULE")
+            end
+            return false
+        end,
+        maxCarry = 5,
+        movementMode = "Tween",
+        capsuleRetargetInterval = 0.35,
+        capsuleRetargetDistance = 3,
+        capsuleFollowDistance = 3,
+        recyclerFrontDistance = 5,
+        recyclerFrontSign = 1,
+    })
+    if not eventOk or type(eventBackend) ~= "table" then block("Event Capsule construction failed: " .. tostring(eventBackend)) return end
+    backends.EVENT_CAPSULE = eventBackend
+    ownedBackends.EVENT_CAPSULE = eventBackend
+    log("Event Capsule dependencies READY")
+    local arenaDeps, arenaError = resolveArena(root, integrationModules, remotes, charm)
+    if not arenaDeps then block(arenaError) return end
+    local arenaOk, arenaBackend = pcall(arenaFactory, {
+        ArenaClient = arenaDeps.ArenaClient,
+        ArenaState = arenaDeps.ArenaState,
+        ArenaRankSettings = arenaDeps.ArenaRankSettings,
+        Remotes = arenaDeps.Remotes,
+        Charm = arenaDeps.Charm,
+        task = task,
+        log = function(level, message) log(message) end,
+    })
+    if not arenaOk or type(arenaBackend) ~= "table" then block("Auto Arena construction failed: " .. tostring(arenaBackend)) return end
+    backends.AUTO_ARENA = arenaBackend
+    ownedBackends.AUTO_ARENA = arenaBackend
+    log("Arena dependencies READY")
+    local krakenDeps, krakenError = resolveKraken(root, integrationModules, remotes)
+    if not krakenDeps then block(krakenError) return end
+    local krakenOk, krakenBackend = pcall(krakenFactory, krakenDeps)
+    if not krakenOk or type(krakenBackend) ~= "table" then block("Kraken construction failed: " .. tostring(krakenBackend)) return end
+    backends.KRAKEN_EGG = krakenBackend
+    ownedBackends.KRAKEN_EGG = krakenBackend
+    log("Kraken dependencies READY")
+    status = "CONNECTING_PRIORITY"
+    env.UNO_HUB_BACKENDS = backends
+    env.UNO_REAL_BACKENDS = backends
+    local integrationOk, createdIntegration = pcall(integrationFactory, {
+        runtime = root.runtime,
+        backends = backends,
+        log = function(level, message) log(message) end,
+        destroyBackends = false,
+    })
+    if not integrationOk or type(createdIntegration) ~= "table" then block("Priority integration construction failed: " .. tostring(createdIntegration)) return end
+    integration = createdIntegration
+    movementBroker.integration = integration
+    log("Priority integration READY")
+    integration.run()
+    status = "READY"
+    log("READY")
+end
+
+local function destroy()
+    if destroyed then return end
+    destroyed = true
+    if integration and type(integration.destroy) == "function" then pcall(integration.destroy) end
+    integration = nil
+    movementBroker.integration = nil
+    for key, backend in pairs(ownedBackends) do
+        if backend and type(backend.destroy) == "function" then pcall(backend.destroy) end
+        ownedBackends[key] = nil
+    end
+    env.UNO_HUB_BACKENDS = nil
+    env.UNO_REAL_BACKENDS = nil
+    if env.UNO_HUB_PHASE9 == api then env.UNO_HUB_PHASE9 = nil end
+end
+
+local function getBackends()
+    local result = {}
+    for key, backend in pairs(backends) do result[key] = backend end
+    return result
+end
+
+local api = {
+    getStatus = function() return status end,
+    getBackends = getBackends,
+    getIntegration = function() return integration end,
+    getCoordinatorState = function()
+        return integration and integration.getState() or nil
+    end,
+    getLastError = function() return lastError end,
+    setEventCapsuleEnabled = function(value)
+        local backend = backends.EVENT_CAPSULE
+        if not backend or type(backend.setEnabled) ~= "function" then return false end
+        return backend.setEnabled(value == true)
+    end,
+    setAutoArenaEnabled = function(value)
+        local backend = backends.AUTO_ARENA
+        if not backend or type(backend.setAutoArena) ~= "function" then return false end
+        return backend.setAutoArena(value == true)
+    end,
+    setKrakenEnabled = function(value)
+        local backend = backends.KRAKEN_EGG
+        if not backend or type(backend.setEnabled) ~= "function" then return false end
+        return backend.setEnabled(value == true)
+    end,
+    destroy = destroy,
+}
+
+env.UNO_HUB_PHASE9 = api
+createBootstrap()
+return api
+end
+
+
+local __unoFinalApi = __unoRunStage("07 07_UNO_HUB_PHASE9_BOOTSTRAP(1).lua", __unoStage07)
+
+-- Restore Auto Tower only after the priority coordinator exists.
+do
+    local env = (getgenv and getgenv()) or _G
+    local runtime = env.UNO_HUB_RUNTIME
+    local phase9 = env.UNO_HUB_PHASE9
+    local toggles = runtime and runtime.State and runtime.State.toggles
+    local tower = runtime and runtime.towerAutomation
+
+    if type(toggles) == "table" and type(tower) == "table"
+        and phase9 and type(phase9.getStatus) == "function" and phase9.getStatus() == "READY" then
+        tower.setUseFrontierSkip(toggles.useFrontierSkip == true)
+        tower.setStartDelay(runtime.State.autoTower and runtime.State.autoTower.startDelay or 30)
+
+        if toggles.autoFarmRebirth == true then
+            toggles.autoTower = false
+            tower.disableAutoTower()
+            if type(runtime.setToggleVisual) == "function" then pcall(runtime.setToggleVisual, "autoTower", false) end
+        elseif toggles.autoTower == true then
+            local enabled = tower.enableAutoTower()
+            if enabled ~= true then
+                toggles.autoTower = false
+                if type(runtime.setToggleVisual) == "function" then pcall(runtime.setToggleVisual, "autoTower", false) end
+            end
+        end
+    end
+end
+
+-- Restore Phase 9 event toggles only after the Phase 9 backends exist.
+do
+    local env = (getgenv and getgenv()) or _G
+    local runtime = env.UNO_HUB_RUNTIME
+    local phase9 = env.UNO_HUB_PHASE9
+    local toggles = runtime and runtime.State and runtime.State.toggles
+
+    if type(phase9) == "table" and type(toggles) == "table" then
+        if toggles.autoEventCapsule == true and type(phase9.setEventCapsuleEnabled) == "function" then
+            pcall(phase9.setEventCapsuleEnabled, true)
+        end
+        if toggles.autoArena == true and type(phase9.setAutoArenaEnabled) == "function" then
+            pcall(phase9.setAutoArenaEnabled, true)
+        end
+        if toggles.autoKraken == true and type(phase9.setKrakenEnabled) == "function" then
+            pcall(phase9.setKrakenEnabled, true)
+        end
+    end
+end
+
+
+
+
+local function __unoStage08()
+-- UNO UFO ASCENSION V3.2 - clean standalone integration stage.
+-- Runtime-confirmed UFO logic is intentionally kept isolated from the Phase 9 bootstrap.
+--[[
+    UNO UFO ASCENSION STANDALONE V3.2 RETREAT RECOVERY
+    Direct-execute test module.
+
+    This file is intentionally independent from UNO HUB. It does not create UI,
+    load config, modify UNO HUB files, purchase products, bypass poison/cooldowns,
+    or use paid remutation, GUI clicking, or anti-detection behavior.
+]]
+
+local env = (getgenv and getgenv()) or _G
+local old = env.UNO_UFO_ASCENSION
+if old and type(old.destroy) == "function" then
+    pcall(old.destroy)
+end
+
+env.UNO_UFO_ASCENSION = nil
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local LocalPlayer = Players.LocalPlayer
+
+local function safeRequire(instance)
+    if not instance then return nil end
+    local ok, value = pcall(require, instance)
+    return ok and value or nil
+end
+
+local function exactChild(root, ...)
+    local current = root
+    for i = 1, select("#", ...) do
+        if not current then return nil end
+        local childName = select(i, ...)
+        current = current:FindFirstChild(childName)
+    end
+    return current
+end
+
+local function cloneTable(value, seen)
+    if type(value) ~= "table" then return value end
+    seen = seen or {}
+    if seen[value] then return seen[value] end
+    local result = {}
+    seen[value] = result
+    for key, item in pairs(value) do
+        result[cloneTable(key, seen)] = cloneTable(item, seen)
+    end
+    return result
+end
+
+local function numberValue(value)
+    return type(value) == "number" and value or tonumber(value)
+end
+
+local function normalizeId(value)
+    if value == nil then return nil end
+    return tostring(value)
+end
+
+local function now()
+    return os.clock()
+end
+
+local GENE_CAPS = {
+    common = 8,
+    uncommon = 12,
+    rare = 16,
+    epic = 20,
+    legendary = 24,
+    mythic = 27,
+    divine = 29,
+    celestial = 30,
+    cosmic = 31,
+    secret = 31,
+}
+
+local RARITY_ORDER_UFO = { "common", "uncommon", "rare", "epic", "legendary", "mythic", "divine", "celestial", "cosmic", "secret" }
+local RARITY_RANK_UFO = {}
+for index, rarityId in ipairs(RARITY_ORDER_UFO) do RARITY_RANK_UFO[rarityId] = index end
+
+local GENE_KEYS = { "vigor", "furia", "velocidad", "impetu", "fertility" }
+local CONTINUOUS_CYCLE_DELAY_SECONDS = 3
+local CYCLE_MUTATION_TIMEOUT_SECONDS = 20
+local COOP_RETURN_TIMEOUT_SECONDS = 10
+
+-- Conservative post-Tower stabilization window.
+-- Chosen from runtime testing: immediate/2.8s/4.0s sends were unreliable.
+local POST_TOWER_CHAOS_DELAY_SECONDS = 6
+
+local GENE_LABELS = {
+    vigor = "HP",
+    furia = "ATK",
+    velocidad = "SPD",
+    impetu = "PWR",
+    fertility = "EGG",
+}
+
+local function makeState()
+    return {
+        enabled = false,
+        state = "DISABLED",
+        ufoActive = false,
+        equippedId = nil,
+        sessionTargetId = nil,
+        equippedName = nil,
+        sentToChaosThisCycle = false,
+        cycleCompletedBoundary = false,
+        recoveryNeeded = false,
+        recoveryInProgress = false,
+        recoveryAttempted = false,
+        recoveryConfirmed = nil,
+        interruptedCycleNumber = nil,
+        interruptedTargetId = nil,
+        lastRecoveryResult = nil,
+        lastRecoveryFailure = nil,
+        rarity = nil,
+        genome = nil,
+        geneCap = nil,
+        genesMax = false,
+        goal = "max_genes",
+        targetRarity = "secret",
+        goalReached = false,
+        goalReachedReason = nil,
+        towerStabilizedThisEvent = false,
+        waitingForCoopReturn = false,
+        cycleDoneThisEvent = false,
+        cycleCountThisEvent = 0,
+        firstCycleCompleted = false,
+        repeatAttemptedThisEvent = false,
+        freeRepeatConfirmed = nil,
+        repeatAttemptStartedAt = nil,
+        lastRepeatFailure = nil,
+        firstCycleGenome = nil,
+        secondCycleGenome = nil,
+        currentCycle = 0,
+        cycleInProgress = false,
+        currentCycleNumber = 0,
+        cycleStartedAt = nil,
+        lastCycleCompletedAt = nil,
+        lastCycleResult = nil,
+        lastCycleFailure = nil,
+        stopContinuousThisEvent = false,
+        lastGeneChange = nil,
+        lastRarityChange = nil,
+        lastResultCategory = nil,
+        lastError = nil,
+        lastMutationPayload = nil,
+        mutationSubscribed = false,
+        eventGeneration = 0,
+        workerGeneration = 0,
+        requestInFlight = false,
+        mutationSeen = false,
+        rosterRefreshSeen = false,
+        genomeRefreshSeen = false,
+        genomeChanged = false,
+        createdAt = now(),
+    }
+end
+
+local state = makeState()
+local destroyed = false
+local workerRunning = false
+local workerToken = 0
+local mutationConnection = nil
+type TowerHooks = {
+    isTowerActive: (() -> boolean)?,
+    isTowerExited: (() -> boolean)?,
+    surrender: (() -> any)?,
+}
+
+local towerHooks: TowerHooks = {}
+local lastChaosAt = 0
+local lastEventActive = false
+local beforeGenome = nil
+local mutationPayload = nil
+local targetIdAtRequest = nil
+local repeatReadyAt = nil
+
+local paths = {
+    liveEvent = exactChild(LocalPlayer and LocalPlayer:FindFirstChild("PlayerScripts"), "Features", "Admin", "controllers", "LiveEventController"),
+    chickenController = exactChild(LocalPlayer and LocalPlayer:FindFirstChild("PlayerScripts"), "Features", "Chicken", "controllers", "ChickenController"),
+    dataController = exactChild(LocalPlayer and LocalPlayer:FindFirstChild("PlayerScripts"), "Core", "Data", "DataController"),
+    remotes = exactChild(ReplicatedStorage, "Core", "Remotes"),
+}
+
+local LiveEventController = safeRequire(paths.liveEvent)
+local ChickenController = safeRequire(paths.chickenController)
+local DataController = safeRequire(paths.dataController)
+local Remotes = safeRequire(paths.remotes)
+local ChickenMode = safeRequire(exactChild(LocalPlayer and LocalPlayer:FindFirstChild("PlayerScripts"), "Features", "Chicken", "ChickenMode"))
+
+local function dependencyReady()
+    return LiveEventController ~= nil
+        and type(LiveEventController.isEventActive) == "function"
+        and ChickenController ~= nil
+        and type(ChickenController.setOrder) == "function"
+        and DataController ~= nil
+        and type(DataController.roster) == "function"
+        and Remotes ~= nil
+        and type(Remotes.onClient) == "function"
+        and type(Remotes.defs) == "table"
+        and Remotes.defs.ChickenMutated ~= nil
+end
+
+local function log(message)
+    print("[UNO UFO] " .. tostring(message))
+end
+
+local function setState(nextState)
+    if state.state == nextState then return end
+    state.state = nextState
+    log("STATE = " .. tostring(nextState))
+end
+
+local function getRoster()
+    if not DataController or type(DataController.roster) ~= "function" then return nil end
+    local ok, roster = pcall(DataController.roster)
+    return ok and type(roster) == "table" and roster or nil
+end
+
+local function getEquippedChicken()
+    local roster = getRoster()
+    if not roster or roster.activeId == nil then return nil, roster end
+    local activeId = normalizeId(roster.activeId)
+    local chickens = roster.chickens
+    if type(chickens) ~= "table" then return nil, roster end
+    for _, chicken in pairs(chickens) do
+        if type(chicken) == "table" and normalizeId(chicken.id) == activeId then
+            return chicken, roster
+        end
+    end
+    return nil, roster
+end
+
+local function getGenome(chicken)
+    if type(chicken) ~= "table" or type(chicken.genome) ~= "table" then return nil end
+    local result = {}
+    for _, key in ipairs(GENE_KEYS) do
+        result[key] = numberValue(chicken.genome[key]) or chicken.genome[key]
+    end
+    return result
+end
+
+local function getRarity(chicken)
+    if type(chicken) ~= "table" then return nil end
+    local rarity = chicken.rarity
+    if type(rarity) == "table" then
+        rarity = rarity.id or rarity.name or rarity.key
+    end
+    return rarity
+end
+
+local function getGeneCap(chicken)
+    local rarity = getRarity(chicken)
+    return GENE_CAPS[string.lower(tostring(rarity or ""))]
+end
+
+local function areGenesMaxFor(chicken, genome)
+    local cap = getGeneCap(chicken)
+    if not cap or type(genome) ~= "table" then return false end
+    for _, key in ipairs(GENE_KEYS) do
+        local value = numberValue(genome[key])
+        if not value or value < cap then return false end
+    end
+    return true
+end
+
+local function normalizeRarityId(value)
+    return string.lower(tostring(value or ""))
+end
+
+local function rarityRank(value)
+    return RARITY_RANK_UFO[normalizeRarityId(value)]
+end
+
+local function goalReachedFor(chicken, genome)
+    if state.goal == "rarity" then
+        local currentRank = rarityRank(getRarity(chicken))
+        local targetRank = rarityRank(state.targetRarity)
+        if currentRank and targetRank and currentRank >= targetRank then
+            return true, "RARITY_REACHED"
+        end
+        return false, nil
+    end
+    if areGenesMaxFor(chicken, genome) then return true, "MAX_GENES_REACHED" end
+    return false, nil
+end
+
+local function setGoalReached(reason)
+    state.goalReached = true
+    state.goalReachedReason = reason or "GOAL_REACHED"
+    state.stopContinuousThisEvent = true
+    setState("GOAL_REACHED_WAITING_EVENT_END")
+    log("ASCENSION GOAL REACHED: " .. tostring(state.goalReachedReason))
+end
+
+local function isChickenBackInCoop(targetId)
+    local chicken, roster = getEquippedChicken()
+    local currentId = chicken and normalizeId(chicken.id or (roster and roster.activeId))
+    if not currentId or currentId ~= normalizeId(targetId) then return false end
+    if ChickenMode and type(ChickenMode.where) == "function" then
+        local ok, where = pcall(ChickenMode.where)
+        if ok then
+            where = string.lower(tostring(where or ""))
+            return where == "corral" or where == "coop"
+        end
+    end
+    return false
+end
+
+local function waitForAutomaticCoopReturn(token, targetId)
+    state.waitingForCoopReturn = true
+    setState("WAITING_FOR_COOP_RETURN")
+    local deadline = now() + COOP_RETURN_TIMEOUT_SECONDS
+    while not destroyed and state.enabled and workerToken == token and now() < deadline do
+        if isChickenBackInCoop(targetId) then
+            state.waitingForCoopReturn = false
+            log("COOP RETURN CONFIRMED target=" .. tostring(targetId))
+            return true
+        end
+        task.wait(0.20)
+    end
+    state.waitingForCoopReturn = false
+    state.lastError = "COOP_RETURN_TIMEOUT"
+    state.lastCycleFailure = "COOP_RETURN_TIMEOUT"
+    state.stopContinuousThisEvent = true
+    setState("WAITING_FOR_EVENT_END")
+    return false
+end
+
+local function genomeChanged(before, after)
+    if type(before) ~= "table" or type(after) ~= "table" then return false end
+    for _, key in ipairs(GENE_KEYS) do
+        if tostring(before[key]) ~= tostring(after[key]) then return true end
+    end
+    return false
+end
+
+local function payloadSuggestsMutation(payload)
+    if type(payload) ~= "table" then return false end
+    if payload.ascended == true or payload.beamGenes ~= nil then return true end
+    if type(payload.changes) == "table" and next(payload.changes) ~= nil then return true end
+    return payload.fromRarity ~= nil or payload.rarity ~= nil
+end
+
+local function payloadChickenId(payload)
+    if type(payload) ~= "table" then return nil end
+    if payload.chickenId ~= nil then return normalizeId(payload.chickenId) end
+    if payload.id ~= nil then return normalizeId(payload.id) end
+    if type(payload.chicken) == "table" and payload.chicken.id ~= nil then
+        return normalizeId(payload.chicken.id)
+    end
+    return nil
+end
+
+local function getCurrentEventActive()
+    if not LiveEventController or type(LiveEventController.isEventActive) ~= "function" then
+        state.lastError = "UFO_ACTIVE_CHECK_FAILED: LiveEventController:isEventActive unavailable"
+        return nil
+    end
+    local ok, activeOrError = pcall(function()
+        return LiveEventController:isEventActive("ufo")
+    end)
+    if not ok then
+        state.lastError = "UFO_ACTIVE_CHECK_FAILED: " .. tostring(activeOrError)
+        return nil
+    end
+    return activeOrError == true
+end
+
+local function setTowerHooks(hooks: TowerHooks?)
+    towerHooks = hooks or {}
+    return true
+end
+
+local function towerIsActive()
+    if type(towerHooks.isTowerActive) ~= "function" then return false end
+    local ok, result = pcall(towerHooks.isTowerActive)
+    return ok and result == true
+end
+
+local function towerIsExited()
+    if type(towerHooks.isTowerExited) == "function" then
+        local ok, result = pcall(towerHooks.isTowerExited)
+        return ok and result == true
+    end
+    if type(towerHooks.isTowerActive) == "function" then
+        return not towerIsActive()
+    end
+    return false
+end
+
+local function readChickenModeDiagnostic()
+    local whereValue = "<unavailable>"
+    local orderValue = "<unavailable>"
+
+    if ChickenMode and type(ChickenMode.where) == "function" then
+        local ok, value = pcall(ChickenMode.where)
+        if ok then whereValue = tostring(value) end
+    end
+
+    if ChickenMode and type(ChickenMode.order) == "function" then
+        local ok, value = pcall(ChickenMode.order)
+        if ok then orderValue = tostring(value) end
+    end
+
+    return whereValue, orderValue
+end
+
+local function logTowerExitDiagnostic(label)
+    local active = towerIsActive()
+    local exited = towerIsExited()
+    local whereValue, orderValue = readChickenModeDiagnostic()
+    log(string.format(
+        "TOWER EXIT DIAG [%s] active=%s exited=%s where=%s order=%s",
+        tostring(label),
+        tostring(active),
+        tostring(exited),
+        tostring(whereValue),
+        tostring(orderValue)
+    ))
+end
+
+local function waitForTowerExit(token)
+    if type(towerHooks.isTowerActive) ~= "function" then
+        log("TOWER EXIT DIAG [NO_HOOK] isTowerActive hook unavailable")
+        return true, false
+    end
+    if not towerIsActive() then
+        logTowerExitDiagnostic("ALREADY_EXITED")
+        return true, false
+    end
+
+    setState("WAITING_FOR_TOWER_EXIT")
+    logTowerExitDiagnostic("BEFORE_SURRENDER")
+
+    if type(towerHooks.surrender) == "function" then
+        local ok, result = pcall(towerHooks.surrender)
+        if not ok or result == false then
+            log("TOWER EXIT DIAG [SURRENDER_CALL] failed=" .. tostring(result))
+            state.lastError = "TOWER_SURRENDER_FAILED"
+            setState("ERROR")
+            return false
+        end
+        log("TOWER EXIT DIAG [SURRENDER_CALL] success result=" .. tostring(result))
+    else
+        state.lastError = "TOWER_ACTIVE_WAITING_EXTERNAL"
+        setState("WAITING_FOR_TOWER_EXIT")
+        return false
+    end
+    local deadline = now() + 15
+    local nextDiagAt = 0
+    while not destroyed and workerToken == token and now() < deadline do
+        if towerIsExited() then
+            logTowerExitDiagnostic("EXIT_DETECTED")
+            -- Diagnostic only: sample the chicken state again shortly after
+            -- the Tower hook first reports exited. This does NOT delay Chaos.
+            task.delay(0.35, function()
+                if not destroyed then
+                    logTowerExitDiagnostic("EXIT_PLUS_350MS")
+                end
+            end)
+            return true, true
+        end
+
+        if now() >= nextDiagAt then
+            nextDiagAt = now() + 1
+            logTowerExitDiagnostic("WAITING")
+        end
+        task.wait(0.25)
+    end
+    state.lastError = "TOWER_EXIT_NOT_CONFIRMED"
+    setState("ERROR")
+    return false
+end
+
+local function captureTarget()
+    local chicken, roster = getEquippedChicken()
+    if not chicken or not roster then
+        state.lastError = "EQUIPPED_CHICKEN_NOT_FOUND"
+        setState("ERROR")
+        return nil
+    end
+    state.equippedId = normalizeId(chicken.id or roster.activeId)
+    state.equippedName = chicken.name or chicken.displayName or chicken.type
+    state.rarity = getRarity(chicken)
+    state.genome = getGenome(chicken)
+    state.geneCap = getGeneCap(chicken)
+    state.genesMax = areGenesMaxFor(chicken, state.genome)
+    local reached, reason = goalReachedFor(chicken, state.genome)
+    state.goalReached = reached == true
+    state.goalReachedReason = reached and reason or nil
+    return chicken
+end
+
+local function reportGeneChanges(before, after)
+    local changes = {}
+    if type(before) == "table" and type(after) == "table" then
+        for _, key in ipairs(GENE_KEYS) do
+            if tostring(before[key]) ~= tostring(after[key]) then
+                table.insert(changes, string.format("%s %s -> %s", GENE_LABELS[key], tostring(before[key]), tostring(after[key])))
+            end
+        end
+    end
+    state.lastGeneChange = #changes > 0 and table.concat(changes, ", ") or nil
+    for _, message in ipairs(changes) do
+        log("GENE CHANGE: " .. message)
+    end
+    return #changes > 0
+end
+
+local function confirmMutation(token, timeoutSeconds)
+    setState("WAITING_FOR_GENOME_REFRESH")
+    local deadline = now() + (timeoutSeconds or CYCLE_MUTATION_TIMEOUT_SECONDS)
+    while not destroyed and workerToken == token and now() < deadline do
+        local chicken, roster = getEquippedChicken()
+        local currentId = chicken and normalizeId(chicken.id or (roster and roster.activeId))
+        if currentId and currentId == targetIdAtRequest then
+            state.rosterRefreshSeen = true
+            local after = getGenome(chicken)
+            if after then
+                state.genomeRefreshSeen = true
+                state.genomeChanged = genomeChanged(beforeGenome, after)
+                local previousRarity = state.rarity
+                state.genome = after
+                state.rarity = getRarity(chicken)
+                state.geneCap = getGeneCap(chicken)
+                state.genesMax = areGenesMaxFor(chicken, after)
+                local payloadFrom = mutationPayload and mutationPayload.fromRarity
+                local payloadTo = mutationPayload and mutationPayload.rarity
+                local rarityChanged = payloadFrom ~= nil and payloadTo ~= nil and tostring(payloadFrom) ~= tostring(payloadTo)
+                if not rarityChanged and previousRarity ~= nil and state.rarity ~= nil and tostring(previousRarity) ~= tostring(state.rarity) then
+                    rarityChanged = true
+                end
+                if rarityChanged then
+                    state.lastRarityChange = tostring(payloadFrom or previousRarity or "?") .. " -> " .. tostring(payloadTo or state.rarity)
+                    log("RARITY ASCENDED: " .. state.lastRarityChange)
+                end
+                if state.mutationSeen then
+                    if state.genomeChanged then
+                        reportGeneChanges(beforeGenome, after)
+                        state.lastResultCategory = "GENE_CHANGED"
+                    elseif state.genesMax then
+                        state.lastResultCategory = "TIER_MAX_RESULT"
+                    elseif rarityChanged or (mutationPayload and mutationPayload.ascended == true) then
+                        state.lastResultCategory = "RARITY_ASCENDED"
+                    else
+                        state.lastResultCategory = "MUTATION_RESULT_NO_GENE_DELTA"
+                    end
+                    state.cycleCountThisEvent += 1
+                    state.currentCycleNumber = state.cycleCountThisEvent
+                    state.lastCycleCompletedAt = now()
+                    state.lastCycleResult = state.lastResultCategory
+                    state.lastCycleFailure = nil
+                    state.cycleInProgress = false
+                    state.cycleCompletedBoundary = true
+                    state.sentToChaosThisCycle = false
+                    state.requestInFlight = false
+
+                    -- The UFO/game returns the chicken to the Coop after a successful
+                    -- ascension. Do not start another Chaos cycle until that return is
+                    -- authoritative, otherwise NORMAL_FARM can race the next cycle.
+                    if not waitForAutomaticCoopReturn(token, targetIdAtRequest) then
+                        return false
+                    end
+
+                    local refreshed = getEquippedChicken()
+                    if type(refreshed) == "table" then
+                        state.rarity = getRarity(refreshed)
+                        state.genome = getGenome(refreshed) or state.genome
+                        state.geneCap = getGeneCap(refreshed)
+                        state.genesMax = areGenesMaxFor(refreshed, state.genome)
+                    end
+                    local reached, reason = goalReachedFor(refreshed or chicken, state.genome)
+                    if reached then
+                        setGoalReached(reason)
+                        return true
+                    end
+
+                    repeatReadyAt = now() + CONTINUOUS_CYCLE_DELAY_SECONDS
+                    setState("CYCLE_COMPLETE")
+                    log("CYCLE #" .. tostring(state.currentCycleNumber) .. " COMPLETE")
+                    return true
+                end
+            end
+        end
+        task.wait(0.25)
+    end
+    state.requestInFlight = false
+    state.cycleInProgress = false
+    state.lastCycleFailure = state.rosterRefreshSeen and "GENOME_REFRESH_TIMEOUT" or "NO_MUTATION_WITHIN_TIMEOUT"
+    state.lastError = state.lastCycleFailure
+    state.stopContinuousThisEvent = true
+    setState(state.rosterRefreshSeen and "ERROR" or "CYCLE_TIMEOUT")
+    return false
+end
+
+local function handleMutation(payload)
+    if destroyed or not state.enabled or not state.ufoActive or not state.requestInFlight then return end
+    local directId = payloadChickenId(payload)
+    if directId and directId ~= targetIdAtRequest then
+        state.lastError = "MUTATION_IDENTITY_MISMATCH"
+        return
+    end
+    if not directId and not payloadSuggestsMutation(payload) then
+        state.lastError = "MUTATION_IDENTITY_UNVERIFIED"
+        setState("ERROR")
+        return
+    end
+    mutationPayload = cloneTable(payload)
+    state.lastMutationPayload = mutationPayload
+    state.mutationSeen = true
+    log("ChickenMutated received for active target " .. tostring(targetIdAtRequest))
+    local whereValue, orderValue = readChickenModeDiagnostic()
+    log(string.format(
+        "POST CHAOS DIAG [MUTATION_RECEIVED] target=%s where=%s order=%s",
+        tostring(targetIdAtRequest), tostring(whereValue), tostring(orderValue)
+    ))
+end
+
+local function subscribeMutation()
+    if mutationConnection then
+        state.mutationSubscribed = true
+        return true
+    end
+    state.mutationSubscribed = false
+    if not Remotes or type(Remotes.onClient) ~= "function" or not Remotes.defs.ChickenMutated then
+        state.lastError = "CHICKEN_MUTATED_SUBSCRIBE_FAILED"
+        return false
+    end
+    local ok, connection = pcall(function()
+        return Remotes.onClient(Remotes.defs.ChickenMutated, handleMutation)
+    end)
+    if not ok or not connection then
+        state.lastError = "CHICKEN_MUTATED_SUBSCRIBE_FAILED: " .. tostring(connection)
+        return false
+    end
+    mutationConnection = connection
+    state.mutationSubscribed = true
+    return true
+end
+
+local function disconnectMutation()
+    if mutationConnection and typeof(mutationConnection) == "RBXScriptConnection" then
+        pcall(function() mutationConnection:Disconnect() end)
+    elseif type(mutationConnection) == "function" then
+        pcall(mutationConnection)
+    end
+    mutationConnection = nil
+    state.mutationSubscribed = false
+end
+
+local function sendChaos(token, chicken)
+    if now() - lastChaosAt < 4 then
+        state.lastError = "CHAOS_COOLDOWN"
+        setState("ERROR")
+        return false
+    end
+    local current, roster = getEquippedChicken()
+    local currentId = current and normalizeId(current.id or (roster and roster.activeId))
+    if not currentId or currentId ~= normalizeId(chicken.id) then
+        state.lastError = "EQUIPPED_ID_CHANGED_BEFORE_CHAOS"
+        setState("ERROR")
+        return false
+    end
+    targetIdAtRequest = currentId
+    beforeGenome = getGenome(current)
+    state.beforeGenome = cloneTable(beforeGenome)
+    state.requestInFlight = true
+    state.cycleInProgress = true
+    state.cycleCompletedBoundary = false
+    state.sentToChaosThisCycle = false
+    state.mutationSeen = false
+    state.rosterRefreshSeen = false
+    state.genomeRefreshSeen = false
+    state.genomeChanged = false
+    mutationPayload = nil
+    setState("SENDING_TO_CHAOS")
+    local ok, result = pcall(function()
+        return ChickenController:setOrder("chaos")
+    end)
+    lastChaosAt = now()
+
+    log(string.format(
+        "POST CHAOS DIAG [CALL_RETURN] ok=%s result=%s target=%s",
+        tostring(ok), tostring(result), tostring(targetIdAtRequest)
+    ))
+
+    local function postChaosSnapshot(label)
+        if destroyed then return end
+        local whereValue, orderValue = readChickenModeDiagnostic()
+        local activeId = nil
+        pcall(function()
+            local roster = DataController.roster()
+            activeId = roster and roster.activeId or nil
+        end)
+        log(string.format(
+            "POST CHAOS DIAG [%s] target=%s activeId=%s where=%s order=%s sent=%s mutationSeen=%s",
+            tostring(label), tostring(targetIdAtRequest), tostring(activeId),
+            tostring(whereValue), tostring(orderValue),
+            tostring(state.sentToChaosThisCycle), tostring(state.mutationSeen)
+        ))
+    end
+
+    postChaosSnapshot("0MS")
+    task.delay(0.35, function() postChaosSnapshot("350MS") end)
+    task.delay(1.00, function() postChaosSnapshot("1S") end)
+    task.delay(3.00, function() postChaosSnapshot("3S") end)
+
+    if not ok or result == false then
+        state.requestInFlight = false
+        state.cycleInProgress = false
+        state.lastError = "SET_ORDER_CHAOS_FAILED"
+        setState("ERROR")
+        return false
+    end
+    state.sentToChaosThisCycle = true
+    setState("WAITING_FOR_MUTATION")
+    return true
+end
+
+local function clearEventCycleState()
+    state.cycleDoneThisEvent = false
+    state.requestInFlight = false
+    state.cycleInProgress = false
+    state.sentToChaosThisCycle = false
+    state.cycleCompletedBoundary = false
+    state.mutationSeen = false
+    state.rosterRefreshSeen = false
+    state.genomeRefreshSeen = false
+    state.genomeChanged = false
+    state.cycleCountThisEvent = 0
+    state.currentCycle = 0
+    state.currentCycleNumber = 0
+    state.cycleStartedAt = nil
+    state.lastCycleCompletedAt = nil
+    state.lastCycleResult = nil
+    state.lastCycleFailure = nil
+    state.stopContinuousThisEvent = false
+    state.sessionTargetId = nil
+    state.lastRarityChange = nil
+    state.lastResultCategory = nil
+    state.equippedId = nil
+    state.equippedName = nil
+    state.genome = nil
+    state.geneCap = nil
+    state.genesMax = false
+    state.goalReached = false
+    state.goalReachedReason = nil
+    state.towerStabilizedThisEvent = false
+    state.waitingForCoopReturn = false
+    state.lastError = nil
+    repeatReadyAt = nil
+end
+
+local function recoverInterruptedCycle(token, interruptedId, interruptedNumber)
+    state.recoveryNeeded = true
+    state.recoveryInProgress = true
+    state.recoveryAttempted = false
+    state.recoveryConfirmed = nil
+    state.interruptedTargetId = interruptedId
+    state.interruptedCycleNumber = interruptedNumber
+    state.lastRecoveryResult = nil
+    state.lastRecoveryFailure = nil
+    setState("UFO_ENDED_DURING_CYCLE")
+
+    local chicken = captureTarget()
+    local currentId = chicken and normalizeId(chicken.id)
+    if not currentId or currentId ~= interruptedId then
+        state.recoveryInProgress = false
+        state.lastRecoveryFailure = "TARGET_CHANGED_BEFORE_RECOVERY"
+        setState("RECOVERY_UNVERIFIED")
+        return false
+    end
+
+    setState("RECOVERING_FROM_CHAOS")
+    log("RETREAT CONTRACT = coop")
+    state.recoveryAttempted = true
+    local ok, result = pcall(function()
+        return ChickenController:setOrder("coop")
+    end)
+    if not ok or result == false then
+        state.recoveryInProgress = false
+        state.lastRecoveryFailure = "RETREAT_COOP_FAILED"
+        setState("RECOVERY_UNVERIFIED")
+        return false
+    end
+    if ChickenMode and type(ChickenMode.order) == "function" then
+        pcall(function() ChickenMode.order("coop") end)
+    end
+    log("RETREAT SENT")
+    setState("WAITING_FOR_RECOVERY")
+
+    local deadline = now() + 10
+    while not destroyed and workerToken == token and now() < deadline do
+        local current, roster = getEquippedChicken()
+        local resolvedId = current and normalizeId(current.id or (roster and roster.activeId))
+        local where = nil
+        local whereOk = false
+        if ChickenMode and type(ChickenMode.where) == "function" then
+            whereOk = pcall(function() where = ChickenMode.where() end)
+        end
+        if whereOk and resolvedId == interruptedId and where == "corral" then
+            state.recoveryInProgress = false
+            state.recoveryConfirmed = true
+            state.lastRecoveryResult = "RETREAT_CONFIRMED_CORRAL"
+            log("RETREAT CONFIRMED")
+            setState("RECOVERY_CONFIRMED")
+            return true
+        end
+        task.wait(0.25)
+    end
+    state.recoveryInProgress = false
+    state.recoveryConfirmed = nil
+    state.lastRecoveryResult = "RETREAT_SENT_UNVERIFIED"
+    state.lastRecoveryFailure = "RETREAT_CONFIRMATION_TIMEOUT"
+    log("RETREAT UNVERIFIED")
+    setState("RECOVERY_UNVERIFIED")
+    return false
+end
+
+local function processOnce(token)
+    if destroyed or not state.enabled or workerToken ~= token then return end
+    local active = getCurrentEventActive()
+    if active == nil then
+        state.ufoActive = false
+        state.stopContinuousThisEvent = true
+        setState("ERROR")
+        return
+    end
+    state.ufoActive = active
+    if active and not lastEventActive then
+        state.eventGeneration += 1
+        state.cycleDoneThisEvent = false
+        state.cycleCountThisEvent = 0
+        state.currentCycle = 0
+        state.currentCycleNumber = 0
+        state.cycleInProgress = false
+        state.cycleStartedAt = nil
+        state.lastCycleCompletedAt = nil
+        state.lastCycleResult = nil
+        state.lastCycleFailure = nil
+        state.stopContinuousThisEvent = false
+        state.sessionTargetId = nil
+        state.sentToChaosThisCycle = false
+        state.cycleCompletedBoundary = false
+        state.recoveryNeeded = false
+        state.recoveryInProgress = false
+        state.recoveryAttempted = false
+        state.recoveryConfirmed = nil
+        state.interruptedCycleNumber = nil
+        state.interruptedTargetId = nil
+        state.lastRecoveryResult = nil
+        state.lastRecoveryFailure = nil
+        state.lastError = nil
+        state.lastGeneChange = nil
+        state.lastRarityChange = nil
+        state.lastResultCategory = nil
+        state.goalReached = false
+        state.goalReachedReason = nil
+        state.towerStabilizedThisEvent = false
+        state.waitingForCoopReturn = false
+        repeatReadyAt = nil
+        setState("UFO_ACTIVE")
+    elseif not active and lastEventActive then
+        local goalReachedAtEventEnd = state.goalReached == true
+        local goalReasonAtEventEnd = state.goalReachedReason
+        local interrupted = state.sentToChaosThisCycle and not state.cycleCompletedBoundary and state.sessionTargetId
+        if interrupted and state.requestInFlight and state.mutationSeen then
+            confirmMutation(token, 3)
+            interrupted = state.sentToChaosThisCycle and not state.cycleCompletedBoundary and state.sessionTargetId
+        end
+        if interrupted then
+            local interruptedId = state.sessionTargetId
+            local interruptedNumber = state.currentCycleNumber
+            state.requestInFlight = false
+            recoverInterruptedCycle(token, interruptedId, interruptedNumber)
+        end
+        local preservedRecovery = state.recoveryNeeded
+        local preservedAttempted = state.recoveryAttempted
+        local preservedConfirmed = state.recoveryConfirmed
+        local preservedNumber = state.interruptedCycleNumber
+        local preservedId = state.interruptedTargetId
+        local preservedResult = state.lastRecoveryResult
+        local preservedFailure = state.lastRecoveryFailure
+        clearEventCycleState()
+        state.recoveryNeeded = preservedRecovery or false
+        state.recoveryAttempted = preservedAttempted or false
+        state.recoveryConfirmed = preservedConfirmed
+        state.interruptedCycleNumber = preservedNumber
+        state.interruptedTargetId = preservedId
+        state.lastRecoveryResult = preservedResult
+        state.lastRecoveryFailure = preservedFailure
+        if goalReachedAtEventEnd then
+            state.goalReached = true
+            state.goalReachedReason = goalReasonAtEventEnd
+            local runtimeGoal = env.UNO_HUB_RUNTIME
+            if type(runtimeGoal) == "table" and type(runtimeGoal.setUfoAscension) == "function" then
+                pcall(runtimeGoal.setUfoAscension, false)
+            else
+                state.enabled = false
+                workerToken += 1
+                state.workerGeneration = workerToken
+            end
+            setState(goalReasonAtEventEnd == "RARITY_REACHED" and "RARITY_REACHED" or "GENES_MAX")
+            return
+        end
+        setState("WAITING_FOR_UFO")
+    end
+    lastEventActive = active
+    if not active then
+        setState("WAITING_FOR_UFO")
+        return
+    end
+    if state.requestInFlight then
+        if state.mutationSeen then confirmMutation(token) end
+        return
+    end
+    if state.stopContinuousThisEvent then
+        setState("WAITING_FOR_EVENT_END")
+        return
+    end
+    if repeatReadyAt and now() < repeatReadyAt then
+        setState("WAITING_FOR_NEXT_CYCLE")
+        return
+    end
+    setState("CHECKING_CHICKEN")
+    local previousSessionTarget = state.sessionTargetId
+    local chicken = captureTarget()
+    if not chicken then
+        state.lastCycleFailure = "TARGET_NOT_FOUND"
+        state.stopContinuousThisEvent = true
+        return
+    end
+    local currentTargetId = normalizeId(chicken.id)
+    if previousSessionTarget and currentTargetId ~= previousSessionTarget then
+        state.lastCycleFailure = "TARGET_CHANGED"
+        state.stopContinuousThisEvent = true
+        setState("WAITING_FOR_EVENT_END")
+        return
+    end
+    state.sessionTargetId = previousSessionTarget or currentTargetId
+    local reached, reason = goalReachedFor(chicken, state.genome)
+    if reached then
+        setGoalReached(reason)
+        return
+    end
+    state.currentCycle = state.cycleCountThisEvent + 1
+    state.currentCycleNumber = state.currentCycle
+    state.cycleStartedAt = now()
+    state.cycleInProgress = true
+    log("CYCLE #" .. tostring(state.currentCycleNumber) .. " START")
+    local exitOk, surrenderedTower = waitForTowerExit(token)
+    if not exitOk then
+        state.cycleInProgress = false
+        state.lastCycleFailure = "TOWER_EXIT_FAILED"
+        state.stopContinuousThisEvent = true
+        return
+    end
+
+    -- The 6 second stabilization exists only for the transition from an active
+    -- Tower run into the UFO session. Repeated Chaos cycles must not pay it again.
+    if surrenderedTower and not state.towerStabilizedThisEvent then
+        setState("WAITING_POST_TOWER_DELAY")
+        local delayUntil = now() + POST_TOWER_CHAOS_DELAY_SECONDS
+        log("POST-TOWER DELAY START " .. tostring(POST_TOWER_CHAOS_DELAY_SECONDS) .. "s")
+
+        while not destroyed and state.enabled and workerToken == token and now() < delayUntil do
+            local stillActiveDelay = getCurrentEventActive()
+            if stillActiveDelay ~= true then
+                state.ufoActive = false
+                state.cycleInProgress = false
+                state.lastCycleFailure = "UFO_ENDED_DURING_POST_TOWER_DELAY"
+                setState("WAITING_FOR_UFO")
+                return
+            end
+            if towerIsActive() then
+                state.cycleInProgress = false
+                state.lastCycleFailure = "TOWER_REENTERED_DURING_UFO"
+                state.lastError = "TOWER_REENTERED_DURING_UFO"
+                state.stopContinuousThisEvent = true
+                setState("WAITING_FOR_EVENT_END")
+                return
+            end
+            task.wait(0.10)
+        end
+        state.towerStabilizedThisEvent = true
+    end
+
+    local stillActive = getCurrentEventActive()
+    state.ufoActive = stillActive == true
+    if stillActive ~= true then
+        state.cycleInProgress = false
+        state.lastCycleFailure = "UFO_ENDED_BEFORE_CHAOS"
+        setState("WAITING_FOR_UFO")
+        return
+    end
+
+    if towerIsActive() then
+        state.cycleInProgress = false
+        state.lastCycleFailure = "TOWER_ACTIVE_AFTER_POST_DELAY"
+        state.lastError = "TOWER_ACTIVE_AFTER_POST_DELAY"
+        state.stopContinuousThisEvent = true
+        setState("WAITING_FOR_EVENT_END")
+        return
+    end
+
+    logTowerExitDiagnostic(state.towerStabilizedThisEvent and "AFTER_TOWER_STABILIZATION_BEFORE_CHAOS" or "NO_TOWER_DELAY_BEFORE_CHAOS")
+
+    if not sendChaos(token, chicken) then
+        state.cycleInProgress = false
+        state.lastCycleFailure = "SET_ORDER_CHAOS_FAILED"
+        state.stopContinuousThisEvent = true
+    end
+end
+
+local function worker()
+    if workerRunning then return end
+    workerRunning = true
+    local token = workerToken
+    while not destroyed and state.enabled and workerToken == token do
+        local ok, err = pcall(processOnce, token)
+        if not ok then
+            state.lastError = tostring(err)
+            setState("ERROR")
+        end
+        task.wait(0.35)
+    end
+    workerRunning = false
+end
+
+local api = {}
+
+function api.enable()
+    if destroyed then return false end
+    if not dependencyReady() then
+        state.enabled = false
+        state.lastError = "DEPENDENCY_MISSING"
+        setState("ERROR")
+        return false
+    end
+    if not subscribeMutation() then
+        state.enabled = false
+        state.lastError = "CHICKEN_MUTATED_SUBSCRIBE_FAILED"
+        setState("ERROR")
+        return false
+    end
+    state.enabled = true
+    state.lastError = nil
+    workerToken += 1
+    state.workerGeneration = workerToken
+    if not workerRunning then task.spawn(worker) end
+    return true
+end
+
+function api.disable()
+    state.enabled = false
+    workerToken += 1
+    state.workerGeneration = workerToken
+    state.requestInFlight = false
+    state.mutationSeen = false
+    state.rosterRefreshSeen = false
+    state.genomeRefreshSeen = false
+    state.genomeChanged = false
+    state.cycleInProgress = false
+    state.stopContinuousThisEvent = true
+    setState("DISABLED")
+    return true
+end
+
+function api.setEnabled(value)
+    if value == true then return api.enable() end
+    return api.disable()
+end
+
+function api.isEnabled()
+    return state.enabled == true and not destroyed
+end
+
+function api.getStatus()
+    return cloneTable(state)
+end
+
+function api.isEquippedGenesMax()
+    local chicken = getEquippedChicken()
+    if type(chicken) ~= "table" then return false, "EQUIPPED_CHICKEN_NOT_FOUND" end
+    local currentGenome = getGenome(chicken)
+    if type(currentGenome) ~= "table" then return false, "GENOME_UNAVAILABLE" end
+    return areGenesMaxFor(chicken, currentGenome) == true, nil
+end
+
+function api.setGoal(value)
+    if value == "rarity" then state.goal = "rarity" else state.goal = "max_genes" end
+    state.goalReached = false
+    state.goalReachedReason = nil
+    return true
+end
+
+function api.getGoal() return state.goal end
+
+function api.setTargetRarity(value)
+    local rarityId = normalizeRarityId(value)
+    if not RARITY_RANK_UFO[rarityId] then return false, "INVALID_RARITY" end
+    state.targetRarity = rarityId
+    state.goalReached = false
+    state.goalReachedReason = nil
+    return true
+end
+
+function api.getTargetRarity() return state.targetRarity end
+
+function api.getAvailableRarities()
+    local result = {}
+    for i, rarityId in ipairs(RARITY_ORDER_UFO) do result[i] = rarityId end
+    return result
+end
+
+function api.isGoalReached()
+    local chicken = getEquippedChicken()
+    if type(chicken) ~= "table" then return false, "EQUIPPED_CHICKEN_NOT_FOUND" end
+    local genome = getGenome(chicken)
+    local reached, reason = goalReachedFor(chicken, genome)
+    return reached == true, reason
+end
+
+function api.isUfoEventActive()
+    return getCurrentEventActive() == true
+end
+
+function api.getState()
+    return state.state
+end
+
+function api.getFreeRepeatResult()
+    return {
+        attempted = state.cycleCountThisEvent > 1,
+        confirmed = state.cycleCountThisEvent > 1 and state.lastCycleResult ~= nil or nil,
+        failure = state.lastCycleFailure,
+        cycleCount = state.cycleCountThisEvent,
+    }
+end
+
+function api.getContinuousStatus()
+    return {
+        cycleCount = state.cycleCountThisEvent,
+        cycleInProgress = state.cycleInProgress,
+        currentCycle = state.currentCycleNumber,
+        genesMax = state.genesMax,
+        lastResult = state.lastCycleResult,
+        lastFailure = state.lastCycleFailure,
+        recoveryNeeded = state.recoveryNeeded,
+        recoveryInProgress = state.recoveryInProgress,
+        recoveryAttempted = state.recoveryAttempted,
+        recoveryConfirmed = state.recoveryConfirmed,
+        lastRecoveryResult = state.lastRecoveryResult,
+        lastRecoveryFailure = state.lastRecoveryFailure,
+    }
+end
+
+function api.getEquippedChicken()
+    local chicken = getEquippedChicken()
+    return cloneTable(chicken)
+end
+
+function api.getGenome()
+    local chicken = getEquippedChicken()
+    return cloneTable(getGenome(chicken))
+end
+
+-- Read-only live snapshot for UI.
+-- Unlike state.rarity/state.genome, this does not wait for a UFO cycle/captureTarget().
+-- It lets the Events UI show the currently equipped chicken while WAITING_FOR_UFO.
+function api.getEquippedSnapshot()
+    local chicken, roster = getEquippedChicken()
+    if type(chicken) ~= "table" then
+        return nil
+    end
+
+    local genome = getGenome(chicken)
+    local rarity = getRarity(chicken)
+    local cap = getGeneCap(chicken)
+
+    return {
+        equippedId = normalizeId(chicken.id or (roster and roster.activeId)),
+        equippedName = chicken.nickname or chicken.name or chicken.displayName or chicken.type,
+        rarity = rarity,
+        genome = cloneTable(genome),
+        geneCap = cap,
+        genesMax = areGenesMaxFor(chicken, genome),
+    }
+end
+
+function api.getGeneCap()
+    local chicken = getEquippedChicken()
+    return getGeneCap(chicken)
+end
+
+function api.areGenesMax()
+    local chicken = getEquippedChicken()
+    return areGenesMaxFor(chicken, getGenome(chicken))
+end
+
+function api.runOnce()
+    if destroyed then return false end
+    if not dependencyReady() then
+        state.lastError = "DEPENDENCY_MISSING"
+        setState("ERROR")
+        return false
+    end
+    if not subscribeMutation() then
+        state.lastError = "CHICKEN_MUTATED_SUBSCRIBE_FAILED"
+        setState("ERROR")
+        return false
+    end
+    local wasEnabled = state.enabled
+    state.enabled = true
+    workerToken += 1
+    local token = workerToken
+    state.workerGeneration = token
+    local startingCount = state.cycleCountThisEvent
+    local deadline = now() + CYCLE_MUTATION_TIMEOUT_SECONDS + 3
+    while not destroyed and state.enabled and workerToken == token and now() < deadline do
+        local ok, err = pcall(processOnce, token)
+        if not ok then
+            state.lastError = tostring(err)
+            state.lastCycleFailure = tostring(err)
+            state.stopContinuousThisEvent = true
+            setState("ERROR")
+            break
+        end
+        if state.cycleCountThisEvent > startingCount or state.stopContinuousThisEvent or state.genesMax then
+            break
+        end
+        task.wait(0.35)
+    end
+    if not wasEnabled then state.enabled = false end
+    return state.cycleCountThisEvent > startingCount
+end
+
+function api.setTowerHooks(hooks)
+    return setTowerHooks(hooks)
+end
+
+function api.printSummary()
+    local snapshot = api.getStatus()
+    print("[UNO UFO] SUMMARY")
+    print("[UNO UFO] enabled = " .. tostring(snapshot.enabled))
+    print("[UNO UFO] state = " .. tostring(snapshot.state))
+    print("[UNO UFO] ufoActive = " .. tostring(snapshot.ufoActive))
+    print("[UNO UFO] equippedId = " .. tostring(snapshot.equippedId))
+    print("[UNO UFO] equippedName = " .. tostring(snapshot.equippedName))
+    print("[UNO UFO] rarity = " .. tostring(snapshot.rarity))
+    print("[UNO UFO] geneCap = " .. tostring(snapshot.geneCap))
+    print("[UNO UFO] genesMax = " .. tostring(snapshot.genesMax))
+    print("[UNO UFO] mutationSubscribed = " .. tostring(snapshot.mutationSubscribed))
+    print("[UNO UFO] mutationSeen = " .. tostring(snapshot.mutationSeen))
+    print("[UNO UFO] rosterRefreshSeen = " .. tostring(snapshot.rosterRefreshSeen))
+    print("[UNO UFO] genomeRefreshSeen = " .. tostring(snapshot.genomeRefreshSeen))
+    print("[UNO UFO] genomeChanged = " .. tostring(snapshot.genomeChanged))
+    print("[UNO UFO] cycleDoneThisEvent = " .. tostring(snapshot.cycleDoneThisEvent))
+    print("[UNO UFO] EVENT-END RECOVERY")
+    print("[UNO UFO] sentToChaosThisCycle = " .. tostring(snapshot.sentToChaosThisCycle))
+    print("[UNO UFO] recoveryNeeded = " .. tostring(snapshot.recoveryNeeded))
+    print("[UNO UFO] recoveryInProgress = " .. tostring(snapshot.recoveryInProgress))
+    print("[UNO UFO] recoveryAttempted = " .. tostring(snapshot.recoveryAttempted))
+    print("[UNO UFO] recoveryConfirmed = " .. tostring(snapshot.recoveryConfirmed))
+    print("[UNO UFO] interruptedCycleNumber = " .. tostring(snapshot.interruptedCycleNumber))
+    print("[UNO UFO] interruptedTargetId = " .. tostring(snapshot.interruptedTargetId))
+    print("[UNO UFO] lastRecoveryResult = " .. tostring(snapshot.lastRecoveryResult))
+    print("[UNO UFO] lastRecoveryFailure = " .. tostring(snapshot.lastRecoveryFailure))
+    print("[UNO UFO] CONTINUOUS UFO ASCENSION")
+    print("[UNO UFO] cycleCountThisEvent = " .. tostring(snapshot.cycleCountThisEvent))
+    print("[UNO UFO] cycleInProgress = " .. tostring(snapshot.cycleInProgress))
+    print("[UNO UFO] currentCycleNumber = " .. tostring(snapshot.currentCycleNumber))
+    print("[UNO UFO] cycleStartedAt = " .. tostring(snapshot.cycleStartedAt))
+    print("[UNO UFO] lastCycleCompletedAt = " .. tostring(snapshot.lastCycleCompletedAt))
+    print("[UNO UFO] lastCycleResult = " .. tostring(snapshot.lastCycleResult))
+    print("[UNO UFO] lastCycleFailure = " .. tostring(snapshot.lastCycleFailure))
+    print("[UNO UFO] lastRarityChange = " .. tostring(snapshot.lastRarityChange))
+    print("[UNO UFO] lastResultCategory = " .. tostring(snapshot.lastResultCategory))
+    if type(snapshot.genome) == "table" then
+        for _, key in ipairs(GENE_KEYS) do
+            print(string.format("[UNO UFO] %s (%s) = %s", key, GENE_LABELS[key], tostring(snapshot.genome[key])))
+        end
+    end
+    print("[UNO UFO] lastGeneChange = " .. tostring(snapshot.lastGeneChange))
+    print("[UNO UFO] lastError = " .. tostring(snapshot.lastError))
+end
+
+function api.destroy()
+    if destroyed then return true end
+    destroyed = true
+    state.enabled = false
+    workerToken += 1
+    state.workerGeneration = workerToken
+    disconnectMutation()
+    state.requestInFlight = false
+    state.ufoActive = false
+    state.cycleDoneThisEvent = false
+    state.mutationSeen = false
+    state.rosterRefreshSeen = false
+    state.genomeRefreshSeen = false
+    state.genomeChanged = false
+    state.cycleInProgress = false
+    state.stopContinuousThisEvent = true
+    state.recoveryInProgress = false
+    state.cycleCountThisEvent = 0
+    state.firstCycleCompleted = false
+    state.repeatAttemptedThisEvent = false
+    state.freeRepeatConfirmed = nil
+    state.repeatAttemptStartedAt = nil
+    state.lastRepeatFailure = nil
+    state.firstCycleGenome = nil
+    state.secondCycleGenome = nil
+    state.state = "DISABLED"
+    if env.UNO_UFO_ASCENSION == api then env.UNO_UFO_ASCENSION = nil end
+    return true
+end
+
+env.UNO_UFO_ASCENSION = api
+
+log("STANDALONE V3.2 START")
+log("resolving dependencies...")
+log("LiveEventController = " .. (LiveEventController and "READY" or "MISSING"))
+log("ChickenController = " .. (ChickenController and type(ChickenController.setOrder) == "function" and "READY" or "MISSING"))
+log("DataController = " .. (DataController and type(DataController.roster) == "function" and "READY" or "MISSING"))
+log("ChickenMutated = " .. (Remotes and Remotes.defs and Remotes.defs.ChickenMutated and "READY" or "MISSING"))
+if not dependencyReady() then
+    state.lastError = "DEPENDENCY_MISSING"
+    setState("ERROR")
+else
+    setState("WAITING_FOR_UFO")
+end
+log("STANDALONE V3.2 READY (6S POST-TOWER + HARD NORMAL_FARM UFO HOLD)")
+
+return api
+
+end
+
+local __unoUfoApi = __unoRunStage("08 UFO ASCENSION V3.2", __unoStage08)
+
+do
+    local env = (getgenv and getgenv()) or _G
+    local runtime = env.UNO_HUB_RUNTIME
+    local ufoApi = env.UNO_UFO_ASCENSION
+    local phase9 = env.UNO_HUB_PHASE9
+    local integration = phase9 and type(phase9.getIntegration) == "function" and phase9.getIntegration() or env.UNO_HUB_PRIORITY_INTEGRATION
+    local coordinator = integration and type(integration.getCoordinator) == "function" and integration.getCoordinator() or nil
+
+    if type(ufoApi) == "table" then
+        if type(runtime) == "table" and type(ufoApi.setTowerHooks) == "function" then
+            ufoApi.setTowerHooks({
+                isTowerActive = function()
+                    return type(runtime.isTowerActive) == "function" and runtime.isTowerActive() == true
+                end,
+                isTowerExited = function()
+                    return type(runtime.isTowerExited) == "function" and runtime.isTowerExited() == true
+                end,
+                surrender = function()
+                    return type(runtime.requestTowerSurrender) == "function" and runtime.requestTowerSurrender() or false
+                end,
+            })
+            print("[UNO UFO MERGE] Tower hooks READY")
+        end
+
+        -- Apply persisted UFO goal preferences before restoring the toggle.
+        local ufoPrefs = runtime and runtime.State and runtime.State.ufoAscension
+        if type(ufoPrefs) == "table" then
+            if type(ufoApi.setGoal) == "function" then pcall(ufoApi.setGoal, ufoPrefs.goal or "max_genes") end
+            if type(ufoApi.setTargetRarity) == "function" then pcall(ufoApi.setTargetRarity, ufoPrefs.targetRarity or "secret") end
+        end
+
+        -- Restore saved UFO toggle only after the standalone backend exists.
+        local toggles = runtime and runtime.State and runtime.State.toggles
+        if type(toggles) == "table" and toggles.autoUfoAscension == true then
+            local reached = false
+            local reason = nil
+            if type(ufoApi.isGoalReached) == "function" then
+                local okGoal, value, why = pcall(ufoApi.isGoalReached)
+                reached = okGoal and value == true
+                reason = why
+            end
+            if reached then
+                toggles.autoUfoAscension = false
+                if type(runtime.setToggleVisual) == "function" then
+                    pcall(runtime.setToggleVisual, "autoUfoAscension", false)
+                end
+                if runtime.State.ufoAscension then
+                    runtime.State.ufoAscension.status = tostring(reason or "Goal Reached")
+                    runtime.State.ufoAscension.phase = "GOAL_REACHED"
+                    runtime.State.ufoAscension.goalReached = true
+                end
+            elseif type(ufoApi.setEnabled) == "function" then
+                pcall(ufoApi.setEnabled, true)
+            end
+        end
+    end
+
+    -- Lightweight coordinator bridge. Uses the existing coordinator directly;
+    -- does not create or replace a second coordinator.
+    if type(coordinator) == "table" and type(ufoApi) == "table" then
+        task.spawn(function()
+            local requested = false
+            local lastCritical = nil
+            local lastHoldAssertAt = 0
+            local normalFarmHardHeld = false
+
+            local function setNormalFarmHardHold(value)
+                value = value == true
+                if normalFarmHardHeld == value then return end
+                normalFarmHardHeld = value
+
+                if type(runtime) == "table"
+                    and type(runtime.setNormalFarmCoordinatorPaused) == "function" then
+                    pcall(runtime.setNormalFarmCoordinatorPaused, "UFO_EVENT_HOLD", value)
+                    print("[UNO UFO MERGE] NORMAL_FARM hard hold=" .. tostring(value))
+                end
+            end
+
+            while env.UNO_UFO_ASCENSION == ufoApi do
+                local want = false
+                local critical = false
+                local enabledNow = type(ufoApi.isEnabled) == "function" and ufoApi.isEnabled() == true
+                local eventActiveNow = false
+                if enabledNow and type(ufoApi.isUfoEventActive) == "function" then
+                    local okEvent, activeValue = pcall(ufoApi.isUfoEventActive)
+                    eventActiveNow = okEvent and activeValue == true
+                end
+                if type(ufoApi.getStatus) == "function" then
+                    local ok, st = pcall(ufoApi.getStatus)
+                    if ok and type(st) == "table" then
+                        critical = st.recoveryInProgress == true
+                        -- Authoritative hold: event activity is read directly from
+                        -- LiveEventController through isUfoEventActive(), so the hold
+                        -- cannot drop during CYCLE_COMPLETE / WAITING_FOR_NEXT_CYCLE.
+                        want = enabledNow and (eventActiveNow or critical)
+                    end
+                end
+
+                -- HARD RULE:
+                -- while UFO backend is enabled and the UFO event is active (or
+                -- interrupted-cycle recovery is still running), NORMAL_FARM must
+                -- remain paused even if EVENT_CAPSULE/HOT_EGG temporarily owns the
+                -- coordinator. This pause reason is independent of owner changes.
+                setNormalFarmHardHold(want)
+
+                if want and not requested then
+                    requested = true
+                    lastCritical = critical
+                    if type(coordinator.setFeatureEnabled) == "function" then
+                        pcall(coordinator.setFeatureEnabled, "UFO_ASCENSION", true)
+                    end
+                    if type(coordinator.requestPriority) == "function" then
+                        pcall(coordinator.requestPriority, "UFO_ASCENSION", 75, { enabled = true, critical = critical })
+                    end
+                    print("[UNO UFO MERGE] requested UFO_ASCENSION priority=75")
+                elseif want and requested then
+                    if critical ~= lastCritical and type(coordinator.setCritical) == "function" then
+                        lastCritical = critical
+                        pcall(coordinator.setCritical, "UFO_ASCENSION", critical)
+                    end
+
+                    -- Keep UFO requested for the WHOLE active UFO event. This is
+                    -- intentionally independent of cycle state. Higher-priority
+                    -- event owners (HOT_EGG / EVENT_CAPSULE) may still preempt,
+                    -- but NORMAL_FARM must not resume while UFO remains active.
+                    if type(coordinator.getCurrentOwner) == "function"
+                        and type(coordinator.requestPriority) == "function"
+                        and (now() - lastHoldAssertAt) >= 0.75 then
+
+                        local okOwner, owner = pcall(coordinator.getCurrentOwner)
+                        if okOwner and (owner == "NORMAL_FARM" or owner == nil) then
+                            lastHoldAssertAt = now()
+                            pcall(coordinator.requestPriority, "UFO_ASCENSION", 75, {
+                                enabled = true,
+                                critical = critical,
+                            })
+                            print("[UNO UFO MERGE] hold reassert UFO_ASCENSION over " .. tostring(owner))
+                        end
+                    end
+                elseif not want and requested then
+                    requested = false
+                    lastCritical = nil
+                    if type(coordinator.releasePriority) == "function" then
+                        pcall(coordinator.releasePriority, "UFO_ASCENSION")
+                    end
+                    print("[UNO UFO MERGE] released UFO_ASCENSION")
+                end
+                task.wait(0.25)
+            end
+            if requested and type(coordinator.releasePriority) == "function" then
+                pcall(coordinator.releasePriority, "UFO_ASCENSION")
+            end
+            setNormalFarmHardHold(false)
+        end)
+    else
+        warn("[UNO UFO MERGE] Coordinator bridge unavailable; UFO backend still isolated")
+    end
+end
+
+local __unoEnv = (getgenv and getgenv()) or _G
+if type(__unoEnv.UNO_HUB_PHASE9) == "table" then
+    __unoEnv.UNO_HUB = __unoEnv.UNO_HUB_PHASE9
+end
+
+local __status = __unoEnv.UNO_HUB_PHASE9
+    and type(__unoEnv.UNO_HUB_PHASE9.getStatus) == "function"
+    and __unoEnv.UNO_HUB_PHASE9.getStatus()
+    or "UNAVAILABLE"
+
+print("[UNO HUB] FINAL MERGE STATUS =", tostring(__status))
+if __status == "READY" then
+    print("[UNO HUB] FINAL MERGE READY")
+    task.defer(function()
+        local pg = game:GetService("Players").LocalPlayer and game:GetService("Players").LocalPlayer:FindFirstChildOfClass("PlayerGui")
+        if not pg then return end
+        local old = pg:FindFirstChild("UNO_HUB_READY_TOAST"); if old then old:Destroy() end
+        local sg = Instance.new("ScreenGui"); sg.Name = "UNO_HUB_READY_TOAST"; sg.ResetOnSpawn = false; sg.IgnoreGuiInset = true; sg.DisplayOrder = 250; sg.Parent = pg
+        local vp = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(1280,720); local w = math.floor(math.clamp(vp.X - 28, 250, 330))
+        local f = Instance.new("Frame"); f.AnchorPoint = Vector2.new(1,1); f.Position = UDim2.new(1,-14,1,-14); f.Size = UDim2.fromOffset(w,72); f.BackgroundColor3 = Color3.fromRGB(25,26,31); f.BorderSizePixel = 0; f.Parent = sg
+        local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0,10); c.Parent = f
+        local stripe = Instance.new("Frame"); stripe.Size = UDim2.fromOffset(4,72); stripe.BackgroundColor3 = Color3.fromRGB(93,205,135); stripe.BorderSizePixel = 0; stripe.Parent = f
+        local t = Instance.new("TextLabel"); t.BackgroundTransparency = 1; t.Position = UDim2.fromOffset(22,9); t.Size = UDim2.new(1,-50,0,22); t.Text = "UNO HUB Loaded"; t.Font = Enum.Font.GothamBold; t.TextSize = 13; t.TextColor3 = Color3.fromRGB(242,242,242); t.TextXAlignment = Enum.TextXAlignment.Left; t.Parent = f
+        local b = Instance.new("TextLabel"); b.BackgroundTransparency = 1; b.Position = UDim2.fromOffset(22,32); b.Size = UDim2.new(1,-44,0,22); b.Text = "All systems are ready"; b.Font = Enum.Font.Gotham; b.TextSize = 11; b.TextColor3 = Color3.fromRGB(180,180,188); b.TextXAlignment = Enum.TextXAlignment.Left; b.Parent = f
+        local x = Instance.new("TextButton"); x.BackgroundTransparency = 1; x.Position = UDim2.new(1,-30,0,7); x.Size = UDim2.fromOffset(24,24); x.Text = "×"; x.Font = Enum.Font.GothamBold; x.TextSize = 15; x.TextColor3 = Color3.fromRGB(130,130,140); x.Parent = f
+        x.MouseButton1Click:Connect(function() if sg.Parent then sg:Destroy() end end)
+        task.delay(4, function() if sg.Parent then sg:Destroy() end end)
+    end)
+else
+    warn("[UNO HUB] FINAL MERGE NOT READY; check [UNO Bootstrap] BLOCKED reason above")
+end
+
+return __unoFinalApi or __unoEnv.UNO_HUB_PHASE9

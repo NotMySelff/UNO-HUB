@@ -1,8 +1,7 @@
 -- UNO HUB EXPERIMENTAL BUILD
--- Auto Collect Scrap V0.1
--- GitHub test build only; Recycler automation intentionally not included yet.
--- Added: nearest Scrap detection + linear tween + scrapCarry pickup confirmation.
--- Source baseline: 2026-08-29 latest user-provided UNO HUB baseline.
+-- Auto Collect Scrap V0.2 REGISTER-SAFE
+-- Fix: avoids adding many Stage01 top-level locals (Luau register-limit risk).
+-- GitHub testing only. Recycler is still intentionally excluded.
 
 --[[
     UNO HUB
@@ -183,13 +182,8 @@ local State = {
     autoFavorite = { status = "DISABLED" },
     autoUnfavorite = { status = "DISABLED" },
     autoCollectScrap = {
-        enabled = false,
-        phase = "DISABLED",
-        generation = 0,
-        target = nil,
-        lastCarry = 0,
-        collected = 0,
-        lastError = nil,
+        enabled = false, phase = "DISABLED", generation = 0,
+        target = nil, lastCarry = 0, collected = 0, lastError = nil,
     },
     movementOwner = "NONE",
     toggles = {
@@ -1715,7 +1709,7 @@ local function moveTo(targetPos, mode, owner)
     if State.movementOwner == owner then State.movementOwner = "NONE" end
     return true
 end
-local MOVEMENT_RANK = { NONE = 0, AUTO_COLLECT_SCRAP = 1, AUTO_COLLECT_EGG = 1, AUTO_HOT_EGG = 2, PIT_EXIT = 3, METEOR_AVOIDANCE = 4 }
+local MOVEMENT_RANK = { NONE = 0, AUTO_COLLECT_EGG = 1, AUTO_HOT_EGG = 2, PIT_EXIT = 3, METEOR_AVOIDANCE = 4 }
 local function movementCanRun(priority)
     local owner = State.movementOwner or "NONE"
     if owner == "NONE" or owner == priority then return true end
@@ -5903,50 +5897,47 @@ end
 
 
 --------------------------------------------------------------------
--- EXPERIMENTAL AUTO COLLECT SCRAP V0.1
--- Research-backed assumptions used here:
---   Workspace.PitScrap
---   StackKind == "scrap"
---   pickup radius ~= 4 studs
---   LocalPlayer attribute "scrapCarry" confirms a pickup
--- V0.1 intentionally DOES NOT automate Recycler/deposit yet.
+-- EXPERIMENTAL AUTO COLLECT SCRAP V0.2 (REGISTER-SAFE)
+-- No extra top-level local functions/constants are introduced here.
+-- This matters because Stage01 is already close to Luau's 200-local limit.
 --------------------------------------------------------------------
-local ACS = State.autoCollectScrap
-local ACS_OWNER = "AUTO_COLLECT_SCRAP"
-local ACS_SPEED = 48
-local ACS_PICKUP_RADIUS = 4
-local ACS_TARGET_OFFSET_Y = 1.5
-local acsTween = nil
+State._scrapCollector = {
+    tween = nil,
+    owner = "AUTO_COLLECT_SCRAP",
+    speed = 48,
+    pickupRadius = 4,
+    offsetY = 1.5,
+}
 
-local function acsSetPhase(phase, err)
-    ACS.phase = phase
-    ACS.lastError = err
+State._scrapCollector.setPhase = function(phase, err)
+    State.autoCollectScrap.phase = phase
+    State.autoCollectScrap.lastError = err
 end
 
-local function acsCancelMovement()
-    if acsTween then
-        pcall(function() acsTween:Cancel() end)
-        acsTween = nil
+State._scrapCollector.cancelMovement = function()
+    if State._scrapCollector.tween then
+        pcall(function() State._scrapCollector.tween:Cancel() end)
+        State._scrapCollector.tween = nil
     end
-    if State.movementOwner == ACS_OWNER then
+    if State.movementOwner == State._scrapCollector.owner then
         State.movementOwner = "NONE"
     end
 end
 
-local function acsIsScrap(inst)
-    return inst
+State._scrapCollector.isScrap = function(inst)
+    return inst ~= nil
         and inst.Parent ~= nil
         and inst:IsA("BasePart")
         and inst:GetAttribute("StackKind") == "scrap"
 end
 
-local function acsNearestScrap(hrp)
+State._scrapCollector.nearest = function(hrp)
     local pit = Workspace:FindFirstChild("PitScrap")
-    if not pit then return nil, math.huge end
-
-    local best, bestDist = nil, math.huge
+    if not pit then return nil end
+    local best = nil
+    local bestDist = math.huge
     for _, inst in ipairs(pit:GetChildren()) do
-        if acsIsScrap(inst) then
+        if State._scrapCollector.isScrap(inst) then
             local dist = (hrp.Position - inst.Position).Magnitude
             if dist < bestDist then
                 best = inst
@@ -5954,173 +5945,153 @@ local function acsNearestScrap(hrp)
             end
         end
     end
-    return best, bestDist
+    return best
 end
 
-local function acsTweenTo(target, myGen)
+State._scrapCollector.moveTo = function(target, myGen)
     local hrp = getHRP()
-    if not hrp or not acsIsScrap(target) then return false, "invalid target" end
-
-    -- Do not steal movement from another UNO feature.
-    if State.movementOwner ~= "NONE" and State.movementOwner ~= ACS_OWNER then
+    if not hrp or not State._scrapCollector.isScrap(target) then
+        return false, "invalid target"
+    end
+    if State.movementOwner ~= "NONE" and State.movementOwner ~= State._scrapCollector.owner then
         return false, "movement busy"
     end
 
-    acsCancelMovement()
-    State.movementOwner = ACS_OWNER
+    State._scrapCollector.cancelMovement()
+    State.movementOwner = State._scrapCollector.owner
 
-    local destination = target.Position + Vector3.new(0, ACS_TARGET_OFFSET_Y, 0)
+    local destination = target.Position + Vector3.new(0, State._scrapCollector.offsetY, 0)
     local distance = (hrp.Position - destination).Magnitude
-
-    -- Already inside pickup range: do not create a pointless tween.
-    if distance <= (ACS_PICKUP_RADIUS - 0.5) then
-        if State.movementOwner == ACS_OWNER then State.movementOwner = "NONE" end
+    if distance <= (State._scrapCollector.pickupRadius - 0.5) then
+        State.movementOwner = "NONE"
         return true
     end
 
-    local duration = math.max(0.08, distance / ACS_SPEED)
-    acsTween = TweenService:Create(
+    State._scrapCollector.tween = TweenService:Create(
         hrp,
-        TweenInfo.new(duration, Enum.EasingStyle.Linear, Enum.EasingDirection.Out),
+        TweenInfo.new(
+            math.max(0.08, distance / State._scrapCollector.speed),
+            Enum.EasingStyle.Linear,
+            Enum.EasingDirection.Out
+        ),
         { CFrame = CFrame.new(destination) }
     )
-    acsTween:Play()
+    State._scrapCollector.tween:Play()
 
-    local finished = false
-    local conn
-    conn = acsTween.Completed:Connect(function()
-        finished = true
-    end)
+    while State.autoCollectScrap.enabled
+        and State.autoCollectScrap.generation == myGen
+        and State._scrapCollector.isScrap(target)
+        and State.movementOwner == State._scrapCollector.owner do
 
-    while ACS.enabled and ACS.generation == myGen and not finished do
-        if not acsIsScrap(target) then break end
         local currentHrp = getHRP()
         if not currentHrp then break end
-
-        -- Once inside the game's pickup radius, let the server-side pickup
-        -- observation happen instead of forcing travel to the exact center.
-        if (currentHrp.Position - target.Position).Magnitude <= (ACS_PICKUP_RADIUS - 0.25) then
+        if (currentHrp.Position - target.Position).Magnitude <= (State._scrapCollector.pickupRadius - 0.25) then
             break
         end
-
-        -- A higher-priority UNO movement feature may take ownership.
-        if State.movementOwner ~= ACS_OWNER then break end
         task.wait(0.03)
     end
 
-    if conn then conn:Disconnect() end
-    if acsTween then
-        pcall(function() acsTween:Cancel() end)
-        acsTween = nil
-    end
-    if State.movementOwner == ACS_OWNER then
-        State.movementOwner = "NONE"
-    end
-
-    return ACS.enabled and ACS.generation == myGen
+    State._scrapCollector.cancelMovement()
+    return State.autoCollectScrap.enabled and State.autoCollectScrap.generation == myGen
 end
 
-local function acsWorker(myGen)
-    acsSetPhase("SEARCHING")
-    ACS.lastCarry = tonumber(LocalPlayer:GetAttribute("scrapCarry")) or 0
+State._scrapCollector.worker = function(myGen)
+    State._scrapCollector.setPhase("SEARCHING")
+    State.autoCollectScrap.lastCarry = tonumber(LocalPlayer:GetAttribute("scrapCarry")) or 0
 
-    while ACS.enabled and ACS.generation == myGen do
+    while State.autoCollectScrap.enabled and State.autoCollectScrap.generation == myGen do
         local hrp = getHRP()
+
         if not hrp then
-            acsSetPhase("WAITING_CHARACTER")
+            State._scrapCollector.setPhase("WAITING_CHARACTER")
             task.wait(0.5)
-            continue
-        end
-
-        -- Yield while another UNO movement feature owns movement.
-        if State.movementOwner ~= "NONE" and State.movementOwner ~= ACS_OWNER then
-            acsSetPhase("WAITING_MOVEMENT")
+        elseif State.movementOwner ~= "NONE" and State.movementOwner ~= State._scrapCollector.owner then
+            State._scrapCollector.setPhase("WAITING_MOVEMENT")
             task.wait(0.15)
-            continue
-        end
-
-        local target, distance = acsNearestScrap(hrp)
-        ACS.target = target
-
-        if not target then
-            acsSetPhase("NO_SCRAP")
-            task.wait(0.35)
-            continue
-        end
-
-        local beforeCarry = tonumber(LocalPlayer:GetAttribute("scrapCarry")) or 0
-        acsSetPhase("MOVING")
-        local ok, reason = acsTweenTo(target, myGen)
-
-        if not ACS.enabled or ACS.generation ~= myGen then break end
-        if not ok then
-            if reason ~= "movement busy" then ACS.lastError = reason end
-            task.wait(0.12)
-            continue
-        end
-
-        acsSetPhase("VERIFYING_PICKUP")
-        local deadline = os.clock() + 1.5
-        local confirmed = false
-
-        while ACS.enabled and ACS.generation == myGen and os.clock() < deadline do
-            local carry = tonumber(LocalPlayer:GetAttribute("scrapCarry")) or 0
-            if carry > beforeCarry then
-                ACS.lastCarry = carry
-                ACS.collected += math.max(1, carry - beforeCarry)
-                confirmed = true
-                break
-            end
-
-            -- If another player took it, immediately retarget.
-            if not acsIsScrap(target) then
-                break
-            end
-            task.wait(0.05)
-        end
-
-        ACS.target = nil
-        if confirmed then
-            acsSetPhase("COLLECTED")
-            task.wait(0.05)
         else
-            acsSetPhase("RETARGETING")
-            task.wait(0.10)
+            local target = State._scrapCollector.nearest(hrp)
+            State.autoCollectScrap.target = target
+
+            if not target then
+                State._scrapCollector.setPhase("NO_SCRAP")
+                task.wait(0.35)
+            else
+                local beforeCarry = tonumber(LocalPlayer:GetAttribute("scrapCarry")) or 0
+                State._scrapCollector.setPhase("MOVING")
+                local moved, reason = State._scrapCollector.moveTo(target, myGen)
+
+                if not moved then
+                    if reason ~= "movement busy" then
+                        State.autoCollectScrap.lastError = reason
+                    end
+                    task.wait(0.12)
+                elseif State.autoCollectScrap.enabled and State.autoCollectScrap.generation == myGen then
+                    State._scrapCollector.setPhase("VERIFYING_PICKUP")
+                    local deadline = os.clock() + 1.5
+                    local confirmed = false
+
+                    while State.autoCollectScrap.enabled
+                        and State.autoCollectScrap.generation == myGen
+                        and os.clock() < deadline do
+
+                        local carry = tonumber(LocalPlayer:GetAttribute("scrapCarry")) or 0
+                        if carry > beforeCarry then
+                            State.autoCollectScrap.lastCarry = carry
+                            State.autoCollectScrap.collected += math.max(1, carry - beforeCarry)
+                            confirmed = true
+                            break
+                        end
+                        if not State._scrapCollector.isScrap(target) then break end
+                        task.wait(0.05)
+                    end
+
+                    State.autoCollectScrap.target = nil
+                    if confirmed then
+                        State._scrapCollector.setPhase("COLLECTED")
+                        task.wait(0.05)
+                    else
+                        State._scrapCollector.setPhase("RETARGETING")
+                        task.wait(0.10)
+                    end
+                end
+            end
         end
     end
 
-    ACS.target = nil
-    acsCancelMovement()
-    if not ACS.enabled then
-        acsSetPhase("DISABLED")
+    State.autoCollectScrap.target = nil
+    State._scrapCollector.cancelMovement()
+    if not State.autoCollectScrap.enabled then
+        State._scrapCollector.setPhase("DISABLED")
     end
 end
 
-local function setAutoCollectScrap(on)
+State._scrapCollector.setEnabled = function(on)
     on = on == true
     State.toggles.autoCollectScrap = on
-    ACS.enabled = on
-    ACS.generation += 1
-    acsCancelMovement()
+    State.autoCollectScrap.enabled = on
+    State.autoCollectScrap.generation += 1
+    State._scrapCollector.cancelMovement()
 
     if on then
-        ACS.collected = 0
-        ACS.lastCarry = tonumber(LocalPlayer:GetAttribute("scrapCarry")) or 0
-        ACS.lastError = nil
-        acsSetPhase("SEARCHING")
-        local myGen = ACS.generation
+        State.autoCollectScrap.collected = 0
+        State.autoCollectScrap.lastCarry = tonumber(LocalPlayer:GetAttribute("scrapCarry")) or 0
+        State.autoCollectScrap.lastError = nil
+        State._scrapCollector.setPhase("SEARCHING")
+        local myGen = State.autoCollectScrap.generation
         task.spawn(function()
-            local ok, err = pcall(acsWorker, myGen)
-            if not ok and ACS.enabled and ACS.generation == myGen then
-                ACS.lastError = tostring(err)
-                acsSetPhase("ERROR", tostring(err))
+            local ok, err = pcall(State._scrapCollector.worker, myGen)
+            if not ok
+                and State.autoCollectScrap.enabled
+                and State.autoCollectScrap.generation == myGen then
+                State.autoCollectScrap.lastError = tostring(err)
+                State._scrapCollector.setPhase("ERROR", tostring(err))
                 log("WARN", "[Auto Collect Scrap] " .. tostring(err))
             end
         end)
         log("INFO", "Experimental Auto Collect Scrap enabled")
     else
-        ACS.target = nil
-        acsSetPhase("DISABLED")
+        State.autoCollectScrap.target = nil
+        State._scrapCollector.setPhase("DISABLED")
         log("INFO", "Experimental Auto Collect Scrap disabled")
     end
     return true
@@ -6678,7 +6649,7 @@ do
             applyToggle("autoFarmRebirth", setAutoFarmRebirth)
             applyToggle("autoRebirth", setAutoRebirth)
             if AutoCollectEggFeature then applyToggle("autoCollectEgg", function(v) AutoCollectEggFeature.setAutoCollectEggs(v) end) end
-            applyToggle("autoCollectScrap", setAutoCollectScrap)
+            applyToggle("autoCollectScrap", State._scrapCollector.setEnabled)
             applyToggle("autoHotEgg", setAutoHotEgg)
             if HatchFeature then applyToggle("autoHatch", function(v) HatchFeature.setAutoHatch(v) end) end
             if IncubatorClaimFeature then applyToggle("autoIncubatorClaim", function(v) IncubatorClaimFeature.setAutoIncubatorClaim(v) end) end
@@ -8470,7 +8441,7 @@ safeBuild("Auto Farm", function()
             AutoCollectEggFeature.setAutoCollectEggs(v)
         end)
     end
-    settingRow(farmCard, 9, "Auto Collect Scrap", nil, "autoCollectScrap", setAutoCollectScrap)
+    settingRow(farmCard, 9, "Auto Collect Scrap", nil, "autoCollectScrap", State._scrapCollector.setEnabled)
     local farmPhaseLabel = row(farmCard, 10, "Farm Status")
     local autoTowerStatusLabel = row(farmCard, 11, "Auto Tower Status")
 
